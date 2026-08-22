@@ -6,3 +6,6 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow.workspace = true
+crypto_box = { version = "0.9", features = ["seal"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
