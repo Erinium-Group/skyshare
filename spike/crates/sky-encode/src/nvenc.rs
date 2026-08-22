@@ -31,16 +31,18 @@ use anyhow::{anyhow, Context};
 use nvidia_video_codec_sdk::sys::nvEncodeAPI::{
     GUID, NVENCAPI_VERSION, NVENCSTATUS, NVENC_INFINITE_GOPLENGTH, NV_ENC_AV1_PROFILE_MAIN_GUID,
     NV_ENC_BUFFER_FORMAT, NV_ENC_BUFFER_USAGE, NV_ENC_CODEC_AV1_GUID, NV_ENC_CODEC_H264_GUID,
-    NV_ENC_CODEC_HEVC_GUID, NV_ENC_CONFIG, NV_ENC_CONFIG_VER, NV_ENC_CREATE_BITSTREAM_BUFFER,
-    NV_ENC_CREATE_BITSTREAM_BUFFER_VER, NV_ENC_DEVICE_TYPE, NV_ENC_H264_PROFILE_HIGH_444_GUID,
-    NV_ENC_H264_PROFILE_HIGH_GUID, NV_ENC_HEVC_PROFILE_FREXT_GUID, NV_ENC_INITIALIZE_PARAMS,
-    NV_ENC_INITIALIZE_PARAMS_VER, NV_ENC_INPUT_RESOURCE_TYPE, NV_ENC_LOCK_BITSTREAM,
-    NV_ENC_LOCK_BITSTREAM_VER, NV_ENC_MAP_INPUT_RESOURCE, NV_ENC_MAP_INPUT_RESOURCE_VER,
-    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS, NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
-    NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_VER,
-    NV_ENC_PIC_STRUCT, NV_ENC_PIC_TYPE, NV_ENC_PRESET_CONFIG, NV_ENC_PRESET_CONFIG_VER,
-    NV_ENC_PRESET_P4_GUID, NV_ENC_REGISTER_RESOURCE, NV_ENC_REGISTER_RESOURCE_VER,
-    NV_ENC_TUNING_INFO,
+    NV_ENC_CODEC_HEVC_GUID, NV_ENC_CONFIG, NV_ENC_CONFIG_H264_VUI_PARAMETERS, NV_ENC_CONFIG_VER,
+    NV_ENC_CREATE_BITSTREAM_BUFFER, NV_ENC_CREATE_BITSTREAM_BUFFER_VER, NV_ENC_DEVICE_TYPE,
+    NV_ENC_H264_PROFILE_HIGH_444_GUID, NV_ENC_H264_PROFILE_HIGH_GUID,
+    NV_ENC_HEVC_PROFILE_FREXT_GUID, NV_ENC_INITIALIZE_PARAMS, NV_ENC_INITIALIZE_PARAMS_VER,
+    NV_ENC_INPUT_RESOURCE_TYPE, NV_ENC_LOCK_BITSTREAM, NV_ENC_LOCK_BITSTREAM_VER,
+    NV_ENC_MAP_INPUT_RESOURCE, NV_ENC_MAP_INPUT_RESOURCE_VER, NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS,
+    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER, NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_FLAGS,
+    NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT, NV_ENC_PIC_TYPE,
+    NV_ENC_PRESET_CONFIG, NV_ENC_PRESET_CONFIG_VER, NV_ENC_PRESET_P4_GUID,
+    NV_ENC_REGISTER_RESOURCE, NV_ENC_REGISTER_RESOURCE_VER, NV_ENC_TUNING_INFO,
+    NV_ENC_VUI_COLOR_PRIMARIES, NV_ENC_VUI_MATRIX_COEFFS, NV_ENC_VUI_TRANSFER_CHARACTERISTIC,
+    NV_ENC_VUI_VIDEO_FORMAT,
 };
 use sky_capture::CapturedFrame;
 use windows::core::Interface;
@@ -192,10 +194,16 @@ impl NvencEncoder {
                 h264.set_enableIntraRefresh(1);
                 h264.intraRefreshPeriod = periode_refresh;
                 h264.intraRefreshCnt = compte_refresh;
-                // SPS/PPS répétés : un flux brut reste décodable même si le
-                // début manque (utile pour ffprobe comme pour un spectateur
-                // qui rejoint en cours de route).
+                // ATTENTION à la sémantique : NVENC émet SPS/PPS « à chaque
+                // image IDR », et `idrPeriod = INFINITE` n'en produit qu'une.
+                // Ce drapeau est donc SANS EFFET ici — mesuré : 1 seul SPS sur
+                // 1201 images. On le garde parce qu'il redevient correct si
+                // `idrPeriod` change, mais il ne rend PAS le flux rejoignable
+                // en cours de route. Voir le rapport de la Tâche 3 : le jalon 2
+                // devra passer par `NV_ENC_PIC_FLAG_OUTPUT_SPSPPS` ou
+                // `nvEncGetSequenceParams` pour un spectateur qui arrive tard.
                 h264.set_repeatSPSPPS(1);
+                appliquer_vui(&mut h264.h264VUIParameters);
             } else if codec_guid == NV_ENC_CODEC_HEVC_GUID {
                 let hevc = &mut config.encodeCodecConfig.hevcConfig;
                 hevc.idrPeriod = NVENC_INFINITE_GOPLENGTH;
@@ -207,6 +215,7 @@ impl NvencEncoder {
                 hevc.intraRefreshPeriod = periode_refresh;
                 hevc.intraRefreshCnt = compte_refresh;
                 hevc.set_repeatSPSPPS(1);
+                appliquer_vui(&mut hevc.hevcVUIParameters);
             } else {
                 let av1 = &mut config.encodeCodecConfig.av1Config;
                 av1.idrPeriod = NVENC_INFINITE_GOPLENGTH;
@@ -214,6 +223,18 @@ impl NvencEncoder {
                 av1.set_enableIntraRefresh(1);
                 av1.intraRefreshPeriod = periode_refresh;
                 av1.intraRefreshCnt = compte_refresh;
+                // Équivalent AV1 de `repeatSPSPPS`, posé pour que les trois
+                // codecs soient configurés de la même façon — condition d'un
+                // comparatif honnête en Tâche 4. Même réserve qu'en H.264 :
+                // lié aux images clés, donc sans effet sous GOP infini.
+                av1.set_repeatSeqHdr(1);
+                // AV1 porte la description couleur dans des champs propres,
+                // pas dans une structure VUI.
+                av1.colorPrimaries = NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_BT709;
+                av1.transferCharacteristics =
+                    NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SRGB;
+                av1.matrixCoefficients = NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_BT470BG;
+                av1.colorRange = 1;
             }
         }
 
@@ -255,8 +276,12 @@ impl NvencEncoder {
         Ok(())
     }
 
-    /// Encode une image capturée. `Ok(None)` si NVENC réclame plus d'entrée
-    /// (ne devrait pas arriver avec `frameIntervalP = 1`).
+    /// Encode une image capturée.
+    ///
+    /// Rend toujours `Some` en cas de succès : avec `frameIntervalP = 1`, une
+    /// image entrée donne une image sortie. L'`Option` est conservée parce que
+    /// l'interface du jalon la déclare, et qu'un encodeur à images B en aurait
+    /// besoin.
     pub fn encode(&mut self, frame: &CapturedFrame) -> anyhow::Result<Option<EncodedPacket>> {
         anyhow::ensure!(
             frame.width == self.width && frame.height == self.height,
@@ -280,17 +305,26 @@ impl NvencEncoder {
             }
         };
 
-        let resultat = self.encoder_mappee(mappee, t0);
+        let resultat = self.encoder_mappee(mappee);
 
         // Libération systématique, y compris sur erreur : démapper d'abord,
         // désenregistrer ensuite (l'inverse est refusé par NVENC).
         let demappage = self.demapper(mappee);
         let desenregistrement = self.desenregistrer(enregistree);
 
-        let paquet = resultat?;
+        let (data, is_keyframe) = resultat?;
         demappage?;
         desenregistrement?;
-        Ok(paquet)
+
+        // Le chronomètre s'arrête ici, et pas plus tôt : `encode_us` doit
+        // couvrir l'appel entier, démappage et désenregistrement compris. Ces
+        // deux libérations sont un coût réel par image du chemin tel qu'il est
+        // écrit ; les exclure gonflerait la conclusion de Q2 du bon côté.
+        Ok(Some(EncodedPacket {
+            data,
+            is_keyframe,
+            encode_us: t0.elapsed().as_micros() as u64,
+        }))
     }
 
     /// Enregistre la texture auprès de NVENC. Aucune copie : NVENC prend une
@@ -342,11 +376,10 @@ impl NvencEncoder {
     }
 
     /// Soumet l'image mappée puis récupère les octets du flux.
-    fn encoder_mappee(
-        &mut self,
-        mappee: *mut c_void,
-        t0: Instant,
-    ) -> anyhow::Result<Option<EncodedPacket>> {
+    /// Soumet l'image et rend les octets du flux plus l'indicateur d'image clé.
+    /// Le chronométrage est fait par l'appelant, pour couvrir aussi la
+    /// libération des ressources.
+    fn encoder_mappee(&mut self, mappee: *mut c_void) -> anyhow::Result<(Vec<u8>, bool)> {
         let encode_picture = nvenc_fn!(self.api, nvEncEncodePicture);
         let mut pic = NV_ENC_PIC_PARAMS {
             version: NV_ENC_PIC_PARAMS_VER,
@@ -366,9 +399,16 @@ impl NvencEncoder {
         self.frame_index += 1;
 
         if statut == NVENCSTATUS::NV_ENC_ERR_NEED_MORE_INPUT {
-            // Configuration sans image B ni lookahead : ne devrait pas se
-            // produire. On rend la main sans flux plutôt que d'échouer.
-            return Ok(None);
+            // Impossible avec la configuration actuelle (ni image B, ni
+            // lookahead). Si ça survient, c'est que la configuration a changé —
+            // et l'appelant s'apprête alors à démapper une ressource que NVENC
+            // considère encore retenue, ce que le SDK interdit. On échoue fort
+            // plutôt que de transformer une violation d'invariant en silence.
+            anyhow::bail!(
+                "NVENC a renvoyé NV_ENC_ERR_NEED_MORE_INPUT : la configuration \
+                 de l'encodeur retient désormais des images, le démappage \
+                 immédiat n'est plus valide (revoir frameIntervalP / lookahead)"
+            );
         }
         nvenc_sys::check(statut)
             .with_context(|| format!("nvEncEncodePicture : {}", self.derniere_erreur()))?;
@@ -409,11 +449,7 @@ impl NvencEncoder {
         nvenc_sys::check(unsafe { unlock(self.encoder, self.bitstream) })
             .context("nvEncUnlockBitstream")?;
 
-        Ok(Some(EncodedPacket {
-            data,
-            is_keyframe,
-            encode_us: t0.elapsed().as_micros() as u64,
-        }))
+        Ok((data, is_keyframe))
     }
 
     /// Message d'erreur détaillé du driver, pour les diagnostics.
@@ -462,6 +498,29 @@ impl Drop for NvencEncoder {
             self.encoder = ptr::null_mut();
         }
     }
+}
+
+/// Décrit au décodeur la conversion couleur que NVENC a appliquée.
+///
+/// L'entrée est du RGB (`ARGB`) : c'est NVENC qui le convertit en YUV sur le
+/// GPU. Sans ces champs, le décodeur *devine* la matrice et la plage, et une
+/// mauvaise interprétation se lit comme un défaut de qualité de l'encodeur
+/// alors qu'elle n'est qu'un défaut de signalisation.
+///
+/// Valeurs alignées sur la correspondance qu'applique FFmpeg (`nvenc.c`) pour
+/// une entrée RGB : primaires BT.709, transfert sRGB, matrice BT.601
+/// (`BT470BG`), plage pleine. La plage est vérifiée expérimentalement par
+/// aller-retour ; la matrice ne l'est pas — voir le rapport de la Tâche 3.
+fn appliquer_vui(vui: &mut NV_ENC_CONFIG_H264_VUI_PARAMETERS) {
+    vui.videoSignalTypePresentFlag = 1;
+    vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT::NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+    // Le RGB d'un écran occupe 0-255, pas 16-235.
+    vui.videoFullRangeFlag = 1;
+    vui.colourDescriptionPresentFlag = 1;
+    vui.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_BT709;
+    vui.transferCharacteristics =
+        NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SRGB;
+    vui.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_BT470BG;
 }
 
 /// GUID de codec, GUID de profil et `chromaFormatIDC` (1 = 4:2:0, 3 = 4:4:4).

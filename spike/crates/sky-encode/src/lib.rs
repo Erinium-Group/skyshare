@@ -13,7 +13,9 @@ pub use nvenc::NvencEncoder;
 pub struct EncodedPacket {
     pub data: Vec<u8>,
     pub is_keyframe: bool,
-    /// Durée de l'appel complet à `NvencEncoder::encode` (enregistrement de la
-    /// ressource, encodage, récupération des octets), en microsecondes.
+    /// Durée de l'appel complet à `NvencEncoder::encode`, en microsecondes :
+    /// enregistrement de la ressource, mappage, encodage, récupération des
+    /// octets, **puis démappage et désenregistrement**. Rien du chemin par
+    /// image n'est laissé hors de la mesure.
     pub encode_us: u64,
 }
