@@ -22,4 +22,8 @@ libloading = "0.8"
 # besoin. Les types/enums/GUID de `sys` restent utilisés normalement — ce
 # sont des définitions, elles ne demandent aucun lien.
 nvidia-video-codec-sdk = { version = "0.4.0", features = ["ci-check"] }
+# La session NVENC s'ouvre sur le device Direct3D 11 de la capture et encode
+# ses textures : sky-encode dépend donc du type `CapturedFrame`.
+sky-capture = { version = "0.0.0", path = "../sky-capture" }
 thiserror = "2.0.20"
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D11"] }

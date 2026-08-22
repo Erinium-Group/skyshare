@@ -10,3 +10,14 @@ anyhow.workspace = true
 clap = { version = "4.6.6", features = ["derive"] }
 sky-capture = { version = "0.0.0", path = "../sky-capture" }
 sky-encode = { version = "0.0.0", path = "../sky-encode" }
+
+# Nécessaire à la source d'images synthétique (texture D3D11 animée) et à
+# l'identification de l'adaptateur derrière le device de capture.
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+]

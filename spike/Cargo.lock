@@ -201,7 +201,9 @@ dependencies = [
  "cudarc",
  "libloading",
  "nvidia-video-codec-sdk",
+ "sky-capture",
  "thiserror",
+ "windows",
 ]
 
 [[package]]
@@ -216,6 +218,7 @@ dependencies = [
  "clap",
  "sky-capture",
  "sky-encode",
+ "windows",
 ]
 
 [[package]]
