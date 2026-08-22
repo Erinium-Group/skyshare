@@ -1,0 +1,19 @@
+[package]
+name = "sky-encode"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+# "dynamic-loading" : charge nvcuda.dll au runtime (déjà présent avec le driver),
+# évite d'installer le CUDA Toolkit juste pour son fichier .lib de link.
+cudarc = { version = "0.16", default-features = false, features = ["driver", "dynamic-loading"] }
+# "ci-check" : le NVIDIA Video Codec SDK (nvEncodeAPI.lib / nvcuvid.lib) n'est
+# PAS installé sur cette machine — c'est un package séparé du driver et du CUDA
+# Toolkit. Sans "ci-check", le build.rs de cette crate panique même pour les
+# tests purs de `pick_best`. Avec "ci-check", la crate compile et les tests
+# passent, mais le lien final de sky-probe échoue encore (NvEncodeAPICreateInstance
+# introuvable) : voir task-1-report.md pour le détail et le chemin de déblocage.
+nvidia-video-codec-sdk = { version = "0.4.0", features = ["ci-check"] }
+thiserror = "2.0.20"
