@@ -32,3 +32,6 @@ desktop.ini
 # Sorties de build
 /build
 /release
+
+# Espace de travail SDD (jetable)
+.superpowers/
