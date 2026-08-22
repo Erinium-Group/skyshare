@@ -9,11 +9,16 @@ anyhow.workspace = true
 # "dynamic-loading" : charge nvcuda.dll au runtime (déjà présent avec le driver),
 # évite d'installer le CUDA Toolkit juste pour son fichier .lib de link.
 cudarc = { version = "0.16", default-features = false, features = ["driver", "dynamic-loading"] }
-# "ci-check" : le NVIDIA Video Codec SDK (nvEncodeAPI.lib / nvcuvid.lib) n'est
-# PAS installé sur cette machine — c'est un package séparé du driver et du CUDA
-# Toolkit. Sans "ci-check", le build.rs de cette crate panique même pour les
-# tests purs de `pick_best`. Avec "ci-check", la crate compile et les tests
-# passent, mais le lien final de sky-probe échoue encore (NvEncodeAPICreateInstance
-# introuvable) : voir task-1-report.md pour le détail et le chemin de déblocage.
+libloading = "0.8"
+# "ci-check" : configuration nominale, pas un contournement. On n'utilise
+# jamais le lien statique de cette crate contre nvEncodeAPI.lib/nvcuvid.lib
+# (fournis par le NVIDIA Video Codec SDK, un package à part du driver et du
+# CUDA Toolkit) : nvEncodeAPICreateInstance est en réalité livrée dans
+# nvEncodeAPI64.dll aux côtés du driver, et on la charge dynamiquement nous-
+# mêmes via `libloading` (comme FFmpeg/OBS), avant d'appeler tout le reste de
+# NVENC à travers la table de pointeurs qu'elle remplit. "ci-check" empêche
+# juste le build.rs de cette crate d'exiger un lien statique dont on n'a pas
+# besoin. Les types/enums/GUID de `sys` restent utilisés normalement — ce
+# sont des définitions, elles ne demandent aucun lien.
 nvidia-video-codec-sdk = { version = "0.4.0", features = ["ci-check"] }
 thiserror = "2.0.20"
