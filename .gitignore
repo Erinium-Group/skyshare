@@ -1,0 +1,34 @@
+# Rust
+/target
+**/target
+Cargo.lock.bak
+
+# Node / Tauri front-end
+node_modules
+dist
+.vite
+*.tsbuildinfo
+
+# Tauri
+src-tauri/target
+src-tauri/gen
+
+# Secrets et configuration locale
+.env
+.env.local
+*.pem
+*.key
+
+# Système
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Éditeurs
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# Sorties de build
+/build
+/release
