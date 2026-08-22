@@ -77,54 +77,13 @@ pub enum EncodeError {
 
 use std::ffi::c_void;
 
-use libloading::{Library, Symbol};
 use nvidia_video_codec_sdk::sys::nvEncodeAPI::{
-    GUID, NVENCAPI_VERSION, NVENCSTATUS, NV_ENCODE_API_FUNCTION_LIST,
-    NV_ENCODE_API_FUNCTION_LIST_VER, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_AV1_GUID,
+    NVENCAPI_VERSION, NVENCSTATUS, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_AV1_GUID,
     NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_DEVICE_TYPE,
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS, NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
 };
 
-/// Nom de la DLL livrée avec le driver NVIDIA (`C:\Windows\System32`),
-/// distincte du NVIDIA Video Codec SDK : le SDK ne fournit qu'une bibliothèque
-/// d'import statique (`nvEncodeAPI.lib`), pas le code exécutable. FFmpeg et
-/// OBS ne lient pas non plus contre ce .lib : ils font `LoadLibrary` puis
-/// `GetProcAddress("NvEncodeAPICreateInstance")` au runtime — même approche
-/// ici, via la crate `libloading`.
-const NVENC_DLL: &str = "nvEncodeAPI64.dll";
-
-type CreateInstanceFn = unsafe extern "C" fn(*mut NV_ENCODE_API_FUNCTION_LIST) -> NVENCSTATUS;
-
-// `nvidia-video-codec-sdk` déclare `NvEncodeAPICreateInstance` et
-// `NvEncodeAPIGetMaxSupportedVersion` dans un bloc `extern "C"` lié
-// statiquement (son module `safe`, que `probe_hardware` n'utilise jamais —
-// voir plus bas). En release, le lien final élimine ce code mort ; en debug
-// sur MSVC, l'initialiseur paresseux de `safe::api::ENCODE_API` (une
-// `lazy_static`) reste dans le binaire et ces deux symboles restent exigés,
-// même si rien ne les appelle jamais. On leur fournit donc nous-mêmes une
-// définition ici : cela satisfait le lien, et elle ne s'exécute jamais tant
-// que `sky_encode` n'appelle pas `nvidia_video_codec_sdk::safe::Encoder`
-// (ce que `probe_hardware` ne fait pas — il charge NVENC dynamiquement).
-#[no_mangle]
-extern "C" fn NvEncodeAPICreateInstance(
-    _function_list: *mut NV_ENCODE_API_FUNCTION_LIST,
-) -> NVENCSTATUS {
-    unreachable!("nvidia_video_codec_sdk::safe::Encoder n'est jamais utilisé par sky-encode")
-}
-
-#[no_mangle]
-extern "C" fn NvEncodeAPIGetMaxSupportedVersion(_version: *mut u32) -> NVENCSTATUS {
-    unreachable!("nvidia_video_codec_sdk::safe::Encoder n'est jamais utilisé par sky-encode")
-}
-
-/// Convertit un code retour NVENC en `Result`.
-fn check(status: NVENCSTATUS) -> Result<(), EncodeError> {
-    if status == NVENCSTATUS::NV_ENC_SUCCESS {
-        Ok(())
-    } else {
-        Err(EncodeError::Nvenc(status))
-    }
-}
+use crate::nvenc_sys::{self, NvencApi};
 
 /// Interroge NVENC pour savoir ce que la carte sait réellement encoder.
 ///
@@ -132,39 +91,20 @@ fn check(status: NVENCSTATUS) -> Result<(), EncodeError> {
 /// On demande donc à NVENC lui-même, codec par codec, quels formats d'entrée
 /// il accepte — c'est la seule source de vérité.
 ///
-/// Implémentation directe sur `sys` (pas `safe::Encoder` de la crate) :
-/// `safe::Encoder` appelle `NvEncodeAPICreateInstance` via un bloc
-/// `extern "C"` lié statiquement, ce qui exigerait `nvEncodeAPI.lib` du SDK
-/// NVIDIA — absent ici, et absent de tout runner CI qui n'installe pas ce
-/// SDK. En réalité, `NvEncodeAPICreateInstance` est livrée dans
-/// `nvEncodeAPI64.dll`, aux côtés du driver (vérifié présent dans
-/// `System32`). On la charge donc dynamiquement, puis on appelle tout le
-/// reste de NVENC à travers la table de pointeurs qu'elle remplit : c'est le
-/// *seul* symbole qui a besoin d'être résolu.
+/// La plomberie FFI (chargement de la DLL, table de fonctions, énumération
+/// brute des GUID/formats) vit dans [`crate::nvenc_sys`] — partagée avec la
+/// future session d'encodage D3D11. Ici, on ne fait qu'ouvrir une session sur
+/// le device CUDA et traduire les GUID + formats bruts en [`Codec`].
 pub fn probe_hardware() -> Result<EncoderCaps, EncodeError> {
     let cuda = cudarc::driver::CudaContext::new(0)?;
     let gpu_name = cuda.name().unwrap_or_else(|_| "GPU NVIDIA".into());
 
-    // `lib` doit rester en vie tant qu'on appelle un pointeur de fonction qui
-    // pointe dedans — y compris ceux de `function_list`, remplie par un appel
-    // à travers `lib`.
-    let lib = unsafe { Library::new(NVENC_DLL) }?;
-    let create_instance: Symbol<CreateInstanceFn> =
-        unsafe { lib.get(b"NvEncodeAPICreateInstance\0") }?;
-
-    let mut function_list = NV_ENCODE_API_FUNCTION_LIST {
-        version: NV_ENCODE_API_FUNCTION_LIST_VER,
-        ..Default::default()
-    };
-    check(unsafe { create_instance(&mut function_list) })?;
+    let api = NvencApi::load()?;
+    let fns = api.functions();
 
     const MSG: &str = "la table de fonctions NVENC doit être remplie par NvEncodeAPICreateInstance";
-    let open_session_ex = function_list.nvEncOpenEncodeSessionEx.expect(MSG);
-    let get_guid_count = function_list.nvEncGetEncodeGUIDCount.expect(MSG);
-    let get_guids = function_list.nvEncGetEncodeGUIDs.expect(MSG);
-    let get_format_count = function_list.nvEncGetInputFormatCount.expect(MSG);
-    let get_formats = function_list.nvEncGetInputFormats.expect(MSG);
-    let destroy_encoder = function_list.nvEncDestroyEncoder.expect(MSG);
+    let open_session_ex = fns.nvEncOpenEncodeSessionEx.expect(MSG);
+    let destroy_encoder = fns.nvEncDestroyEncoder.expect(MSG);
 
     // Ouvre une session NVENC sur le contexte CUDA (cast valide : `CUcontext`
     // est un pointeur opaque, exactement ce que NVENC attend comme `device`).
@@ -176,71 +116,17 @@ pub fn probe_hardware() -> Result<EncoderCaps, EncodeError> {
         ..Default::default()
     };
     let mut session: *mut c_void = std::ptr::null_mut();
-    check(unsafe { open_session_ex(&mut session_params, &mut session) })?;
+    nvenc_sys::check(unsafe { open_session_ex(&mut session_params, &mut session) })?;
 
-    let codecs = enumerate_codecs(
-        session,
-        get_guid_count,
-        get_guids,
-        get_format_count,
-        get_formats,
-    );
+    let raw = nvenc_sys::enumerate_codec_formats(session, fns);
 
     // Ferme la session dans tous les cas — que l'énumération ait réussi ou non.
-    let destroy_result = check(unsafe { destroy_encoder(session) });
-    let codecs = codecs?;
+    let destroy_result = nvenc_sys::check(unsafe { destroy_encoder(session) });
+    let raw = raw?;
     destroy_result?;
 
-    Ok(EncoderCaps { gpu_name, codecs })
-}
-
-/// Énumère les GUID de codecs supportés, puis pour chacun les formats
-/// d'entrée, pour en déduire la liste de [`Codec`] réellement disponibles.
-fn enumerate_codecs(
-    session: *mut c_void,
-    get_guid_count: unsafe extern "C" fn(*mut c_void, *mut u32) -> NVENCSTATUS,
-    get_guids: unsafe extern "C" fn(*mut c_void, *mut GUID, u32, *mut u32) -> NVENCSTATUS,
-    get_format_count: unsafe extern "C" fn(*mut c_void, GUID, *mut u32) -> NVENCSTATUS,
-    get_formats: unsafe extern "C" fn(
-        *mut c_void,
-        GUID,
-        *mut NV_ENC_BUFFER_FORMAT,
-        u32,
-        *mut u32,
-    ) -> NVENCSTATUS,
-) -> Result<Vec<Codec>, EncodeError> {
-    let mut guid_count = 0u32;
-    check(unsafe { get_guid_count(session, &mut guid_count) })?;
-    let mut guids = vec![GUID::default(); guid_count as usize];
-    let mut actual_guid_count = 0u32;
-    check(unsafe {
-        get_guids(
-            session,
-            guids.as_mut_ptr(),
-            guid_count,
-            &mut actual_guid_count,
-        )
-    })?;
-    guids.truncate(actual_guid_count as usize);
-
     let mut codecs = Vec::new();
-    for guid in guids {
-        let mut format_count = 0u32;
-        check(unsafe { get_format_count(session, guid, &mut format_count) })?;
-        let mut formats =
-            vec![NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_UNDEFINED; format_count as usize];
-        let mut actual_format_count = 0u32;
-        check(unsafe {
-            get_formats(
-                session,
-                guid,
-                formats.as_mut_ptr(),
-                format_count,
-                &mut actual_format_count,
-            )
-        })?;
-        formats.truncate(actual_format_count as usize);
-
+    for (guid, formats) in raw {
         let a_444 = formats.iter().any(|f| {
             matches!(
                 *f,
@@ -261,7 +147,7 @@ fn enumerate_codecs(
         }
     }
 
-    Ok(codecs)
+    Ok(EncoderCaps { gpu_name, codecs })
 }
 
 #[cfg(test)]
