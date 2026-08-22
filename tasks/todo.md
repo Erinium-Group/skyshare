@@ -23,7 +23,21 @@
 
 ## Prochaines étapes
 1. [x] Questions de cadrage
-2. [ ] Choix de l'approche transport (en cours)
-3. [ ] Design validé section par section
-4. [ ] Spec → `docs/superpowers/specs/`
-5. [ ] Plan d'implémentation (skill writing-plans)
+2. [x] Choix de l'approche transport — WebRTC via `str0m`, congestion réécrite
+3. [x] Design validé section par section (6/6)
+4. [x] Document d'architecture écrit et commité (`docs/superpowers/specs/2026-08-22-skyshare-architecture-design.md`)
+5. [x] Relecture et validation du document d'architecture
+6. [x] Plan d'implémentation du jalon 0 → `docs/superpowers/plans/2026-08-22-jalon-0-faisabilite.md`
+7. [ ] **Exécution du jalon 0** ← prochaine étape
+
+## Jalons
+| # | Jalon | État |
+|---|-------|------|
+| 0 | Faisabilité (capture + encode + P2P) | **plan prêt, 9 tâches** |
+| 1 | Fondations (Discord, amis, listes) | à faire |
+| 2 | Premier pixel (partage 1-à-1) | à faire |
+| 3 | Qualité (simulcast, profils) | à faire |
+| 4 | Lecteur (multi-flux, zoom, audio) | à faire |
+| 5 | Public (liens, salle d'attente) | à faire |
+| 6 | Distribution (CI, installateurs) | à faire |
+| 7 | Mac et Linux | à faire |
