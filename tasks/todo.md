@@ -28,7 +28,8 @@
 4. [x] Document d'architecture écrit et commité (`docs/superpowers/specs/2026-08-22-skyshare-architecture-design.md`)
 5. [x] Relecture et validation du document d'architecture
 6. [x] Plan d'implémentation du jalon 0 → `docs/superpowers/plans/2026-08-22-jalon-0-faisabilite.md`
-7. [ ] **Exécution du jalon 0** ← prochaine étape
+7. [ ] **Exécution du jalon 0** ← en cours
+   - [x] Tâche 1 : Workspace et détection matérielle — BLOCKED sur Step 9 (lien final `sky-probe`). `pick_best` testé TDD (5/5, GREEN) et `probe_hardware` compile contre l'API réelle de la crate ; manque le NVIDIA Video Codec SDK (`nvEncodeAPI.lib`/`nvcuvid.lib`, hors CUDA Toolkit) pour valider sur la RTX 4060. Détail : `.superpowers/sdd/2026-08-22-jalon-0-faisabilite/task-1-report.md`.
 
 ## Jalons
 | # | Jalon | État |
