@@ -1,0 +1,11 @@
+# Lie statiquement la bibliothèque d'exécution C de Microsoft.
+#
+# Sans cela, `sky-probe.exe` importe VCRUNTIME140.dll (tirée par le code C
+# d'aws-lc-rs, la cryptographie de str0m). Cette DLL appartient au
+# « redistribuable Visual C++ », pas à Windows : une machine qui ne l'a jamais
+# installée refuse de lancer l'exécutable. Or le test de la question Q5 consiste
+# précisément à envoyer ce fichier à quelqu'un dont on ne sait rien.
+#
+# Vérifié : avec ce réglage, l'exécutable n'importe plus que des DLL du système.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1088,6 +1088,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64",
+ "rand_core 0.6.4",
  "serde",
  "serde_json",
  "sky-crypto",
@@ -1101,7 +1102,9 @@ dependencies = [
  "anyhow",
  "clap",
  "sky-capture",
+ "sky-crypto",
  "sky-encode",
+ "sky-net",
  "windows",
 ]
 

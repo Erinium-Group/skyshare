@@ -1,0 +1,73 @@
+# Test SkyShare — 5 minutes
+
+Salut, et merci de tester. Aucune installation, aucun compte, rien à
+configurer. Tu lances un fichier, tu copies deux blocs de texte, c'est fini.
+
+## Ce que ça fait
+
+Ton ordinateur et le mien essaient de se parler **directement**, sans passer par
+le serveur de qui que ce soit. C'est la promesse de SkyShare, et personne ne sait
+encore si elle tient : ça dépend de vos deux box Internet. Ce test répond à cette
+question, et à rien d'autre.
+
+## Ce que ça envoie, et ce que ça n'envoie pas
+
+Le programme envoie **deux choses seulement** :
+
+1. Une question à un serveur public de Google ou de Cloudflare, pour lui demander
+   « quelle adresse vois-tu de moi ? ». C'est la seule façon de savoir comment
+   te joindre depuis l'extérieur. Cette question ne contient rien sur toi.
+2. Un bloc de texte que **tu me renvoies toi-même**, à la main. Il contient
+   l'adresse réseau de ton ordinateur, chiffrée : je suis le seul à pouvoir la
+   lire, parce qu'elle est verrouillée avec une clé que seul mon programme
+   possède.
+
+Ce que le programme ne fait **pas** : il ne lit aucun fichier, ne capture aucun
+écran, n'ouvre aucune fenêtre, n'installe rien, ne démarre avec Windows, ne
+touche à aucun réglage. Il ne s'écrit nulle part sur ton disque. Quand il se
+ferme, il n'en reste rien. Tu peux supprimer le fichier après le test.
+
+Pendant ce test, aucune image de ton écran n'est capturée ni transmise.
+
+## Marche à suivre
+
+1. Télécharge `sky-probe.exe` et mets-le où tu veux, par exemple sur le Bureau.
+2. Ouvre un terminal dans ce dossier : clic droit sur le dossier →
+   « Ouvrir dans le Terminal ».
+3. Tape ceci, puis Entrée :
+
+       .\sky-probe.exe view
+
+4. Je t'envoie un long bloc de texte qui commence par `SKY1:`. Copie-le **en
+   entier**, colle-le dans le terminal (clic droit = coller), puis Entrée.
+5. Le programme t'affiche à son tour un bloc `SKY1:`. Renvoie-le-moi **en
+   entier**, d'un seul bloc, sans le couper.
+6. Attends. En moins de dix secondes, l'écran affiche `CONNECTÉ` ou `ÉCHEC`.
+
+Envoie-moi une capture d'écran du résultat, quel qu'il soit.
+
+## « Windows a protégé votre ordinateur »
+
+Ce message va apparaître, et c'est normal : le fichier n'est pas signé
+électroniquement, parce que la signature coûte plusieurs centaines d'euros par an
+et que ce programme est un brouillon qui ne sortira jamais de ce test.
+
+Pour passer outre : clique sur **« Informations complémentaires »**, puis sur
+**« Exécuter quand même »**.
+
+Ton antivirus peut aussi râler, pour la même raison. Si tu n'es pas à l'aise avec
+ça, dis-le-moi simplement — c'est une réaction saine, et je ne t'en voudrai pas
+une seconde.
+
+## Si ça échoue
+
+**Un échec m'apprend autant qu'un succès.** Ce test existe justement parce que je
+ne sais pas si ça marche. Si l'écran affiche `ÉCHEC`, ce n'est ni ta faute ni un
+problème de ton ordinateur : cela veut dire que l'une de nos deux box refuse les
+connexions directes, et c'est exactement l'information que je cherche. Elle
+décidera de la suite du projet.
+
+Donc surtout, ne recommence pas dix fois en pensant avoir mal fait : envoie-moi
+la capture, échec compris, et c'est parfait comme ça.
+
+Merci.

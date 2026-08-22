@@ -1,7 +1,9 @@
 mod cmd_capture;
 mod cmd_codecs;
 mod cmd_encode;
+mod cmd_host;
 mod cmd_hw;
+mod cmd_view;
 
 use clap::{Parser, Subcommand};
 
@@ -50,6 +52,16 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         monitor: usize,
     },
+    /// Émet : produit le bloc d'offre, puis pousse des données au spectateur (Q5)
+    Host {
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+    },
+    /// Reçoit : consomme le bloc d'offre, renvoie sa réponse, mesure le débit (Q5)
+    View {
+        #[arg(long, default_value_t = 30)]
+        seconds: u64,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -70,5 +82,7 @@ fn main() -> anyhow::Result<()> {
             bitrate_mbps,
             monitor,
         } => cmd_codecs::run(seconds, bitrate_mbps, monitor),
+        Cmd::Host { seconds } => cmd_host::run(seconds),
+        Cmd::View { seconds } => cmd_view::run(seconds),
     }
 }
