@@ -31,7 +31,11 @@ pub fn run(seconds: u64, monitor: usize) -> anyhow::Result<()> {
     );
     println!(
         "Verdict          : {}",
-        if s.avg_fps >= 59.0 { "SUCCÈS" } else { "ÉCHEC" }
+        if s.avg_fps >= 59.0 {
+            "SUCCÈS"
+        } else {
+            "ÉCHEC"
+        }
     );
     Ok(())
 }

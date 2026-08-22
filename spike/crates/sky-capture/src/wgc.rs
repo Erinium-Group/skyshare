@@ -6,12 +6,12 @@ use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
 use windows::Graphics::DirectX::DirectXPixelFormat;
+use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11Texture2D, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
     D3D11_SDK_VERSION,
 };
-use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR, MONITORENUMPROC};
 use windows::Win32::System::WinRT::Direct3D11::{
@@ -19,7 +19,7 @@ use windows::Win32::System::WinRT::Direct3D11::{
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 
-use crate::{CapturedFrame, CaptureStats};
+use crate::{CaptureStats, CapturedFrame};
 
 pub struct WgcCapture {
     _item: GraphicsCaptureItem,
@@ -60,16 +60,16 @@ impl WgcCapture {
 
         // 2. Pont D3D11 -> WinRT, exigé par le frame pool.
         let dxgi: IDXGIDevice = d3d_device.cast()?;
-        let winrt_device = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
-            .context("pont WinRT")?;
+        let winrt_device =
+            unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }.context("pont WinRT")?;
         let winrt_device: windows::Graphics::DirectX::Direct3D11::IDirect3DDevice =
             winrt_device.cast()?;
 
         // 3. L'item de capture, obtenu via l'interface d'interop COM.
         let interop: IGraphicsCaptureItemInterop =
             windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(hmonitor) }
-            .context("CreateForMonitor")?;
+        let item: GraphicsCaptureItem =
+            unsafe { interop.CreateForMonitor(hmonitor) }.context("CreateForMonitor")?;
 
         let size = item.Size()?;
         let (width, height) = (size.Width as u32, size.Height as u32);
