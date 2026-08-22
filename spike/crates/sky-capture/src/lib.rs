@@ -1,14 +1,19 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+pub mod wgc;
+
+use std::time::Instant;
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+
+/// Une image capturée. La texture vit sur le GPU et n'est jamais copiée en RAM.
+pub struct CapturedFrame {
+    pub texture: ID3D11Texture2D,
+    pub width: u32,
+    pub height: u32,
+    pub captured_at: Instant,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CaptureStats {
+    pub frames: u64,
+    pub dropped: u64,
+    pub avg_fps: f32,
 }
