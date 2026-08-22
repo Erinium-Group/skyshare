@@ -395,15 +395,28 @@ maximale). Défaut : 40 ms.
 
 ### 8.1 Signature de code
 
-| OS | Sans signature | Coût pour l'éviter |
-|----|----------------|--------------------|
-| Linux | Aucun obstacle | 0 € |
-| Windows | Avertissement SmartScreen, contournable en deux clics | ~250-400 €/an, ou ~10 $/mois (Azure Trusted Signing) |
-| macOS | Gatekeeper bloque ; autorisation manuelle dans les Réglages Système | 99 $/an, incontournable |
+| OS | Niveau retenu | Coût | Expérience au premier lancement |
+|----|---------------|------|--------------------------------|
+| Linux | aucun | 0 € | Aucun obstacle |
+| Windows | aucun | 0 € | Avertissement SmartScreen, contournable en deux clics |
+| macOS | **signature ad-hoc** | **0 €** | Gatekeeper bloque une fois → Réglages Système → « Ouvrir quand même » |
 
-**Décision : sortie non signée.** Un certificat ne se justifie qu'à partir du moment
-où des inconnus téléchargent l'application. La somme de contrôle de chaque
-installateur est publiée sur la page de téléchargement.
+**Décision : sortie non signée, avec une exception obligatoire sur macOS.**
+
+La signature ad-hoc (`codesign -s -`, sans compte Apple, automatisable en CI) n'est
+pas optionnelle : sur Apple Silicon, un binaire arm64 dépourvu de toute signature est
+tué au démarrage par le système, sans message exploitable pour l'utilisateur. Elle ne
+supprime pas l'avertissement Gatekeeper, elle rend seulement l'application exécutable.
+
+La friction ne concerne que la **première** installation : les mises à jour livrées par
+l'updater intégré ne transitent pas par le navigateur, ne reçoivent donc pas l'attribut
+de quarantaine, et s'installent silencieusement.
+
+Les certificats payants (~250-400 €/an sur Windows ou ~10 $/mois via Azure Trusted
+Signing ; 99 $/an pour la notarisation Apple) ne se justifieront qu'à partir du moment
+où des inconnus téléchargeront l'application et abandonneront devant l'avertissement.
+
+La somme de contrôle de chaque installateur est publiée sur la page de téléchargement.
 
 ### 8.2 Construction automatique
 
