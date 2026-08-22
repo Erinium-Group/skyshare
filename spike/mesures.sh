@@ -14,10 +14,17 @@
 #   psnr/ssim aligne les paires par horodatage. Sans ce filtre, l'alignement
 #   image par image ne serait pas garanti. Avec, l'image k du flux decode
 #   est comparee a l'image k de la reference, par construction.
-# - trim=end_frame=901 sur la reference : les 4 flux codent tous exactement
-#   901 images (verifie), la reference brute en contient 1020 (marge de
-#   securite). Sans ce trim, le filtre "framesync" repete la derniere image
-#   du flux le plus court au-dela de son EOF pour continuer a produire des
+# - trim=start_frame=120:end_frame=901 sur les DEUX flux : les 4 flux codent
+#   tous exactement 901 images (verifie), la reference brute en contient 1020
+#   (marge de securite) -- d'ou end_frame=901 pour les deux. start_frame=120
+#   exclut le piege documente du tampon VBV a 1 image (rampe de qualite sur
+#   la premiere image cle, plateau atteint vers l'image 95 -- verifie sur les
+#   logs psnr_y). Applique aux DEUX flux (pas seulement la reference) pour
+#   que l'image k du flux garde sa correspondance avec l'image k de la
+#   reference apres coupe -- trim ne renumerote pas tout seul, c'est setpts
+#   juste apres qui repart de 0 sur le premier survivant des deux cotes.
+#   Sans le end_frame=901, le filtre "framesync" repete la derniere image du
+#   flux le plus court au-dela de son EOF pour continuer a produire des
 #   sorties -- contaminant la moyenne avec des paires non correspondantes.
 # - Conversion RGB->YUV444p de la reference : scale=out_range=full (matrice
 #   par defaut = bt601, coefficients identiques a BT.470BG que NVENC a
@@ -35,6 +42,7 @@ REF=cmp-reference.bgra
 W=2560
 H=1440
 FRAMES=901
+START=120   # exclut la rampe VBV -- voir commentaire de methode plus haut
 
 declare -A FICHIERS=(
   [h264-420]=cmp-h264-420.h264
@@ -57,7 +65,7 @@ for nom in "${!FICHIERS[@]}"; do
   echo "=== $nom ($f) ==="
 
   ffmpeg -v error -y -f rawvideo -pix_fmt bgra -video_size ${W}x${H} -framerate 60 -i "$REF" -i "$f" \
-    -lavfi "[0:v]trim=end_frame=${FRAMES},setpts=N/(60*TB),scale=out_range=full,format=yuv444p,split=2[r1][r2];[1:v]setpts=N/(60*TB),format=yuv444p,split=2[t1][t2];[r1][t1]psnr=stats_file=mesures/psnr-${nom}.log;[r2][t2]ssim=stats_file=mesures/ssim-${nom}.log" \
+    -lavfi "[0:v]trim=start_frame=${START}:end_frame=${FRAMES},setpts=N/(60*TB),scale=out_range=full,format=yuv444p,split=2[r1][r2];[1:v]trim=start_frame=${START}:end_frame=${FRAMES},setpts=N/(60*TB),format=yuv444p,split=2[t1][t2];[r1][t1]psnr=stats_file=mesures/psnr-${nom}.log;[r2][t2]ssim=stats_file=mesures/ssim-${nom}.log" \
     -f null -
 
   # Image a l'index 120 du flux decode (complete + recadree sur le panneau
@@ -70,7 +78,7 @@ for nom in "${!FICHIERS[@]}"; do
 done
 
 echo
-echo "=== Moyennes PSNR / SSIM par plan (901 images, hors 2 premieres secondes du piege VBV) ==="
+echo "=== Moyennes PSNR / SSIM par plan (images 120-900, 781 images -- rampe VBV des 2 premieres secondes reellement exclue) ==="
 printf "%-10s %8s %8s %8s %8s | %8s %8s %8s %8s\n" "codec" "psnr_y" "psnr_u" "psnr_v" "psnr_avg" "ssim_y" "ssim_u" "ssim_v" "ssim_all"
 for nom in h264-420 h264-444 hevc-444 av1-420; do
   awk -v c="$nom" '

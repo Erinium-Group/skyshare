@@ -1,5 +1,8 @@
 # Comparatif des 4 codecs à débit égal (Q3)
 
+*Corrigé après revue — voir « Note de correction » en fin de document pour
+le détail des 3 correctifs et les valeurs d'avant/après.*
+
 Vérifie par la mesure la thèse du projet : le 4:2:0 stocke la couleur au
 quart de la résolution et dégrade le texte fin, le 4:4:4 la garde pleine
 résolution et ne devrait pas avoir ce problème. Résultat : **oui, l'écart
@@ -64,10 +67,34 @@ sur-échantillonné par le décodeur, ce qui est *le même* traitement qu'un
 afficheur applique avant de poser les pixels à l'écran, donc une comparaison
 honnête plutôt qu'un artefact de méthode). Conversion RGB→YUV444p de la
 référence : `scale=out_range=full` (matrice par défaut = BT.601, coefficients
-identiques à BT.470BG que NVENC applique côté encodeur, plage complète —
-`videoFullRangeFlag=1` dans `nvenc.rs`). Vérifié sur un pixel rouge pur :
-Y=76, U=84, V=255, conforme à la formule BT.601 pleine plage (Y=76,2,
-U=84,9, V=255 après écrêtage).
+identiques à BT.470BG que NVENC est censée appliquer côté encodeur — c'est
+la matrice déclarée dans le VUI, `appliquer_vui()` dans `nvenc.rs`.) Plage
+vérifiée : `videoFullRangeFlag=1`, cohérent avec le test empirique
+d'aller-retour de la Tâche 3. Vérifié sur un pixel rouge pur : Y=76, U=84,
+V=255, conforme à la formule BT.601 pleine plage (Y=76,2, U=84,9, V=255
+après écrêtage) — **ce que ce test vérifie, c'est que `scale=out_range=full`
+fait bien la conversion BT.601 pleine plage qu'on lui demande, pas que
+NVENC utilise en interne exactement ces mêmes coefficients.**
+
+**Ce qui est vérifié et ce qui ne l'est pas, sur la matrice couleur.**
+`nvenc.rs` porte, depuis la Tâche 3, la réserve suivante : « la plage est
+vérifiée expérimentalement par aller-retour ; la matrice ne l'est pas ». Elle
+tient toujours ici — je n'ai pas revérifié empiriquement que le convertisseur
+RGB→YUV *interne* de NVENC utilise exactement BT.470BG plutôt qu'une autre
+matrice proche (BT.601/SMPTE170M partagent les mêmes coefficients, mais nos
+sources ne l'excluent pas absolument). Deux niveaux à distinguer :
+- **Valeurs absolues de PSNR/SSIM** (celles du tableau plus bas) : portent
+  cette réserve. Si le convertisseur interne de NVENC utilisait une matrice
+  différente de celle assumée pour reconstruire la référence, les valeurs
+  absolues seraient décalées.
+- **Écart relatif entre 4:2:0 et 4:4:4** (le résultat qui répond à Q3) :
+  n'en dépend pas. Le convertisseur RGB→YUV est le même étage, en amont du
+  choix de codec et du sous-échantillonnage — commun aux quatre flux. Un
+  biais de matrice, s'il existe, serait donc partagé par les quatre
+  mesures également, et se retrancherait dans la comparaison relative plutôt
+  que de la fausser. Une vérification empirique de la matrice interne
+  coûterait disproportionnellement cher pour ce que Q3 demande — non
+  entreprise pour cette raison, pas par négligence.
 
 **Piège rencontré et corrigé : l'alignement image par image n'est pas
 garanti par défaut.** `ffprobe` sur les quatre flux élémentaires (sans
@@ -144,10 +171,10 @@ quatre — condition de comparabilité), 10 Mbps de cible.
 
 | Codec | Débit réel | Octets | PSNR Y | PSNR U | PSNR V | SSIM Y | SSIM U | SSIM V | SSIM All |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| H.264 4:2:0 | 8,44 Mbps | 15 831 034 | 49,75 dB | **18,20 dB** | **19,28 dB** | 0,9976 | 0,7672 | 0,8326 | 0,8658 |
-| AV1 4:2:0 | 10,04 Mbps | 18 826 580 | 54,95 dB | **18,12 dB** | **19,27 dB** | 0,9994 | 0,7683 | 0,8346 | 0,8674 |
-| HEVC 4:4:4 | 9,37 Mbps | 17 577 575 | 71,97 dB | **56,81 dB** | **47,82 dB** | 0,9989 | 0,9988 | 0,9987 | 0,9988 |
-| H.264 4:4:4 ⚠ | 70,93 Mbps | 133 029 436 | 29,56 dB | 29,36 dB | 29,31 dB | 0,8935 | 0,9685 | 0,9655 | 0,9425 |
+| H.264 4:2:0 | 8,44 Mbps | 15 831 034 | 50,23 dB | **18,21 dB** | **19,29 dB** | 0,9989 | 0,7674 | 0,8328 | 0,8664 |
+| AV1 4:2:0 | 10,04 Mbps | 18 826 580 | 55,28 dB | **18,12 dB** | **19,27 dB** | 0,9996 | 0,7684 | 0,8347 | 0,8676 |
+| HEVC 4:4:4 | 9,37 Mbps | 17 577 575 | 74,91 dB | **58,30 dB** | **48,58 dB** | 1,0000 | 1,0000 | 0,9999 | 1,0000 |
+| H.264 4:4:4 ⚠ | 70,93 Mbps | 133 029 436 | 29,36 dB | 29,29 dB | 29,24 dB | 0,8895 | 0,9680 | 0,9649 | 0,9408 |
 
 ⚠ H.264 4:4:4 n'a **pas** tenu le débit cible (70,93 Mbps réels contre 10 Mbps
 visés, 7,1×) — voir « Résidu non résolu » ci-dessus. Sa ligne n'est **pas**
@@ -159,22 +186,61 @@ Les trois autres lignes (H.264 4:2:0, AV1 4:2:0, HEVC 4:4:4) sont à débit
 comparable : 8,44 à 10,04 Mbps, un écart de 19 % max autour de la cible à
 10 Mbps — comparaison à débit égal valide entre elles.
 
-PSNR/SSIM calculés sur les 901 images (soit 15 s), pas seulement sur l'image
-120 — la mesure porte sur toute la séquence, l'image 120 sert uniquement à
-l'inspection visuelle.
+**Fenêtre de mesure : images 120 à 900 (781 images), pas la séquence
+entière.** Le piège documenté du tampon VBV à 1 image produit une rampe de
+qualité sur les ~2 premières secondes (la première image, seule intra-only,
+est plafonnée à ~500 kbit ; le PSNR Y met environ 95 images à atteindre son
+régime établi — vérifié sur les logs `mesures/psnr-*.log`). Une première
+version de ce document et du script `mesures.sh` annonçait exclure cette
+rampe sans le faire réellement (le filtre ne coupait que la fin de la
+référence, pas le début des deux flux) ; corrigé — voir « Note de correction »
+en fin de document. Effet du correctif : Y monte de 0,3 à 2,9 dB selon le
+codec (la rampe pèse plus sur les flux qui démarrent moins bien), U/V bougent
+de 0,01 à 1,5 dB — la rampe touche presque exclusivement la luminance
+(image intra-only, U/V y sont déjà proches de leur régime établi dès la
+première image). Aucune conclusion de ce rapport ne change de sens.
+
+**Temps d'encodage (mesuré côté `sky-probe`, indépendant de la fenêtre
+PSNR/SSIM ci-dessus — ce sont les 901 images, tampon de sortie 1 image) :**
+
+| Codec | Encodage médian | Encodage p99 |
+|---|---:|---:|
+| H.264 4:2:0 | 4,78 ms | 6,21 ms |
+| H.264 4:4:4 ⚠ | 4,94 ms | 12,84 ms |
+| HEVC 4:4:4 | 5,35 ms | 6,97 ms |
+| AV1 4:2:0 | 3,95 ms | 4,82 ms |
+
+Les quatre restent largement sous le seuil de 16 ms (60 i/s) posé en Tâche 2 ;
+H.264 4:4:4 a le p99 le plus élevé des quatre, cohérent avec son débit réel
+7× supérieur (plus d'octets à produire et à copier par image).
 
 ## Ce que ces chiffres établissent
 
 **L'écart entre 4:2:0 et 4:4:4 sur les plans de chrominance est mesurable et
-large, à débit comparable.** HEVC 4:4:4 (9,37 Mbps) contre H.264 4:2:0
-(8,44 Mbps) et AV1 4:2:0 (10,04 Mbps) : **+38,6 dB sur U, +28,5 à +28,6 dB
-sur V** — un facteur d'erreur quadratique moyenne (MSE) de l'ordre de
-70-700× plus faible sur ces deux plans. La luminance (Y), elle, est bonne
-dans les trois cas (49,7 à 72,0 dB) — c'est exactement ce que prédit la
+large, à débit comparable.** HEVC 4:4:4 (9,37 Mbps) contre la moyenne de
+H.264 4:2:0 (8,44 Mbps) et AV1 4:2:0 (10,04 Mbps) : **+40,1 dB sur U, +29,3 dB
+sur V** — un facteur d'erreur quadratique moyenne (MSE) de l'ordre de 850×
+(V) à 10 200× (U) plus faible sur ces deux plans. La luminance (Y), elle, est
+bonne dans les trois cas (50,2 à 74,9 dB) — c'est exactement ce que prédit la
 thèse du projet : le 4:2:0 ne dégrade pas la luminance, il dégrade
 spécifiquement la couleur, et l'écart se voit sur U/V, pas sur Y. SSIM va
-dans le même sens : U/V autour de 0,77-0,83 en 4:2:0 contre 0,999 en HEVC
+dans le même sens : U/V autour de 0,77-0,83 en 4:2:0 contre ~1,000 en HEVC
 4:4:4.
+
+**L'argument le plus solide de cette mesure : H.264 4:2:0 et AV1 4:2:0
+convergent étroitement sur U et V, alors que ce sont deux codecs différents
+avec des efficacités de compression très différentes.** Sur U : 18,21 dB
+contre 18,12 dB (écart 0,09 dB). Sur V : 19,29 dB contre 19,27 dB (écart
+0,02 dB). Et pourtant leur luminance diverge nettement : 50,23 dB contre
+55,28 dB (écart 5,05 dB) — AV1 compresse Y sensiblement mieux à ce débit,
+mais pas U/V. Si le plancher chroma vers 18-19 dB était une particularité
+d'un encodeur donné (un réglage NVENC spécifique à H.264, par exemple), on
+n'aurait aucune raison de le retrouver quasi identique chez AV1, un codec
+distinct partageant seulement le sous-échantillonnage 4:2:0. Cette
+convergence est la preuve que le plancher observé est un artefact du
+**sous-échantillonnage lui-même**, pas d'un choix d'implémentation d'un
+codec en particulier — ce qui rend la conclusion robuste même en excluant
+H.264 4:4:4 du calcul (voir plus bas, « limite de l'étude »).
 
 **Le motif de test (alternance rouge/bleu pixel à pixel) est un pire cas
 délibéré**, pas une moyenne représentative d'un écran de travail réel — les
@@ -185,11 +251,21 @@ contenu, pas l'écart moyen sur un usage courant.
 CBR sur ce contenu**, quelle que soit la cible testée (3 à 30 Mbps) — un
 constat opérationnel indépendant de la question chroma, mais qui pèse dans
 le choix du codec : même en lui laissant 7× le débit, sa qualité reste
-inférieure à HEVC 4:4:4 à débit nominal (PSNR Y 29,56 dB contre 71,97 dB) et
-étrangement plate entre plans (Y≈U≈V≈29,3-29,6 dB, alors qu'on attendrait Y
+inférieure à HEVC 4:4:4 à débit nominal (PSNR Y 29,36 dB contre 74,91 dB) et
+étrangement plate entre plans (Y≈U≈V≈29,2-29,4 dB, alors qu'on attendrait Y
 nettement meilleur que U/V comme sur les trois autres flux) — signe d'un
 contrôle de débit qui alloue mal les bits pour ce profil sur ce contenu,
 plutôt que d'un manque réel de bande passante.
+
+**Limite de l'étude : la branche 4:4:4 ne repose que sur un seul point de
+données (HEVC).** H.264 4:4:4 étant exclu de la comparaison à débit égal
+(résidu non résolu ci-dessus), tout ce que ce rapport dit sur « le 4:4:4 »
+vient d'un seul codec, HEVC. Ce n'est pas un défaut de méthode — HEVC 4:4:4
+est la seule combinaison 4:4:4 qui a effectivement tenu son débit cible sur
+ce contenu — mais c'est une limite honnête à connaître avant de généraliser
+la conclusion : la mesure établit que *HEVC 4:4:4* bat *H.264/AV1 4:2:0* sur
+la chrominance à débit comparable, pas que « le 4:4:4 » en général le fait
+quel que soit le codec qui le porte.
 
 ## Ce que ces chiffres n'établissent pas
 
@@ -301,3 +377,78 @@ bash spike/mesures.sh   # PSNR/SSIM par plan + extraction PNG, ~2-3 min
   comparaison porte sur la même séquence d'un bout à l'autre.
 - Référence vérifiée à l'octet près sur 3 pixels connus (rouge, bleu, fond)
   avant de faire confiance au reste du calcul PSNR/SSIM.
+
+## Note de correction (revue)
+
+Trois défauts remontés par la revue, corrigés ici. Le script committé et les
+chiffres du document ci-dessus sont déjà à jour ; cette note documente ce qui
+a changé et comment le reproduire.
+
+**1. Le p99 par codec manquait dans ce document** (brief Step 5 : « pour
+chaque codec... temps d'encodage p99 »). Calculé côté `sky-probe`
+(`cmd_codecs.rs`) mais seulement imprimé en console, jamais transcrit ici.
+Corrigé : table « Temps d'encodage » ajoutée dans la section Résultats.
+
+**2. `mesures.sh` annonçait exclure la rampe VBV sans le faire.** Le libellé
+affiché disait « hors 2 premières secondes du piège VBV », mais le filtre
+`ffmpeg` réel ne coupait que la fin de la référence (`trim=end_frame=901`),
+jamais le début — ni sur la référence, ni sur le flux testé. Toute la
+séquence, rampe comprise, entrait dans la moyenne. Corrigé en appliquant
+`trim=start_frame=120:end_frame=901` **aux deux flux** (référence et flux
+testé), pour que l'image k du flux testé continue de correspondre à l'image
+k de la référence après la coupe — sans quoi couper un seul des deux flux
+aurait désynchronisé l'appariement plutôt que de le corriger. Commande
+verbatim (exécutée depuis `spike/`, sur les fichiers déjà encodés, sans
+réencodage) :
+
+```bash
+bash mesures.sh
+```
+
+qui lance, pour chaque codec, exactement :
+
+```bash
+ffmpeg -v error -y -f rawvideo -pix_fmt bgra -video_size 2560x1440 -framerate 60 \
+  -i cmp-reference.bgra -i cmp-<codec>.<ext> \
+  -lavfi "[0:v]trim=start_frame=120:end_frame=901,setpts=N/(60*TB),scale=out_range=full,format=yuv444p,split=2[r1][r2];
+          [1:v]trim=start_frame=120:end_frame=901,setpts=N/(60*TB),format=yuv444p,split=2[t1][t2];
+          [r1][t1]psnr=stats_file=mesures/psnr-<codec>.log;
+          [r2][t2]ssim=stats_file=mesures/ssim-<codec>.log" \
+  -f null -
+```
+
+(filtre reformaté sur plusieurs lignes ici pour la lisibilité ; une seule
+ligne dans le script réel.)
+
+Effet mesuré — ancien tableau (séquence entière, 901 images) vs nouveau
+(régime établi, images 120-900, 781 images) :
+
+| Codec | Y avant | Y après | U avant | U après | V avant | V après |
+|---|---:|---:|---:|---:|---:|---:|
+| H.264 4:2:0 | 49,75 | 50,23 (+0,48) | 18,20 | 18,21 (+0,01) | 19,28 | 19,29 (+0,01) |
+| AV1 4:2:0 | 54,95 | 55,28 (+0,33) | 18,12 | 18,12 (+0,00) | 19,27 | 19,27 (+0,00) |
+| HEVC 4:4:4 | 71,97 | 74,91 (+2,94) | 56,81 | 58,30 (+1,49) | 47,82 | 48,58 (+0,76) |
+| H.264 4:4:4 ⚠ | 29,56 | 29,36 (−0,20) | 29,36 | 29,29 (−0,07) | 29,31 | 29,24 (−0,07) |
+
+Conforme à l'attendu de la revue : Y bouge de 0,2 à 2,9 dB (la rampe touche
+la luminance, pas la couleur — cohérent avec une image intra-only en tête de
+flux), U/V bougent de 0,00 à 1,49 dB (déjà proches de leur régime établi dès
+la première image). Aucune conclusion qualitative de ce rapport ne change ;
+les écarts 4:2:0 vs 4:4:4 se creusent même légèrement (HEVC gagne plus que
+les deux 4:2:0 sur Y).
+
+**3. La correspondance de matrice couleur était présentée comme acquise.**
+Corrigé dans la section Méthode (« Ce qui est vérifié et ce qui ne l'est
+pas, sur la matrice couleur ») : distinction explicite entre valeurs
+absolues (portent la réserve, matrice interne de NVENC non revérifiée
+empiriquement — seule la plage l'a été, en Tâche 3) et écart relatif
+4:2:0/4:4:4 (n'en dépend pas, le convertisseur RGB→YUV étant un étage commun
+aux quatre flux, en amont du choix de codec).
+
+**Ajout demandé, non un défaut** : la section « Ce que ces chiffres
+établissent » met maintenant en avant l'argument de convergence H.264
+4:2:0 / AV1 4:2:0 sur U et V (écart de 0,01-0,09 dB entre deux codecs dont la
+luminance diverge de 5 dB) comme preuve que le plancher chroma mesuré est un
+artefact du sous-échantillonnage, pas d'un réglage propre à un encodeur — et
+signale explicitement que la branche 4:4:4 ne repose que sur HEVC (un seul
+point de données), H.264 4:4:4 étant exclu de la comparaison à débit égal.
