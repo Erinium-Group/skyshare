@@ -1,0 +1,11 @@
+# Flux produits par sky-probe (Q2/Q3) : gros binaires, jamais commités.
+# Régénérables à volonté via `cargo run -p sky-probe -- encode|codecs`.
+*.h264
+*.h265
+*.ivf
+*.bgra
+cmp-reference.bgra
+test.h265
+psnr_*.log
+ssim_*.log
+mesures/*.log

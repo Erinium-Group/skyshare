@@ -1,4 +1,5 @@
 mod cmd_capture;
+mod cmd_codecs;
 mod cmd_encode;
 mod cmd_hw;
 
@@ -39,6 +40,16 @@ enum Cmd {
         #[arg(long, default_value = "ecran", value_parser = cmd_encode::parse_source)]
         source: cmd_encode::Source,
     },
+    /// Compare les 4 combinaisons codec/chroma à débit égal, sur la même
+    /// scène synthétique déterministe (Q3)
+    Codecs {
+        #[arg(long, default_value_t = 15)]
+        seconds: u64,
+        #[arg(long, default_value_t = 10)]
+        bitrate_mbps: u32,
+        #[arg(long, default_value_t = 0)]
+        monitor: usize,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -54,5 +65,10 @@ fn main() -> anyhow::Result<()> {
             monitor,
             source,
         } => cmd_encode::run(seconds, codec, bitrate_mbps, &out, monitor, source),
+        Cmd::Codecs {
+            seconds,
+            bitrate_mbps,
+            monitor,
+        } => cmd_codecs::run(seconds, bitrate_mbps, monitor),
     }
 }

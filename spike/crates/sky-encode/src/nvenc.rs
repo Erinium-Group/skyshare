@@ -36,7 +36,8 @@ use nvidia_video_codec_sdk::sys::nvEncodeAPI::{
     NV_ENC_H264_PROFILE_HIGH_444_GUID, NV_ENC_H264_PROFILE_HIGH_GUID,
     NV_ENC_HEVC_PROFILE_FREXT_GUID, NV_ENC_INITIALIZE_PARAMS, NV_ENC_INITIALIZE_PARAMS_VER,
     NV_ENC_INPUT_RESOURCE_TYPE, NV_ENC_LOCK_BITSTREAM, NV_ENC_LOCK_BITSTREAM_VER,
-    NV_ENC_MAP_INPUT_RESOURCE, NV_ENC_MAP_INPUT_RESOURCE_VER, NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS,
+    NV_ENC_MAP_INPUT_RESOURCE, NV_ENC_MAP_INPUT_RESOURCE_VER, NV_ENC_MULTI_PASS,
+    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS,
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER, NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_FLAGS,
     NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT, NV_ENC_PIC_TYPE,
     NV_ENC_PRESET_CONFIG, NV_ENC_PRESET_CONFIG_VER, NV_ENC_PRESET_P4_GUID,
@@ -171,6 +172,17 @@ impl NvencEncoder {
         config.gopLength = NVENC_INFINITE_GOPLENGTH;
         // 1 = aucune image bidirectionnelle : latence minimale.
         config.frameIntervalP = 1;
+
+        // Le préréglage P4 active un double passage interne (estimation à
+        // résolution 1/4, puis passage final). Mesuré pendant la mise au
+        // point de la Tâche 4 (comparatif codecs) comme cause d'une
+        // conformité au débit très erratique sur du contenu à forte entropie
+        // chroma : jusqu'à 74 Mbps réels pour une cible à 10 Mbps. Un seul
+        // passage tient la cible de façon stable en H.264 4:2:0, HEVC 4:4:4
+        // et AV1 4:2:0. Écart résiduel non expliqué : H.264 4:4:4 continue de
+        // largement dépasser la cible même en un seul passage — voir le
+        // rapport de la Tâche 4, ce n'est pas ce paramètre qui en est cause.
+        config.rcParams.multiPass = NV_ENC_MULTI_PASS::NV_ENC_MULTI_PASS_DISABLED;
 
         config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_MODE::NV_ENC_PARAMS_RC_CBR;
         config.rcParams.averageBitRate = bitrate_bps;
