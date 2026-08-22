@@ -375,7 +375,6 @@ impl NvencEncoder {
         Ok(())
     }
 
-    /// Soumet l'image mappée puis récupère les octets du flux.
     /// Soumet l'image et rend les octets du flux plus l'indicateur d'image clé.
     /// Le chronométrage est fait par l'appelant, pour couvrir aussi la
     /// libération des ressources.
