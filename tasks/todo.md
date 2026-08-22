@@ -29,7 +29,7 @@
 5. [x] Relecture et validation du document d'architecture
 6. [x] Plan d'implémentation du jalon 0 → `docs/superpowers/plans/2026-08-22-jalon-0-faisabilite.md`
 7. [ ] **Exécution du jalon 0** ← en cours
-   - [x] Tâche 1 : Workspace et détection matérielle — BLOCKED sur Step 9 (lien final `sky-probe`). `pick_best` testé TDD (5/5, GREEN) et `probe_hardware` compile contre l'API réelle de la crate ; manque le NVIDIA Video Codec SDK (`nvEncodeAPI.lib`/`nvcuvid.lib`, hors CUDA Toolkit) pour valider sur la RTX 4060. Détail : `.superpowers/sdd/2026-08-22-jalon-0-faisabilite/task-1-report.md`.
+   - [x] Tâche 1 : Workspace et détection matérielle — DONE. `pick_best` testé TDD (5/5, GREEN) ; `probe_hardware` charge NVENC dynamiquement (`nvEncodeAPI64.dll` via `libloading`, comme FFmpeg/OBS — pas besoin du NVIDIA Video Codec SDK). `cargo run -p sky-probe -- hw` détecte réellement la RTX 4060 : choix partage d'écran = HEVC 4:4:4. Détail : `.superpowers/sdd/2026-08-22-jalon-0-faisabilite/task-1-report.md`.
 
 ## Jalons
 | # | Jalon | État |
