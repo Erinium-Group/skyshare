@@ -21,7 +21,19 @@ const PERIODE_RETOUR: Duration = Duration::from_millis(200);
 /// il n'y a rien à attendre. Le compte à rebours des 8 s ne démarre qu'au
 /// premier signe de vie d'en face. Cette attente-ci reste bornée elle aussi :
 /// le programme rend la main plutôt que de tourner indéfiniment.
-const ATTENTE_CORRESPONDANT: Duration = Duration::from_secs(120);
+///
+/// Dix minutes, et non deux : entre l'affichage de la réponse et le premier
+/// paquet d'en face, il faut qu'un humain copie près de 4 000 caractères, les
+/// colle dans une messagerie, les envoie, et qu'un second humain les récupère et
+/// les colle à son tour. Une fenêtre trop courte ferait échouer le test pour une
+/// raison qui n'a rien à voir avec le réseau — et c'est un test qui mobilise
+/// deux personnes, donc coûteux à répéter.
+const ATTENTE_CORRESPONDANT: Duration = Duration::from_secs(600);
+
+/// À quelle fréquence rappeler qu'on attend toujours.
+///
+/// Un écran muet pendant dix minutes se referme.
+const PERIODE_RAPPEL: Duration = Duration::from_secs(30);
 
 pub fn run(secondes: u64) -> anyhow::Result<()> {
     println!("\n=== ÉTAPE 1 : colle ici le bloc reçu puis Entrée ===\n");
@@ -34,12 +46,23 @@ pub fn run(secondes: u64) -> anyhow::Result<()> {
 
     println!("\n=== ÉTAPE 2 : renvoie ce bloc à ton correspondant ===\n");
     println!("{reponse}\n");
-    println!("En attente de sa connexion...");
+    println!("Renvoie ce bloc en entier, puis laisse cette fenêtre ouverte.");
+    println!(
+        "J'attends son signal pendant {} minutes au maximum.\n",
+        ATTENTE_CORRESPONDANT.as_secs() / 60
+    );
     std::io::stdout().flush().ok();
 
+    let debut_attente = Instant::now();
     if !attendre_contact(&mut link)? {
-        println!("ÉCHEC : le correspondant ne s'est pas manifesté.");
-        println!("Rien n'est perdu : redemande-lui un bloc et recommence.");
+        // La durée réelle, pas la fenêtre accordée : dire « en 10 minutes »
+        // après un abandon à 31 s ferait chercher la panne au mauvais endroit.
+        println!(
+            "\nÉCHEC : le correspondant ne s'est pas manifesté (attente de {} s).",
+            debut_attente.elapsed().as_secs()
+        );
+        println!("Ce n'est pas un échec de connexion : personne n'a jamais essayé de");
+        println!("nous joindre. Redemande-lui un bloc et recommence, c'est sans risque.");
         return Ok(());
     }
 
@@ -96,18 +119,31 @@ pub fn run(secondes: u64) -> anyhow::Result<()> {
 
 /// Attend le premier datagramme du correspondant, sans jamais bloquer sans fin.
 ///
-/// Un lien qui meurt avant le moindre contact et un correspondant qui ne colle
-/// jamais rien se soldent par le même diagnostic — rendu une seule fois par
-/// l'appelant, pour ne pas afficher deux messages d'échec de suite.
+/// Cette boucle n'appelle **volontairement pas** `poll` : elle se contente
+/// d'observer le socket. Interroger `str0m` ferait courir ses minuteries, et sa
+/// poignée de main DTLS abandonnerait au bout d'une trentaine de secondes —
+/// bien avant que deux humains aient fini de s'échanger un bloc de 3 800
+/// caractères. Voir `PeerLink::maintenant`.
 fn attendre_contact(link: &mut PeerLink) -> anyhow::Result<bool> {
     let debut = Instant::now();
+    let mut dernier_rappel = Instant::now();
+
     while debut.elapsed() < ATTENTE_CORRESPONDANT {
-        if link.contact_recu() {
+        if link.contact_en_attente() {
             return Ok(true);
         }
-        if let LinkEvent::Failed(_) = link.poll()? {
-            return Ok(false);
+
+        if dernier_rappel.elapsed() >= PERIODE_RAPPEL {
+            let reste = ATTENTE_CORRESPONDANT.saturating_sub(debut.elapsed());
+            println!(
+                "  toujours en attente — encore {} min {:02} s. Ne ferme pas cette fenêtre.",
+                reste.as_secs() / 60,
+                reste.as_secs() % 60
+            );
+            std::io::stdout().flush().ok();
+            dernier_rappel = Instant::now();
         }
+
         std::thread::sleep(Duration::from_millis(5));
     }
     Ok(false)

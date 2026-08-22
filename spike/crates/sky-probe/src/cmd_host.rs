@@ -17,6 +17,12 @@ pub fn run(secondes: u64) -> anyhow::Result<()> {
     let (mut link, offre) = PeerLink::host(Identity::generate())?;
 
     println!("\n=== ÉTAPE 1 : envoie ce bloc à ton correspondant ===\n");
+    // L'exposé, ici, c'est l'opérateur — pas le correspondant, dont la réponse
+    // voyage scellée. C'est donc dans SA console que l'avertissement a sa place,
+    // et pas dans le mode d'emploi de l'ami.
+    println!("  /!\\  Ce bloc contient l'adresse publique de cette machine, en clair");
+    println!("       pour qui sait le décoder. Envoie-le en message privé, à une");
+    println!("       personne précise — jamais dans un salon ouvert ni sur un forum.\n");
     println!("{offre}\n");
     println!("=== ÉTAPE 2 : colle sa réponse ici puis Entrée ===\n");
     std::io::stdout().flush().ok();
@@ -91,14 +97,44 @@ pub fn etablir(link: &mut PeerLink) -> anyhow::Result<Option<Duration>> {
         }
 
         if debut.elapsed() > DELAI_ETABLISSEMENT {
-            println!(
-                "ÉCHEC : aucune connexion directe en {} s.",
-                DELAI_ETABLISSEMENT.as_secs()
-            );
-            println!("Cause probable : NAT strict d'un côté (4G, CGNAT, réseau d'entreprise).");
+            diagnostiquer(link);
             return Ok(None);
         }
 
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Explique l'échec sans accuser le NAT à tort.
+///
+/// `etablir` attend l'ouverture du canal de données, qui vient bien après ICE :
+/// un échec peut donc venir du perçage de NAT, ou de la poignée de main chiffrée
+/// qui le suit. Ce sont deux verdicts opposés pour la question centrale du
+/// jalon, et c'est ce message qui sera consigné comme réponse. Il doit donc
+/// distinguer les deux, et dire quand il n'est pas sûr de lui.
+fn diagnostiquer(link: &PeerLink) {
+    if link.is_connected() {
+        println!(
+            "ÉCHEC : le canal de données ne s'est pas ouvert en {} s.",
+            DELAI_ETABLISSEMENT.as_secs()
+        );
+        println!("ATTENTION : la traversée de NAT n'est PAS en cause. Les deux machines");
+        println!("se sont bel et bien trouvées — c'est la poignée de main chiffrée");
+        println!("(DTLS/SCTP) qui n'a pas abouti. À ne pas compter comme un échec Q5.");
+    } else {
+        println!(
+            "ÉCHEC : aucune connexion directe en {} s.",
+            DELAI_ETABLISSEMENT.as_secs()
+        );
+        println!("Les deux machines ne se sont jamais trouvées.");
+        println!("Cause probable : NAT strict d'un côté (4G, CGNAT, réseau d'entreprise).");
+    }
+
+    let erreurs = link.erreurs_socket();
+    if erreurs > 0 {
+        println!();
+        println!("Réserve : {erreurs} erreur(s) sur le port UDP local pendant la tentative.");
+        println!("Une cause locale (pare-feu, interface qui change) n'est pas exclue :");
+        println!("le diagnostic ci-dessus est à prendre avec précaution.");
     }
 }

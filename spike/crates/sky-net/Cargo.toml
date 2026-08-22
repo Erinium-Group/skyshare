@@ -7,8 +7,12 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-# `pii` remplace les adresses par {REDACTED} dans les traces de str0m —
-# filet de sécurité pour la contrainte « aucune adresse journalisée » (spec §4.2).
+# `pii` masque les adresses que str0m enveloppe explicitement dans `Pii<T>`.
+# ATTENTION : ce n'est PAS une protection générale — ses traces les plus bavardes
+# formatent source et destination avec un `Debug` ordinaire, que `pii` ne touche
+# pas. Ce qui garantit réellement « aucune adresse journalisée » (spec §4.2),
+# c'est qu'aucun collecteur `tracing` n'est installé : les macros de str0m sont
+# alors inertes. Ne branchez pas de collecteur en vous croyant couvert par `pii`.
 str0m = { version = "0.23", features = ["pii"] }
 sky-crypto = { path = "../sky-crypto" }
 serde = { version = "1", features = ["derive"] }

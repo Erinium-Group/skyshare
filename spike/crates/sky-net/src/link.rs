@@ -10,10 +10,19 @@
 //!    variantes de `RtcError` — `RemoteSdp(String)`, `Sdp(..)` — transportent
 //!    des morceaux de SDP, donc des adresses. On leur substitue systématiquement
 //!    un message fixe en français.
-//! 2. **La crate `str0m` est compilée avec sa fonctionnalité `pii`**, qui
-//!    remplace les adresses par `{REDACTED}` dans ses propres traces. Le spike
-//!    n'installe de toute façon aucun collecteur `tracing`, donc rien n'est émis
-//!    par défaut ; la fonctionnalité protège le jour où quelqu'un en branche un.
+//! 2. **Le spike n'installe aucun collecteur `tracing`.** C'est là, et nulle
+//!    part ailleurs, que réside la garantie : `str0m` émet ses traces via les
+//!    macros de `tracing`, qui sont inertes tant qu'aucun collecteur n'est
+//!    enregistré. Rien n'est donc journalisé, quelle que soit la valeur de
+//!    `RUST_LOG`.
+//!
+//!    La fonctionnalité `pii` de `str0m` est activée en complément, mais **elle
+//!    ne suffirait pas** : elle ne masque que les emplacements que la
+//!    bibliothèque enveloppe explicitement dans `Pii<T>`, et ses traces les plus
+//!    bavardes formatent source et destination avec un `Debug` ordinaire. Qui
+//!    brancherait un collecteur en se croyant couvert par `pii` verrait des
+//!    adresses. La seule protection sur laquelle compter est l'absence de
+//!    collecteur.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
@@ -60,8 +69,16 @@ pub struct PeerLink {
     canal: Option<ChannelId>,
     peer_key: Option<[u8; 32]>,
     connected: bool,
-    /// Vrai dès qu'un datagramme exploitable est arrivé du correspondant.
-    contact: bool,
+    /// Erreurs d'émission et de réception avalées sur le port UDP.
+    ///
+    /// Elles ne sont pas fatales — ICE réémet — mais les taire entièrement
+    /// ferait attribuer au NAT un échec qui vient peut-être d'ailleurs. On les
+    /// compte pour que le diagnostic final puisse nuancer sa conclusion.
+    erreurs_socket: u64,
+    /// Origine du temps tel que `str0m` le voit.
+    horloge: Instant,
+    /// Instant réel du premier `poll`. Voir `maintenant`.
+    depart: Option<Instant>,
 }
 
 impl PeerLink {
@@ -76,7 +93,7 @@ impl PeerLink {
     /// réponse est scellée. Au jalon 1, la clé du destinataire viendra de la
     /// boîte aux lettres et l'offre sera scellée elle aussi.
     pub fn host(identity: Identity) -> anyhow::Result<(Self, String)> {
-        let mut rtc = nouveau_rtc();
+        let (mut rtc, horloge) = nouveau_rtc();
         let (socket, locale) = Self::socket_et_candidats(&mut rtc)?;
 
         let mut change = rtc.sdp_api();
@@ -100,7 +117,9 @@ impl PeerLink {
                 canal: None,
                 peer_key: None,
                 connected: false,
-                contact: false,
+                erreurs_socket: 0,
+                horloge,
+                depart: None,
             },
             blob.to_text(),
         ))
@@ -114,7 +133,7 @@ impl PeerLink {
         let offer =
             SdpOffer::from_sdp_string(&sdp).map_err(|_| anyhow!("bloc illisible ou incomplet"))?;
 
-        let mut rtc = nouveau_rtc();
+        let (mut rtc, horloge) = nouveau_rtc();
         let (socket, locale) = Self::socket_et_candidats(&mut rtc)?;
 
         let answer = rtc
@@ -140,7 +159,9 @@ impl PeerLink {
                 canal: None,
                 peer_key: Some(blob.public_key),
                 connected: false,
-                contact: false,
+                erreurs_socket: 0,
+                horloge,
+                depart: None,
             },
             reponse.to_text(),
         ))
@@ -168,6 +189,43 @@ impl PeerLink {
         Ok(())
     }
 
+    /// L'instant à présenter à `str0m`, sur une horloge qui ne démarre qu'au
+    /// premier `poll`.
+    ///
+    /// `str0m` est sans-IO : son temps n'avance que lorsqu'on lui en donne. Ses
+    /// minuteries — dont la poignée de main DTLS, qui abandonne au bout d'une
+    /// trentaine de secondes — ne courent donc que pendant qu'on l'interroge.
+    ///
+    /// C'est décisif ici. Entre la création du lien et le premier paquet du
+    /// correspondant, il s'écoule le temps qu'un humain fasse transiter un bloc
+    /// de 3 800 caractères par une messagerie. Si l'horloge partait de la
+    /// construction, deux choses casseraient :
+    ///
+    /// - le spectateur, qui doit scruter pendant cette attente, verrait sa
+    ///   poignée de main DTLS expirer avant que l'émetteur n'ait commencé
+    ///   (mesuré : abandon à 30 s, quoi qu'on règle côté ICE) ;
+    /// - l'émetteur, resté bloqué sur son invite de saisie, présenterait d'un
+    ///   coup à `str0m` un bond de plusieurs minutes au premier `poll`.
+    ///
+    /// En faisant démarrer l'horloge au premier `poll`, les deux disparaissent.
+    /// Cela n'assouplit **aucun** délai d'abandon : les 8 secondes du document
+    /// d'architecture sont comptées sur l'horloge réelle, dans `cmd_host`.
+    fn maintenant(&mut self) -> Instant {
+        let depart = *self.depart.get_or_insert_with(Instant::now);
+        self.horloge + depart.elapsed()
+    }
+
+    /// Y a-t-il un datagramme en attente, sans faire avancer l'horloge ?
+    ///
+    /// C'est ce que le spectateur appelle pendant qu'il attend son
+    /// correspondant : le paquet est seulement observé, pas consommé — le
+    /// `poll` suivant le lira normalement — et `str0m` n'est pas touché, donc
+    /// aucune de ses minuteries ne court.
+    pub fn contact_en_attente(&self) -> bool {
+        let mut buf = [0u8; TAILLE_DATAGRAMME];
+        self.socket.peek_from(&mut buf).is_ok()
+    }
+
     /// Un tour de la boucle : vider les sorties de `str0m`, écouter le socket,
     /// avancer le temps. Ne bloque jamais.
     pub fn poll(&mut self) -> anyhow::Result<LinkEvent> {
@@ -187,8 +245,11 @@ impl PeerLink {
                 Output::Timeout(_) => break,
                 Output::Transmit(t) => {
                     // Un envoi qui échoue (réseau momentanément indisponible) n'est
-                    // pas fatal : ICE réémettra. L'erreur nommerait la destination.
-                    let _ = self.socket.send_to(&t.contents, t.destination);
+                    // pas fatal : ICE réémettra. L'erreur nommerait la destination,
+                    // on ne la propage donc pas — mais on la compte.
+                    if self.socket.send_to(&t.contents, t.destination).is_err() {
+                        self.erreurs_socket += 1;
+                    }
                 }
                 Output::Event(e) => match e {
                     Event::IceConnectionStateChange(etat) => {
@@ -222,16 +283,20 @@ impl PeerLink {
                 // Un datagramme illisible (parasite, scan de port) est ignoré :
                 // il ne doit ni interrompre la négociation ni être décrit.
                 if let Ok(contents) = buf.as_slice().try_into() {
+                    let instant = self.maintenant();
                     let recu = Receive {
                         proto: Protocol::Udp,
                         source,
                         destination: self.locale,
                         contents,
                     };
-                    if self.rtc.handle_input(Input::Receive(now(), recu)).is_err() {
+                    if self
+                        .rtc
+                        .handle_input(Input::Receive(instant, recu))
+                        .is_err()
+                    {
                         return Ok(LinkEvent::Failed("connexion interrompue".into()));
                     }
-                    self.contact = true;
                 }
             }
             Err(ref e)
@@ -240,11 +305,13 @@ impl PeerLink {
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) => {}
             // Sous Windows, un ICMP « port unreachable » remonte en erreur sur le
-            // socket UDP. Ce n'est pas fatal pendant les sondages ICE.
-            Err(_) => {}
+            // socket UDP. Ce n'est pas fatal pendant les sondages ICE, mais un
+            // échec final mérite de le savoir.
+            Err(_) => self.erreurs_socket += 1,
         }
 
-        if self.rtc.handle_input(Input::Timeout(now())).is_err() {
+        let instant = self.maintenant();
+        if self.rtc.handle_input(Input::Timeout(instant)).is_err() {
             return Ok(LinkEvent::Failed("connexion interrompue".into()));
         }
 
@@ -273,17 +340,21 @@ impl PeerLink {
         Ok(())
     }
 
+    /// Vrai dès qu'ICE a trouvé un chemin — c'est-à-dire dès que le perçage de
+    /// NAT a réussi, indépendamment de ce que DTLS et SCTP feront ensuite.
+    ///
+    /// C'est la distinction qui permet à un diagnostic d'échec de ne pas accuser
+    /// le NAT à tort.
     pub fn is_connected(&self) -> bool {
         self.connected
     }
 
-    /// Vrai dès que le correspondant nous a envoyé quelque chose d'exploitable.
+    /// Nombre d'erreurs d'émission ou de réception avalées sur le port UDP.
     ///
-    /// Le spectateur s'en sert pour savoir quand démarrer son compte à rebours :
-    /// tant que l'hôte n'a pas collé la réponse, il n'y a rien à attendre, et
-    /// faire courir le délai de 8 s pendant le copier-coller le condamnerait.
-    pub fn contact_recu(&self) -> bool {
-        self.contact
+    /// Un diagnostic d'échec doit se nuancer quand ce compteur n'est pas nul :
+    /// la cause peut être locale et n'avoir rien à voir avec le NAT d'en face.
+    pub fn erreurs_socket(&self) -> u64 {
+        self.erreurs_socket
     }
 
     /// Vrai dès que le canal de données est utilisable par `send`.
@@ -347,16 +418,25 @@ impl PeerLink {
     }
 }
 
-fn now() -> Instant {
-    Instant::now()
-}
-
-fn nouveau_rtc() -> Rtc {
+/// Crée l'instance `str0m` et rend l'origine de son temps.
+///
+/// L'origine est conservée par le lien : c'est à partir d'elle que
+/// `PeerLink::maintenant` construit les instants présentés à `str0m`.
+///
+/// Les réglages de temporisation d'ICE et de DTLS restent ceux par défaut de la
+/// bibliothèque. Il a été tentant d'allonger la patience d'ICE
+/// (`set_max_stun_retransmits`) pour couvrir l'attente humaine ; mesuré, cela ne
+/// change rien, car ce qui expire à ~30 s est la poignée de main DTLS, que
+/// `str0m` 0.23.1 n'expose pas. C'est l'horloge différée qui règle le problème,
+/// et elle le règle pour les deux mécanismes à la fois.
+fn nouveau_rtc() -> (Rtc, Instant) {
     // `str0m` exige qu'un fournisseur cryptographique soit installé pour le
     // processus. L'appel est idempotent : le premier gagne, les suivants sont
     // ignorés sans erreur.
     str0m::crypto::from_feature_flags().install_process_default();
-    Rtc::new(now())
+
+    let origine = Instant::now();
+    (Rtc::new(origine), origine)
 }
 
 /// Adresse de l'interface que le système emprunterait pour sortir.

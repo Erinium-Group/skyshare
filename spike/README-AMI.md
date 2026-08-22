@@ -42,9 +42,28 @@ Pendant ce test, aucune image de ton écran n'est capturée ni transmise.
    entier**, colle-le dans le terminal (clic droit = coller), puis Entrée.
 5. Le programme t'affiche à son tour un bloc `SKY1:`. Renvoie-le-moi **en
    entier**, d'un seul bloc, sans le couper.
-6. Attends. En moins de dix secondes, l'écran affiche `CONNECTÉ` ou `ÉCHEC`.
+6. **Laisse la fenêtre ouverte et ne touche à rien.** Le programme affiche
+   `toujours en attente` toutes les 30 secondes : c'est normal, il attend que je
+   colle ton bloc de mon côté. Ça peut prendre une ou deux minutes, le temps que
+   je voie ton message.
+7. Quand j'ai collé ton bloc, tout se joue en quelques secondes : l'écran
+   affiche `CONNECTÉ`, puis des chiffres de débit — ou bien `ÉCHEC`.
+
+Si tu fermes la fenêtre avant que j'aie collé ton bloc, le test est annulé et il
+faut tout recommencer. C'est sans gravité, mais autant l'éviter.
 
 Envoie-moi une capture d'écran du résultat, quel qu'il soit.
+
+## Si le bloc arrive coupé
+
+C'est le raté le plus probable de tout ce test. Le bloc fait environ 3 800
+caractères : certaines messageries le coupent en plusieurs morceaux, ou insèrent
+des retours à la ligne au milieu. Le programme dira alors quelque chose comme
+« bloc illisible — la copie est probablement incomplète ».
+
+Dans ce cas : envoie-le-moi **en pièce jointe**, dans un simple fichier `.txt`.
+C'est la façon la plus sûre. Un envoi par courriel fonctionne aussi. Ce qu'il
+faut éviter, c'est de le retaper à la main ou de le recoller morceau par morceau.
 
 ## « Windows a protégé votre ordinateur »
 
