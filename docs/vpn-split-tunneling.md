@@ -33,13 +33,28 @@ L'application à exclure est **`sky-probe.exe`** pendant les tests, et
 **`SkyShare.exe`** une fois l'application installée. Exclus les deux si le doute
 existe.
 
+> ### ⚠️ L'erreur qui fait échouer une configuration sur deux
+>
+> Dans presque tous ces clients, **ajouter l'application à la liste n'active pas
+> la fonction**. Il y a un interrupteur séparé, souvent en haut de la page, qui
+> reste sur `Off` pendant qu'on remplit la liste en dessous. Tout paraît
+> configuré, et rien n'est exclu.
+>
+> **Vérifie toujours l'interrupteur avant de tester.** Puis ferme et relance
+> SkyShare : la plupart des VPN n'appliquent la règle qu'au lancement suivant.
+>
+> Constaté en conditions réelles le 23 août 2026 : liste correcte, mode correct,
+> interrupteur sur `Off`, connexion échouée.
+
 ### NordVPN (Windows)
 
 1. Ouvre NordVPN, clique sur l'engrenage en bas à gauche
-2. **Split Tunneling**
-3. Choisis **« Disable VPN for selected apps »** (désactiver le VPN pour les
-   applications sélectionnées)
-4. **Add Apps** → sélectionne SkyShare
+2. **Split tunneling**
+3. **Bascule l'interrupteur « Split tunneling » sur `On`** ← l'étape oubliée
+4. **Type de connexion** : « Ne pas utiliser le VPN pour les applications
+   sélectionnées »
+5. **Ajouter des applications** → sélectionne SkyShare
+6. **Ferme et relance SkyShare**
 
 ### Surfshark (Windows)
 
@@ -47,24 +62,28 @@ Surfshark n'appelle pas ça split tunneling mais **Bypasser**.
 
 1. Engrenage ⚙️ → onglet **VPN settings**
 2. Onglet **Bypasser**
-3. Active **Bypass VPN**
+3. **Active l'interrupteur « Bypass VPN »** ← sans lui, la liste ne sert à rien
 4. **Select apps** → coche SkyShare
+5. **Ferme et relance SkyShare**
 
 ### Proton VPN (Windows)
 
 1. Paramètres → **Split tunneling**
-2. Active, puis choisis le mode **Exclude** (exclure)
-3. Ajoute SkyShare
-4. **Redémarre Proton VPN et SkyShare** — Proton n'applique la règle qu'au
+2. **Bascule l'interrupteur sur activé** ← l'étape oubliée
+3. Choisis le mode **Exclude** (exclure)
+4. Ajoute SkyShare
+5. **Redémarre Proton VPN et SkyShare** — Proton n'applique la règle qu'au
    prochain lancement des applications concernées
 
 ### ExpressVPN (Windows)
 
 1. Menu ☰ → **Options** → onglet **Général**
-2. Sous **Split tunneling**, clique sur **Paramètres**
-3. Coche **« Ne pas autoriser les applications sélectionnées à utiliser le
+2. **Coche la case « Split tunneling »** ← l'étape oubliée
+3. Clique sur **Paramètres**
+4. Coche **« Ne pas autoriser les applications sélectionnées à utiliser le
    VPN »**
-4. Ajoute SkyShare
+5. Ajoute SkyShare
+6. **Ferme et relance SkyShare**
 
 ### CyberGhost (Windows)
 
@@ -124,15 +143,19 @@ Trois solutions, de la plus simple à la plus technique :
 
 ## Étape 3 — Vérifier que l'exclusion a pris
 
-Relance la connexion SkyShare. Si elle s'établit, c'est réglé.
+Avant de relancer, contrôle ces trois points dans l'ordre — ce sont les trois
+causes d'échec, par fréquence décroissante :
 
-Deux causes d'échec courantes quand la règle semble pourtant correcte :
+1. **L'interrupteur est-il sur `On` ?** Pas la liste : l'interrupteur de la
+   fonction elle-même. C'est la cause numéro un, et de loin.
+2. **SkyShare a-t-il été fermé puis relancé ?** La règle ne s'applique qu'au
+   lancement suivant chez la plupart des éditeurs.
+3. **Est-ce le bon exécutable ?** Le chemin doit pointer vers `SkyShare.exe`
+   (ou `sky-probe.exe`), pas vers un raccourci ni vers une copie dans un autre
+   dossier. Si tu as recompilé le programme ailleurs, l'ancienne entrée ne
+   correspond plus.
 
-- **L'application n'a pas été redémarrée.** La plupart des clients VPN
-  n'appliquent la règle qu'au lancement suivant du programme exclu. Ferme
-  complètement SkyShare et rouvre-le.
-- **Le mauvais exécutable a été exclu.** Vérifie que le chemin pointe bien vers
-  `SkyShare.exe` (ou `sky-probe.exe`) et non vers un raccourci.
+Relance ensuite la connexion. Si elle s'établit, c'est réglé.
 
 ---
 
