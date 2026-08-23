@@ -239,9 +239,13 @@ pub fn run(secondes: u64, sortie: &str) -> anyhow::Result<()> {
         "Gigue finale (RFC 3550, lissée) : {:.2} ms",
         gigue_us / 1000.0
     );
-    println!("Rappel : lien en boucle locale sur cette machine — ce débit, ce transit");
-    println!("et cette gigue mesurent le chiffrement et le transport en mémoire,");
-    println!("jamais un réseau.");
+    let (_, vers_internet) = link.destinations();
+    if vers_internet == 0 {
+        println!("Rappel : aucun paquet n'est parti vers internet — lien local.");
+    } else {
+        println!("Lien reseau reel : {vers_internet} paquets emis vers internet.");
+        println!("Ces mesures sont celles d'une vraie liaison entre deux machines.");
+    }
     Ok(())
 }
 

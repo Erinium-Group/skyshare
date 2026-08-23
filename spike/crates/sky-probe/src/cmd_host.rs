@@ -423,8 +423,20 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
             echantillons_rtt.len()
         );
     }
-    println!("Rappel : lien en boucle locale sur cette machine — ce débit et ce RTT");
-    println!("mesurent le chiffrement et le transport en mémoire, jamais un réseau.");
+    // Ce rappel s'affichait systematiquement, y compris pendant un vrai test
+    // entre deux machines. Il faisait passer des mesures reseau reelles pour des
+    // mesures en memoire — exactement le genre d'affirmation non verifiee qui
+    // fait chercher au mauvais endroit. On regarde desormais si le pair a ete
+    // joint par une adresse publique.
+    let (_, vers_internet) = link.destinations();
+    if vers_internet == 0 {
+        println!("Rappel : aucun paquet n'est parti vers internet — lien local.");
+        println!("Ce debit et ce RTT mesurent le chiffrement et le transport en");
+        println!("memoire, pas un reseau.");
+    } else {
+        println!("Lien reseau reel : {vers_internet} paquets emis vers internet.");
+        println!("Ce debit et ce RTT sont ceux d'une vraie liaison entre deux machines.");
+    }
     Ok(())
 }
 
