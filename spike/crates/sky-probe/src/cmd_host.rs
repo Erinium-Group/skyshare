@@ -587,12 +587,38 @@ fn diagnostiquer(link: &PeerLink) {
         println!("se sont bel et bien trouvées — c'est la poignée de main chiffrée");
         println!("(DTLS/SCTP) qui n'a pas abouti. À ne pas compter comme un échec Q5.");
     } else {
+        let (emis, recus, erreurs) = link.trafic();
         println!(
             "ÉCHEC : aucune connexion directe en {} s.",
             DELAI_ETABLISSEMENT.as_secs()
         );
-        println!("Les deux machines ne se sont jamais trouvées.");
-        println!("Cause probable : NAT strict d'un côté.");
+        println!();
+        println!("  Datagrammes émis   : {emis}");
+        println!("  Datagrammes reçus  : {recus}");
+        println!("  Erreurs de socket  : {erreurs}");
+        println!();
+
+        // Ces trois nombres distinguent des causes que « NAT strict » confondait.
+        if emis == 0 {
+            println!("Aucun paquet n'a été émis : l'agent ICE n'a pas de destination.");
+            println!("La réponse collée ne contenait donc aucune adresse exploitable.");
+            println!("C'est un défaut de notre côté, pas un problème de réseau.");
+        } else if recus == 0 {
+            println!("Nous avons émis sans jamais rien recevoir en retour.");
+            println!("Trois causes, et rien d'ici ne permet de trancher :");
+            println!("  - le correspondant n'avait plus son programme ouvert ;");
+            println!("  - il ne l'a pas lancé au même moment que nous ;");
+            println!("  - ses paquets sortent mais les nôtres n'arrivent pas jusqu'à lui.");
+            println!();
+            println!("Si vous avez tous les deux obtenu « réseau compatible » avec");
+            println!("`sky-probe netcheck`, la première cause est de loin la plus probable :");
+            println!("le programme du spectateur doit rester ouvert pendant que l'émetteur");
+            println!("colle la réponse.");
+        } else {
+            println!("Des paquets ont circulé DANS LES DEUX SENS, sans que la négociation");
+            println!("aboutisse. Le réseau fait son travail : la traversée de NAT n'est pas");
+            println!("en cause. Le défaut est dans notre code ou dans la négociation ICE.");
+        }
         println!();
         println!("  Par ordre de fréquence :");
         println!("   1. Un VPN actif chez l'un des deux — la cause la plus courante.");

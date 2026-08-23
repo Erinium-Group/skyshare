@@ -75,6 +75,13 @@ pub struct PeerLink {
     /// ferait attribuer au NAT un échec qui vient peut-être d'ailleurs. On les
     /// compte pour que le diagnostic final puisse nuancer sa conclusion.
     erreurs_socket: u64,
+    /// Datagrammes réellement émis et reçus sur le port UDP.
+    ///
+    /// Sans ces deux nombres, un échec de négociation est indiscernable : on ne
+    /// sait pas si l'on émet dans le vide, si l'on reçoit sans pouvoir répondre,
+    /// ou si rien ne circule du tout. Chacun de ces cas a une cause différente.
+    paquets_emis: u64,
+    paquets_recus: u64,
     /// Origine du temps tel que `str0m` le voit.
     horloge: Instant,
     /// Instant réel du premier `poll`. Voir `maintenant`.
@@ -118,6 +125,8 @@ impl PeerLink {
                 peer_key: None,
                 connected: false,
                 erreurs_socket: 0,
+                paquets_emis: 0,
+                paquets_recus: 0,
                 horloge,
                 depart: None,
             },
@@ -160,11 +169,21 @@ impl PeerLink {
                 peer_key: Some(blob.public_key),
                 connected: false,
                 erreurs_socket: 0,
+                paquets_emis: 0,
+                paquets_recus: 0,
                 horloge,
                 depart: None,
             },
             reponse.to_text(),
         ))
+    }
+
+    /// Compteurs de circulation sur le port UDP : émis, reçus, erreurs.
+    ///
+    /// Destinés au message d'échec : ils disent lequel des trois scénarios
+    /// s'est produit, là où « NAT strict » n'était qu'une conjecture.
+    pub fn trafic(&self) -> (u64, u64, u64) {
+        (self.paquets_emis, self.paquets_recus, self.erreurs_socket)
     }
 
     /// Côté émetteur : intègre la réponse du spectateur.
@@ -249,6 +268,8 @@ impl PeerLink {
                     // on ne la propage donc pas — mais on la compte.
                     if self.socket.send_to(&t.contents, t.destination).is_err() {
                         self.erreurs_socket += 1;
+                    } else {
+                        self.paquets_emis += 1;
                     }
                 }
                 Output::Event(e) => match e {
@@ -279,6 +300,7 @@ impl PeerLink {
         let mut buf = vec![0u8; TAILLE_DATAGRAMME];
         match self.socket.recv_from(&mut buf) {
             Ok((n, source)) => {
+                self.paquets_recus += 1;
                 buf.truncate(n);
                 // Un datagramme illisible (parasite, scan de port) est ignoré :
                 // il ne doit ni interrompre la négociation ni être décrit.
