@@ -1,7 +1,7 @@
 //! Le bloc de signaling échangé pendant la poignée de main.
 
 use anyhow::{anyhow, Context};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use flate2::write::DeflateEncoder;
 use flate2::read::DeflateDecoder;
 use flate2::Compression;
@@ -12,7 +12,7 @@ use std::io::{Read, Write};
 /// qui dit quoi faire.
 const PREFIXE: &str = "SKY2:";
 /// Version du contenu binaire, indépendante du préfixe textuel.
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 /// Ce qui s'échange entre les deux machines pendant la poignée de main.
 ///
@@ -24,6 +24,16 @@ const VERSION: u8 = 1;
 /// binaire, comprime, et n'encode qu'une fois.
 #[derive(Debug)]
 pub struct Blob {
+    /// Identifiant de la session de négociation, en clair.
+    ///
+    /// L'offre en tire un au hasard ; la réponse le recopie. L'émetteur peut
+    /// ainsi vérifier qu'on lui répond à l'offre en cours **avant** de tenter
+    /// un descellement qui échouerait de toute façon.
+    ///
+    /// Sans lui, coller un bloc d'un essai précédent — des blocs qui se
+    /// ressemblent tous — produit « mauvaise clé ou message altéré », un
+    /// message qui envoie chercher un problème de chiffrement inexistant.
+    pub session: [u8; 4],
     /// Clé publique de l'émetteur du bloc, en clair : c'est elle qui permet à
     /// l'autre bord de sceller sa réponse.
     pub public_key: [u8; 32],
@@ -54,13 +64,17 @@ pub fn decomprimer(donnees: &[u8]) -> anyhow::Result<String> {
 
 impl Blob {
     pub fn to_text(&self) -> String {
-        let mut brut = Vec::with_capacity(33 + self.sealed_sdp.len());
+        let mut brut = Vec::with_capacity(37 + self.sealed_sdp.len());
         brut.push(VERSION);
+        brut.extend_from_slice(&self.session);
         brut.extend_from_slice(&self.public_key);
         brut.extend_from_slice(&self.sealed_sdp);
-        // base64url sans remplissage : pas de « + », « / » ni « = », donc rien
-        // qu'une messagerie puisse échapper ou couper.
-        format!("{PREFIXE}{}", URL_SAFE_NO_PAD.encode(brut))
+        // base64 standard, et surtout PAS base64url : l'alphabet url contient
+        // « _ », que les messageries a markdown interpretent comme de l'italique
+        // et retirent du texte. Le bloc arrive alors altere, avec une longueur
+        // que le decodeur refuse. L'alphabet standard n'utilise que « + », « / »
+        // et « = », qu'aucun markdown ne transforme.
+        format!("{PREFIXE}{}", STANDARD.encode(brut))
     }
 
     pub fn from_text(s: &str) -> anyhow::Result<Self> {
@@ -73,11 +87,16 @@ impl Blob {
         let corps = nettoye
             .strip_prefix(PREFIXE)
             .context("préfixe SKY2: absent — le bloc a-t-il été copié en entier ?")?;
-        let brut = URL_SAFE_NO_PAD
+        let brut = STANDARD
             .decode(corps)
-            .context("bloc illisible — la copie est probablement incomplète")?;
+            .map_err(|_| {
+                anyhow!(
+                    "bloc altere pendant le transfert ({} caracteres, longueur invalide).                      Renvoie-le dans un bloc de code : entoure-le de trois accents graves                      avant et apres. Certaines messageries modifient le texte brut.",
+                    corps.len()
+                )
+            })?;
 
-        if brut.len() < 33 {
+        if brut.len() < 37 {
             return Err(anyhow!("bloc trop court — copie incomplète"));
         }
         if brut[0] != VERSION {
@@ -85,11 +104,14 @@ impl Blob {
                 "version de bloc inconnue — les deux machines doivent utiliser la même version du programme"
             ));
         }
+        let mut session = [0u8; 4];
+        session.copy_from_slice(&brut[1..5]);
         let mut public_key = [0u8; 32];
-        public_key.copy_from_slice(&brut[1..33]);
+        public_key.copy_from_slice(&brut[5..37]);
         Ok(Blob {
+            session,
             public_key,
-            sealed_sdp: brut[33..].to_vec(),
+            sealed_sdp: brut[37..].to_vec(),
         })
     }
 }
@@ -101,6 +123,7 @@ mod tests {
     #[test]
     fn aller_retour_texte() {
         let b = Blob {
+            session: [1, 2, 3, 4],
             public_key: [7u8; 32],
             sealed_sdp: vec![1, 2, 3],
         };
@@ -116,6 +139,7 @@ mod tests {
         // Un copier-coller depuis une messagerie ramène souvent des espaces, et
         // certaines découpent un bloc long sur plusieurs lignes.
         let b = Blob {
+            session: [1, 2, 3, 4],
             public_key: [1u8; 32],
             sealed_sdp: vec![9; 40],
         };
@@ -145,6 +169,26 @@ mod tests {
 ");
         assert_eq!(decomprimer(&comprimer(&sdp)).unwrap(), sdp);
     }
+    #[test]
+    fn aucun_caractere_transforme_par_les_messageries() {
+        // Le bloc transite par une messagerie a markdown. base64url contient
+        // « _ », que Discord interprete comme de l'italique et retire du texte :
+        // le bloc arrive alors altere, avec une longueur que le decodeur refuse.
+        // Constate en conditions reelles le 23 aout 2026.
+        let blob = Blob {
+            session: [0x5F; 4],
+            public_key: [0x5Fu8; 32],
+            sealed_sdp: (0u8..=255).collect(),
+        };
+        let texte = blob.to_text();
+        for interdit in ['_', '*', '~', '`', '|', '#', '>'] {
+            assert!(
+                !texte.contains(interdit),
+                "le format produit « {interdit} », transforme par les messageries"
+            );
+        }
+    }
+
 
     #[test]
     fn un_sdp_reel_tient_largement_sous_la_limite_discord() {
@@ -175,6 +219,8 @@ mod tests {
 ");
 
         let blob = Blob {
+            session: [0xCD; 4],
+            
             public_key: [0xABu8; 32],
             sealed_sdp: comprimer(&sdp),
         };

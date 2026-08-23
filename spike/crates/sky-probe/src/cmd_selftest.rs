@@ -78,5 +78,22 @@ pub fn run() -> anyhow::Result<()> {
         println!("VERDICT : négociation incomplète en {} s.", DELAI.as_secs());
         println!("Les compteurs ci-dessus disent qui a émis et qui a reçu.");
     }
+    // Vérification du garde-fou : une réponse issue d'une AUTRE négociation
+    // doit être refusée avec un message qui dit quoi faire, et non produire un
+    // « mauvaise clé ou message altéré » qui envoie chercher un problème de
+    // chiffrement inexistant.
+    {
+        let (mut autre_hote, autre_offre) = PeerLink::host(Identity::generate())?;
+        let (_, reponse_etrangere) = PeerLink::viewer(Identity::generate(), &autre_offre)?;
+        match autre_hote.accept_answer(&reponse) {
+            Err(e) if e.to_string().contains("autre négociation") => {
+                println!("Garde-fou    : un bloc d'un autre essai est bien refusé.")
+            }
+            Err(e) => println!("Garde-fou    : refusé, mais message inattendu — {e}"),
+            Ok(()) => println!("Garde-fou    : ÉCHEC — un bloc étranger a été accepté !"),
+        }
+        let _ = reponse_etrangere;
+    }
+
     Ok(())
 }

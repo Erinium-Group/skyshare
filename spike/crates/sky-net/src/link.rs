@@ -81,6 +81,9 @@ pub struct PeerLink {
     /// pair. Sans ce filtre, le battement de maintien gonfle le compteur de
     /// paquets reçus et fait croire que le correspondant répond.
     serveurs_stun: Vec<SocketAddr>,
+    /// Identifiant de la négociation en cours, pour refuser une réponse
+    /// destinée à une offre précédente.
+    session: [u8; 4],
     /// Datagrammes réellement émis et reçus sur le port UDP.
     ///
     /// Sans ces deux nombres, un échec de négociation est indiscernable : on ne
@@ -115,7 +118,12 @@ impl PeerLink {
             .apply()
             .ok_or_else(|| anyhow!("aucun changement à négocier"))?;
 
+        let mut session = [0u8; 4];
+
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut session);
+
         let blob = Blob {
+            session,
             public_key: identity.public_key(),
             sealed_sdp: crate::handshake::comprimer(&offer.to_sdp_string()),
         };
@@ -132,6 +140,7 @@ impl PeerLink {
                 connected: false,
                 erreurs_socket: 0,
                 serveurs_stun: stun::serveurs_autorises(),
+                session,
                 paquets_emis: 0,
                 paquets_recus: 0,
                 horloge,
@@ -165,6 +174,9 @@ impl PeerLink {
             &crate::handshake::comprimer(&answer.to_sdp_string()),
         );
         let reponse = Blob {
+            // Renvoyer l'identifiant recu prouve a l'emetteur que cette
+            // reponse concerne bien son offre en cours.
+            session: blob.session,
             public_key: identity.public_key(),
             sealed_sdp: sealed,
         };
@@ -181,6 +193,7 @@ impl PeerLink {
                 connected: false,
                 erreurs_socket: 0,
                 serveurs_stun: stun::serveurs_autorises(),
+                session: blob.session,
                 paquets_emis: 0,
                 paquets_recus: 0,
                 horloge,
@@ -234,6 +247,11 @@ impl PeerLink {
     /// Côté émetteur : intègre la réponse du spectateur.
     pub fn accept_answer(&mut self, texte: &str) -> anyhow::Result<()> {
         let blob = Blob::from_text(texte)?;
+        if blob.session != self.session {
+            return Err(anyhow!(
+                "cette réponse concerne une autre négociation — c'est probablement                  le bloc d'un essai précédent. Relance chacun votre commande et                  échangez des blocs frais."
+            ));
+        }
         let sdp = self.identity.open(&blob.sealed_sdp)?;
         let sdp = crate::handshake::decomprimer(&sdp)?;
         let answer = SdpAnswer::from_sdp_string(&sdp)
@@ -349,27 +367,32 @@ impl PeerLink {
                 // battement de maintien, pas un signe de vie du correspondant. La
                 // compter fausserait le diagnostic, et la passer à l'agent ICE
                 // n'aurait aucun sens.
-                if self.serveurs_stun.contains(&source) {
-                    return Ok(LinkEvent::Idle);
+                // Sortir ici court-circuiterait le `Input::Timeout` de fin de
+                // fonction : l'agent ICE cesserait d'avancer tant que des reponses
+                // STUN arrivent. On ignore le paquet sans quitter le cycle.
+                let du_pair = !self.serveurs_stun.contains(&source);
+                if du_pair {
+                    self.paquets_recus += 1;
                 }
-                self.paquets_recus += 1;
                 buf.truncate(n);
                 // Un datagramme illisible (parasite, scan de port) est ignoré :
                 // il ne doit ni interrompre la négociation ni être décrit.
-                if let Ok(contents) = buf.as_slice().try_into() {
-                    let instant = self.maintenant();
-                    let recu = Receive {
-                        proto: Protocol::Udp,
-                        source,
-                        destination: self.locale,
-                        contents,
-                    };
-                    if self
-                        .rtc
-                        .handle_input(Input::Receive(instant, recu))
-                        .is_err()
-                    {
-                        return Ok(LinkEvent::Failed("connexion interrompue".into()));
+                if du_pair {
+                    if let Ok(contents) = buf.as_slice().try_into() {
+                        let instant = self.maintenant();
+                        let recu = Receive {
+                            proto: Protocol::Udp,
+                            source,
+                            destination: self.locale,
+                            contents,
+                        };
+                        if self
+                            .rtc
+                            .handle_input(Input::Receive(instant, recu))
+                            .is_err()
+                        {
+                            return Ok(LinkEvent::Failed("connexion interrompue".into()));
+                        }
                     }
                 }
             }
