@@ -122,7 +122,7 @@ jalon ; le sixième sur une recherche documentaire, sans matériel de test.
 ## Jalons
 | # | Jalon | État |
 |---|-------|------|
-| 0 | Faisabilité (capture + encode + P2P) | **9/9 tâches faites — GO CONDITIONNEL, en attente de M4 et M1** |
+| 0 | Faisabilité (capture + encode + P2P) | ✅ **TERMINÉ — GO ferme. 6/6 questions closes, M4 et M1 mesurées le 23/08 sur réseaux réels** |
 | 1 | Fondations (Discord, amis, listes) | à faire — porte la décision **D2** (annuaire de clés) |
 | 2 | Premier pixel (partage 1-à-1) | à faire — doit traiter les écarts **3** et **5**, et porte la décision **D1** |
 | 3 | Qualité (simulcast, profils) | à faire — bloqué sur l'écart **5** (reconfiguration de débit à chaud) |
@@ -130,3 +130,22 @@ jalon ; le sixième sur une recherche documentaire, sans matériel de test.
 | 5 | Public (liens, salle d'attente) | à faire |
 | 6 | Distribution (CI, installateurs) | à faire |
 | 7 | Mac et Linux | à faire |
+
+## Acquis du jalon 0 — 23 août 2026
+
+Connexion pair-à-pair établie en **0,4 s** entre deux machines, deux réseaux, deux
+fournisseurs d'accès, **sans aucun serveur relais**. Chaîne vidéo complète transmise :
+2560×1440 HEVC 4:4:4, **jusqu'à 107 images/s reçues**, 12,4 Mbps, gigue 5-17 ms.
+Capture à **164,3 im/s** (rapport 0,99 au taux d'écran), CPU de la chaîne à **0,10 %**.
+
+**Le pari technique du projet tient.**
+
+## Nouvelle question ouverte, à trancher au jalon 2
+
+- **Écart 7 — le canal de données n'est pas un transport vidéo.** RTT mesuré à 115 ms là
+  où une liaison fibre-fibre directe devrait donner 15-30 ms, et **16 % d'échecs d'envoi**
+  (2611/16349). Le canal de données est conçu pour des messages, pas pour un flux temps
+  réel. Comparer aux **pistes média** de WebRTC — ce qui rouvre la décision de
+  bibliothèque, `str0m` contre `webrtc-rs` (spec §2, décision 3).
+- **Repli logiciel x264** — le spike n'implémente que NVENC. Une machine sans carte
+  NVIDIA ne peut pas émettre, seulement recevoir. Constaté en conditions réelles.
