@@ -217,4 +217,61 @@ mod tests {
         let p = reponse_succes(&id, SocketAddrV4::new(EXEMPLE, 51234));
         assert_eq!(lire_reponse(&p[..p.len() - 3], &id), None);
     }
+
+    /// Second garde-fou : une réponse venue d'ailleurs que du serveur
+    /// interrogé est ignorée, même si elle est parfaitement formée et porte
+    /// le bon identifiant de transaction.
+    ///
+    /// L'identifiant seul ne suffit pas : un tiers **sur le chemin** le voit
+    /// passer en clair et pourrait renvoyer une réponse conforme avant le
+    /// serveur. Le contrôle d'origine est ce qui l'écarte — et il vit dans
+    /// `interroger`, pas dans `lire_reponse`, donc il demande de vrais
+    /// sockets pour être exercé.
+    #[test]
+    fn ignore_une_reponse_venue_dun_autre_expediteur() {
+        let client = UdpSocket::bind("127.0.0.1:0").expect("socket client");
+        let serveur = UdpSocket::bind("127.0.0.1:0").expect("socket serveur");
+        let imposteur = UdpSocket::bind("127.0.0.1:0").expect("socket imposteur");
+
+        let adresse_serveur = serveur.local_addr().expect("adresse serveur");
+        let adresse_client = client.local_addr().expect("adresse client");
+
+        // Adresse que l'imposteur essaie de nous faire annoncer, distincte de
+        // celle du vrai serveur : si le contrôle d'origine sautait, c'est
+        // elle que `interroger` rendrait.
+        const USURPEE: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 7);
+
+        let complice = std::thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            serveur
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("délai serveur");
+            let (n, _) = serveur.recv_from(&mut buf).expect("requête reçue");
+            assert!(n >= 20, "requête STUN trop courte");
+            let mut trans_id = [0u8; 12];
+            trans_id.copy_from_slice(&buf[8..20]);
+
+            // L'imposteur répond le premier, avec le bon identifiant.
+            let usurpee = reponse_succes(&trans_id, SocketAddrV4::new(USURPEE, 1));
+            imposteur
+                .send_to(&usurpee, adresse_client)
+                .expect("envoi imposteur");
+
+            // Puis le vrai serveur, un instant plus tard pour garantir l'ordre.
+            std::thread::sleep(Duration::from_millis(50));
+            let vraie = reponse_succes(&trans_id, SocketAddrV4::new(EXEMPLE, 51234));
+            serveur
+                .send_to(&vraie, adresse_client)
+                .expect("envoi serveur");
+        });
+
+        let vu = interroger(&client, adresse_serveur, Duration::from_secs(5));
+        complice.join().expect("thread complice");
+
+        assert_eq!(
+            vu,
+            Some(SocketAddr::V4(SocketAddrV4::new(EXEMPLE, 51234))),
+            "la réponse de l'imposteur a été retenue à la place de celle du serveur"
+        );
+    }
 }

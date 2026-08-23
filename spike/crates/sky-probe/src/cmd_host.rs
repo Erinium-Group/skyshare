@@ -91,6 +91,18 @@ pub struct Parametres {
 }
 
 pub fn run(p: Parametres) -> anyhow::Result<()> {
+    // Le régulateur est construit AVANT l'offre, et pas au moment où il servira :
+    // il ne dépend que des deux arguments de ligne de commande, et sa validation
+    // de bornes (plancher ≤ plafond) doit échouer tout de suite. Construit plus
+    // bas, un `--floor-mbps 50 --bitrate-mbps 30` n'aurait été refusé qu'une fois
+    // la connexion établie — donc après tout l'aller-retour humain de
+    // copier-coller des blocs, pour une faute de frappe visible sans réseau.
+    //
+    // Le Pacer part au plancher (comportement documenté de `Pacer::new`) : la
+    // cadence effective démarre donc réduite et remonte vers le plafond en
+    // quelques secondes — visible dans l'affichage périodique plus bas.
+    let mut pacer = Pacer::new(p.floor_mbps * 1_000_000, p.bitrate_mbps * 1_000_000)?;
+
     let (mut link, offre) = PeerLink::host(Identity::generate())?;
 
     println!("\n=== ÉTAPE 1 : envoie ce bloc à ton correspondant ===\n");
@@ -150,11 +162,6 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
         FPS,
         p.bitrate_mbps * 1_000_000,
     )?;
-
-    // Le Pacer part au plancher (comportement documenté de `Pacer::new`) : la
-    // cadence effective démarre donc réduite et remonte vers le plafond en
-    // quelques secondes — visible dans l'affichage périodique ci-dessous.
-    let mut pacer = Pacer::new(p.floor_mbps * 1_000_000, p.bitrate_mbps * 1_000_000);
 
     println!(
         "\nRésolution {largeur}x{hauteur}, {}, plancher {} Mbps, plafond {} Mbps.\n",

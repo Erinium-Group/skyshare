@@ -1,4 +1,31 @@
+use std::fmt;
 use std::time::Duration;
+
+/// Bornes de débit incohérentes passées à [`Pacer::new`].
+///
+/// Existe parce que `clamp(min, max)` **panique** quand `min > max` : sans
+/// cette vérification à la construction, un plancher supérieur au plafond ne
+/// se manifestait qu'au premier retour d'information, une fois la connexion
+/// établie — donc après tout l'aller-retour humain de copier-coller des blocs.
+/// L'invariant appartient au constructeur, pas à l'appelant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BornesInvalides {
+    pub plancher_bps: u32,
+    pub plafond_bps: u32,
+}
+
+impl fmt::Display for BornesInvalides {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "plancher de débit ({} bps) supérieur au plafond ({} bps) : \
+             le plancher ne peut pas dépasser le débit cible de l'encodeur",
+            self.plancher_bps, self.plafond_bps
+        )
+    }
+}
+
+impl std::error::Error for BornesInvalides {}
 
 /// Contrôle de congestion à plancher garanti.
 ///
@@ -7,6 +34,7 @@ use std::time::Duration;
 /// baveuse de Discord. Ici le débit ne passe jamais sous un plancher choisi par
 /// l'utilisateur : en cas de congestion durable, on préfère perdre des images
 /// plutôt que de la netteté.
+#[derive(Debug)]
 pub struct Pacer {
     plancher_bps: u32,
     plafond_bps: u32,
@@ -23,18 +51,41 @@ impl Pacer {
     /// Au-delà, le tampon réseau se remplit : on lève le pied.
     const SEUIL_RTT_MS: u32 = 150;
 
-    pub fn new(plancher_bps: u32, plafond_bps: u32) -> Self {
-        Self {
+    /// Construit un régulateur dont le débit restera dans `[plancher, plafond]`.
+    ///
+    /// Échoue si le plancher dépasse le plafond : c'est le seul état où la
+    /// formule ne peut rien produire de sensé, et le laisser passer ferait
+    /// paniquer `clamp` au premier retour d'information. Deux bornes égales
+    /// sont valides — le débit est alors constant.
+    pub fn new(plancher_bps: u32, plafond_bps: u32) -> Result<Self, BornesInvalides> {
+        if plancher_bps > plafond_bps {
+            return Err(BornesInvalides {
+                plancher_bps,
+                plafond_bps,
+            });
+        }
+        Ok(Self {
             plancher_bps,
             plafond_bps,
             cible_bps: plancher_bps,
-        }
+        })
     }
 
     pub fn target_bps(&self) -> u32 {
         self.cible_bps
     }
 
+    /// Intègre un retour d'information et ajuste la cible.
+    ///
+    /// **Réserve de promotion :** `_ecoule` est reçu et jeté. Les deux
+    /// propriétés annoncées — « au plus 15 % retirés par tick » et « remontée
+    /// au plafond en 1 tick » — sont donc des propriétés *par appel*, pas par
+    /// unité de temps. Elles ne se traduisent en garanties temporelles que
+    /// parce que l'appelant actuel sert le régulateur toutes les 100 ms. Un
+    /// appelant qui le servirait à 10 ms hériterait d'une descente dix fois
+    /// plus brutale sans qu'une ligne change ici. Avant promotion : soit
+    /// normaliser la formule par `_ecoule`, soit inscrire la cadence dans le
+    /// type.
     pub fn on_feedback(&mut self, perte_pct: f32, rtt_ms: u32, _ecoule: Duration) {
         let congestionne = perte_pct > Self::SEUIL_PERTE || rtt_ms > Self::SEUIL_RTT_MS;
 
@@ -60,7 +111,26 @@ mod tests {
 
     fn pacer() -> Pacer {
         // Plancher 8 Mbps, plafond 30 Mbps.
-        Pacer::new(8_000_000, 30_000_000)
+        Pacer::new(8_000_000, 30_000_000).expect("bornes valides")
+    }
+
+    #[test]
+    fn refuse_un_plancher_au_dessus_du_plafond() {
+        // Cas réel : `sky-probe host --floor-mbps 50 --bitrate-mbps 30`.
+        // Sans cette validation, `clamp(50e6, 30e6)` paniquait au premier
+        // retour d'information — soit ~100 ms après le début de l'envoi,
+        // donc après tout l'aller-retour humain de copier-coller.
+        let e = Pacer::new(50_000_000, 30_000_000).unwrap_err();
+        assert_eq!(e.plancher_bps, 50_000_000);
+        assert_eq!(e.plafond_bps, 30_000_000);
+    }
+
+    #[test]
+    fn accepte_deux_bornes_egales() {
+        // Débit constant : dégénéré, mais parfaitement défini.
+        let mut p = Pacer::new(30_000_000, 30_000_000).expect("bornes valides");
+        p.on_feedback(50.0, 500, TICK);
+        assert_eq!(p.target_bps(), 30_000_000);
     }
 
     #[test]

@@ -44,6 +44,32 @@ H=1440
 FRAMES=901
 START=120   # exclut la rampe VBV -- voir commentaire de methode plus haut
 
+# Nombre de lignes que CHAQUE journal psnr/ssim doit contenir : une ligne par
+# paire d'images comparee, soit exactement FRAMES - START.
+LIGNES_ATTENDUES=$((FRAMES - START))
+
+# Une moyenne calculee sur un journal incomplet ne se voit pas : awk divise par
+# le nombre de lignes qu'il a lues, donc un journal tronque (ffmpeg interrompu,
+# reexecution partielle, flux plus court que prevu) produit un tableau plausible
+# et faux. Ce script est l'outillage de non-regression du jalon 3 : il SERA
+# reexecute, potentiellement par quelqu'un qui ne connait pas ce piege. On
+# echoue bruyamment plutot que de moyenner ce qu'on n'a pas verifie.
+verifier_journal() {
+  local fichier="$1"
+  if [ ! -s "$fichier" ]; then
+    echo "ERREUR : $fichier absent ou vide -- relancer la mesure complete." >&2
+    exit 1
+  fi
+  local lignes
+  lignes=$(wc -l < "$fichier")
+  if [ "$lignes" -ne "$LIGNES_ATTENDUES" ]; then
+    echo "ERREUR : $fichier contient $lignes lignes, ${LIGNES_ATTENDUES} attendues" >&2
+    echo "        (images ${START} a $((FRAMES - 1))). Aucune moyenne n'est calculee :" >&2
+    echo "        un journal incomplet produirait un tableau plausible et faux." >&2
+    exit 1
+  fi
+}
+
 declare -A FICHIERS=(
   [h264-420]=cmp-h264-420.h264
   [h264-444]=cmp-h264-444.h264
@@ -81,6 +107,8 @@ echo
 echo "=== Moyennes PSNR / SSIM par plan (images 120-900, 781 images -- rampe VBV des 2 premieres secondes reellement exclue) ==="
 printf "%-10s %8s %8s %8s %8s | %8s %8s %8s %8s\n" "codec" "psnr_y" "psnr_u" "psnr_v" "psnr_avg" "ssim_y" "ssim_u" "ssim_v" "ssim_all"
 for nom in h264-420 h264-444 hevc-444 av1-420; do
+  verifier_journal "mesures/psnr-${nom}.log"
+  verifier_journal "mesures/ssim-${nom}.log"
   awk -v c="$nom" '
     {
       for (i=1;i<=NF;i++) {
