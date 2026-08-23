@@ -52,15 +52,39 @@ enum Cmd {
         #[arg(long, default_value_t = 0)]
         monitor: usize,
     },
-    /// Émet : produit le bloc d'offre, puis pousse des données au spectateur (Q5)
+    /// Émet : négocie la connexion, puis capture, encode et envoie un flux
+    /// vidéo réel, piloté par le Pacer (Q4, Q5)
     Host {
         #[arg(long, default_value_t = 30)]
         seconds: u64,
+        /// h264420 | h264444 | hevc444 | av1420
+        #[arg(long, default_value = "hevc444", value_parser = cmd_encode::parse_codec)]
+        codec: sky_encode::Codec,
+        /// Débit cible de la session NVENC — aussi le plafond du Pacer.
+        #[arg(long, default_value_t = 30)]
+        bitrate_mbps: u32,
+        /// Plancher du Pacer : le débit réseau ne descend jamais en dessous.
+        #[arg(long, default_value_t = 10)]
+        floor_mbps: u32,
+        #[arg(long, default_value_t = 0)]
+        monitor: usize,
+        /// ecran (partage réel) | synthetique (charge reproductible pour la
+        /// mesure Q4 — un écran figé ne fournit presque aucune image)
+        #[arg(long, default_value = "ecran", value_parser = cmd_encode::parse_source)]
+        source: cmd_encode::Source,
+        /// Résolution de la source synthétique (sans effet sur `ecran`).
+        #[arg(long, default_value_t = 2560)]
+        width: u32,
+        #[arg(long, default_value_t = 1440)]
+        height: u32,
     },
-    /// Reçoit : consomme le bloc d'offre, renvoie sa réponse, mesure le débit (Q5)
+    /// Reçoit : consomme le bloc d'offre, renvoie sa réponse, écrit le flux
+    /// reçu et mesure débit/gigue/transit (Q4, Q5)
     View {
         #[arg(long, default_value_t = 30)]
         seconds: u64,
+        #[arg(long, default_value = "recu.h265")]
+        out: String,
     },
 }
 
@@ -82,7 +106,25 @@ fn main() -> anyhow::Result<()> {
             bitrate_mbps,
             monitor,
         } => cmd_codecs::run(seconds, bitrate_mbps, monitor),
-        Cmd::Host { seconds } => cmd_host::run(seconds),
-        Cmd::View { seconds } => cmd_view::run(seconds),
+        Cmd::Host {
+            seconds,
+            codec,
+            bitrate_mbps,
+            floor_mbps,
+            monitor,
+            source,
+            width,
+            height,
+        } => cmd_host::run(cmd_host::Parametres {
+            secondes: seconds,
+            codec,
+            bitrate_mbps,
+            floor_mbps,
+            monitor,
+            source,
+            largeur_synth: width,
+            hauteur_synth: height,
+        }),
+        Cmd::View { seconds, out } => cmd_view::run(seconds, &out),
     }
 }
