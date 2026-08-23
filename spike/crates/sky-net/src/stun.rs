@@ -79,6 +79,28 @@ pub fn battement(socket: &UdpSocket, serveurs: &[SocketAddr]) {
     }
 }
 
+/// Octet unique d'un paquet de percage.
+///
+/// WebRTC demultiplexe sur le premier octet : 0-3 pour STUN, 20-63 pour DTLS,
+/// 128-191 pour RTP. La valeur 0x64 ne tombe dans aucune de ces plages, donc
+/// l'agent d'en face l'ignore purement et simplement. C'est exactement ce
+/// qu'on veut : ouvrir le passage dans notre box sans rien demander a l'autre.
+///
+/// Un binding request STUN ferait l'inverse : l'agent tenterait de le traiter,
+/// le rejetterait faute des bons identifiants, et la negociation en patirait.
+pub const OCTET_PERCAGE: u8 = 0x64;
+
+/// Ouvre un passage entrant dans notre box pour les adresses visees.
+///
+/// Chaque paquet sortant autorise le trafic entrant depuis cette destination.
+/// Sans cela, une machine qui attend passivement garde sa box fermee et les
+/// paquets du correspondant sont jetes a l'entree.
+pub fn percer(socket: &UdpSocket, cibles: &[SocketAddr]) {
+    for cible in cibles {
+        let _ = socket.send_to(&[OCTET_PERCAGE], cible);
+    }
+}
+
 /// Résout les serveurs autorisés, une seule fois par lien.
 ///
 /// Seule fonction du spike à faire une résolution DNS, et seul endroit qui

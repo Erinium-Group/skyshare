@@ -103,6 +103,13 @@ pub struct PeerLink {
     /// Ils sont mis de cote puis injectes au premier `poll`, pour ne rien
     /// perdre du tout premier echange.
     en_attente: Vec<(Vec<u8>, SocketAddr)>,
+    /// Adresses annoncees par le pair, extraites du SDP.
+    ///
+    /// Servent a percer le NAT *local* pendant l'attente : chaque paquet emis
+    /// vers ces adresses ouvre un passage entrant pour elles dans notre box.
+    /// Sans cela, un spectateur qui attend passivement garde sa box fermee et
+    /// les paquets de l'emetteur sont jetes a l'entree.
+    cibles_pair: Vec<SocketAddr>,
     paquets_recus: u64,
     /// Origine du temps tel que `str0m` le voit.
     horloge: Instant,
@@ -158,6 +165,7 @@ impl PeerLink {
                 emis_vers_prive: 0,
                 emis_vers_public: 0,
                 en_attente: Vec::new(),
+                cibles_pair: Vec::new(),
                 paquets_recus: 0,
                 horloge,
                 depart: None,
@@ -177,6 +185,7 @@ impl PeerLink {
         let (mut rtc, horloge) = nouveau_rtc();
         let (socket, locale) = Self::socket_et_candidats(&mut rtc)?;
 
+        let cibles_pair = cibles_depuis_sdp(&sdp);
         let answer = rtc
             .sdp_api()
             .accept_offer(offer)
@@ -214,6 +223,7 @@ impl PeerLink {
                 emis_vers_prive: 0,
                 emis_vers_public: 0,
                 en_attente: Vec::new(),
+                cibles_pair,
                 paquets_recus: 0,
                 horloge,
                 depart: None,
@@ -232,7 +242,14 @@ impl PeerLink {
             .socket
             .try_clone()
             .context("duplication du port UDP impossible")?;
+        // On vise les serveurs STUN (pour garder notre adresse publique stable)
+        // ET le pair lui-meme (pour ouvrir notre box a ses paquets). Ce second
+        // point est ce qui manquait : un spectateur qui attend sans jamais
+        // emettre garde sa box fermee, et les paquets de l'emetteur sont jetes
+        // a l'entree. Ces envois ne passent pas par l'agent, donc son horloge
+        // ne demarre pas.
         let serveurs = stun::serveurs_autorises();
+        let cibles = self.cibles_pair.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let drapeau = stop.clone();
 
@@ -240,6 +257,7 @@ impl PeerLink {
         let handle = std::thread::spawn(move || {
             while !drapeau.load(Ordering::Relaxed) {
                 stun::battement(&socket, &serveurs);
+                stun::percer(&socket, &cibles);
                 for _ in 0..30 {
                     if drapeau.load(Ordering::Relaxed) {
                         return;
@@ -277,6 +295,9 @@ impl PeerLink {
                     if self.serveurs_stun.contains(&source) {
                         continue; // reponse a notre propre battement
                     }
+                    if n == 1 && buf[0] == stun::OCTET_PERCAGE {
+                        continue; // percage du pair : il ouvre sa box, rien de plus
+                    }
                     self.paquets_recus += 1;
                     self.en_attente.push((buf[..n].to_vec(), source));
                     return true;
@@ -310,6 +331,7 @@ impl PeerLink {
         }
         let sdp = self.identity.open(&blob.sealed_sdp)?;
         let sdp = crate::handshake::decomprimer(&sdp)?;
+        self.cibles_pair = cibles_depuis_sdp(&sdp);
         let answer = SdpAnswer::from_sdp_string(&sdp)
             .map_err(|_| anyhow!("réponse illisible ou incomplète"))?;
 
@@ -475,7 +497,8 @@ impl PeerLink {
                 // Sortir ici court-circuiterait le `Input::Timeout` de fin de
                 // fonction : l'agent ICE cesserait d'avancer tant que des reponses
                 // STUN arrivent. On ignore le paquet sans quitter le cycle.
-                let du_pair = !self.serveurs_stun.contains(&source);
+                let percage = n == 1 && buf[0] == stun::OCTET_PERCAGE;
+                let du_pair = !self.serveurs_stun.contains(&source) && !percage;
                 if du_pair {
                     self.paquets_recus += 1;
                 }
@@ -695,5 +718,66 @@ fn adresse_privee(a: &SocketAddr) -> bool {
             v4.is_private() || v4.is_link_local() || v4.is_loopback()
         }
         std::net::IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
+/// Extrait les adresses des candidats annonces dans un SDP.
+///
+/// On ne s'appuie pas sur `str0m` pour cela : ces adresses servent a emettre
+/// hors de l'agent, precisement pour ne pas demarrer son horloge.
+///
+/// Les adresses de reseau local sont ecartees : viser le 192.168.x.x du pair
+/// depuis un autre reseau ne perce rien et peut deranger une machine tierce.
+pub fn cibles_depuis_sdp(sdp: &str) -> Vec<SocketAddr> {
+    let mut out = Vec::new();
+    for ligne in sdp.lines() {
+        let Some(reste) = ligne.strip_prefix("a=candidate:") else {
+            continue;
+        };
+        let champs: Vec<&str> = reste.split_whitespace().collect();
+        if champs.len() < 6 {
+            continue;
+        }
+        let Ok(ip) = champs[4].parse::<std::net::IpAddr>() else {
+            continue;
+        };
+        let Ok(port) = champs[5].parse::<u16>() else {
+            continue;
+        };
+        let adresse = SocketAddr::new(ip, port);
+        if !adresse_privee(&adresse) && !out.contains(&adresse) {
+            out.push(adresse);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests_cibles {
+    use super::cibles_depuis_sdp;
+
+    const SDP: &str = "v=0
+a=candidate:aaa 1 udp 2130706175 192.168.1.4 53339 typ host ufrag xyz
+a=candidate:bbb 1 udp 1686109951 82.67.25.85 23022 typ srflx raddr 0.0.0.0 rport 0
+";
+
+    #[test]
+    fn retient_l_adresse_internet() {
+        let c = cibles_depuis_sdp(SDP);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].port(), 23022);
+    }
+
+    #[test]
+    fn ecarte_le_reseau_local() {
+        // Viser le 192.168.x.x du pair depuis un autre reseau ne perce rien.
+        assert!(cibles_depuis_sdp(SDP).iter().all(|a| a.port() != 53339));
+    }
+
+    #[test]
+    fn tolere_un_sdp_sans_candidat() {
+        assert!(cibles_depuis_sdp("v=0
+s=-
+").is_empty());
     }
 }
