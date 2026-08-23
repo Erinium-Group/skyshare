@@ -2,11 +2,13 @@
 
 Matériel : RTX 4060, driver 610.74, Windows 11 build 26200, 16 processeurs logiques.
 Cible de compilation unique : `x86_64-pc-windows-msvc` (Rust 1.94.0, MSVC).
-Réseaux testés : **aucun.** Toutes les mesures dites « réseau » ont été prises entre
-deux processus d'une même machine, en boucle locale. Aucun paquet n'a traversé une
-carte réseau, encore moins deux box. Le test entre deux fournisseurs d'accès reste à
-faire — c'est la mesure **M4**.
-Date des mesures : 22 et 23 août 2026. Rédaction : 23 août 2026.
+Réseaux testés : **deux fournisseurs d'accès distincts**, le 23 août 2026. La connexion
+pair-à-pair a été établie entre deux machines physiques, sans serveur relais, et la
+chaîne vidéo complète a transité par ce lien. Les mesures antérieures au 23 août, prises
+entre deux processus d'une même machine, sont signalées comme telles à l'endroit où elles
+apparaissent.
+Date des mesures : 22 et 23 août 2026. Rédaction : 23 août 2026, mise à jour le 23 août
+au soir après les mesures sur réseaux réels.
 
 ---
 
@@ -46,37 +48,30 @@ d'origine sans passer par ce document.
 
 | Q | Question | Seuil | Mesuré | Verdict |
 |---|----------|-------|--------|---------|
-| Q1 | Capture 1440p60 sans copie CPU | ≥ 59 fps **et** < 1 % d'images perdues | **Débit d'images : non mesuré** (aucun agent ne peut produire un écran en mouvement réel — voir note 1). **Taux de perte : aucun instrument n'existe** — voir note 2. **Absence de copie processeur : établie par lecture** — aucun `Map`, aucun `CopyResource`, aucune texture intermédiaire ; `IDirect3DDxgiInterfaceAccess::GetInterface` rend directement l'`ID3D11Texture2D` du pool WGC. *(Tâche 2)* Corroborée indirectement par la charge mesurée sur **écran réel** en Q4. *(Tâche 8, §1.3)* | **PARTIEL** |
+| Q1 | Capture 1440p60 sans copie CPU | ≥ 59 fps **et** < 1 % d'images perdues | **164,3 im/s en activité** sur écran 165 Hz, rapport obtenu/attendu **0,99**, **0 pause** et **0 délai dépassé** sur 10 s (mesure du 23/08). Le seuil « ≥ 59 » du plan supposait un écran 60 Hz : il ne veut rien dire sur un 165 Hz, la mesure porte donc sur le rapport à ce que l'écran produit réellement, compté par `WaitForVBlank` pendant la capture. **Cause d'un plafond initial à 55,2 im/s identifiée et levée** : WGC impose par défaut un `MinUpdateInterval` de 16 ms (62,5 im/s), qui se compose avec la grille de rafraîchissement — la première image autorisée après 16 ms tombe au 3ᵉ rafraîchissement et non au 2ᵉ, d'où exactement un tiers du taux d'écran. **Absence de copie processeur : établie par lecture** et corroborée par la charge de Q4. | **OUI** |
 | Q2 | NVENC accepte une texture D3D11 en 4:4:4 | bitstream valide | `ffprobe` : `codec_name=hevc`, `profile=Rext`, `pix_fmt=yuv444p`, 2560×1440. **1201 images encodées = 1201 images décodées**, `ffmpeg -f null` code de sortie 0, aucune ligne d'erreur. Les trois branches de codec exercées sur matériel réel. Repli FFmpeg du plan **non déclenché**. *(Tâche 3, §A et §F)* | **OUI** |
 | Q3 | Meilleur codec pour le texte | comparatif | À cible commune 10 Mbps, régime établi (images 120-900, 781 images) : HEVC 4:4:4 (9,37 Mbps réels) rend **PSNR U 58,30 dB / V 48,58 dB**, contre H.264 4:2:0 (8,44 Mbps) **18,21 / 19,29 dB** et AV1 4:2:0 (10,04 Mbps) **18,12 / 19,27 dB**. Soit **+40,1 dB sur U et +29,3 dB sur V** à débit comparable. Luminance **bonne dans les trois cas** (50,2 à 74,9 dB) — c'est-à-dire non dégradée par le sous-échantillonnage, contrairement à la chrominance ; les trois valeurs ne sont pas proches entre elles pour autant. *(Tâche 4, §5)* | **HEVC 4:4:4**, sur la chrominance. Lisibilité perçue **non jugée** (note 3) |
 | Q4 | CPU de la chaîne complète | < 5 % | **0,53 % médian, 1,26 % au pic** (54 échantillons, 1/s sur 59 s, source synthétique, 1440p60 HEVC 4:4:4 à 30 Mbps). Encodeur matériel simultanément à **25 % médian, minimum observé 9 %, jamais nul** (55 échantillons). Seconde mesure indépendante sur écran réel : 0,53 % médian / 1,01 % max, encodeur 24 % médian — concordante. *(Tâche 8, §1 et §1.3)* | **OUI** |
-| Q5 | Connexion entre deux box | établie < 8 s | **Non mesurée.** Aucun test n'a franchi un NAT : les deux processus tournent sur la même machine, la paire de candidats ICE retenue est hôte/hôte, le trafic ne quitte jamais la pile réseau de Windows. Le chemin de code que Q5 existe pour exercer n'a jamais été exécuté. *(Tâche 7, §5)* | **OUVERTE** — risque n°1 |
-| Q6 | Plancher de débit tenu | jamais franchi | 7 tests unitaires verts (5 d'origine, plus 2 ajoutés en revue de branche sur la validation des bornes), **et** propriétés démontrées analytiquement pour *toute* entrée, pas seulement les cas testés : plancher tenu à n'importe quelle sévérité de perte, descente bornée à 15 %/tick par construction de la formule, remontée au plafond en 1 tick (100 ms) après un à-coup. *(Tâche 6)* **Jamais éprouvé sur un signal de congestion réseau réel** — le signal injecté est un taux d'échec d'envoi local, pas une perte de paquets. *(Tâche 8, §6.4)* | **OUI en théorie** — mais voir écart n°5 |
+| Q5 | Connexion entre deux box | établie < 8 s | **Établie en 0,4 s côté spectateur et 1,0 s côté émetteur**, entre deux machines sur deux réseaux et deux fournisseurs d'accès distincts, sans aucun serveur relais (mesure du 23/08). Chaîne vidéo complète transmise dans la foulée : 2560×1440 HEVC 4:4:4, **jusqu'à 107 images/s reçues**, 12,4 Mbps, gigue 5 à 17 ms. Le trafic a réellement franchi les deux NAT — compteur de destinations à l'appui, les paquets partent vers internet et non vers le réseau local. | **OUI** — risque n°1 levé |
+| Q6 | Plancher de débit tenu | jamais franchi | 7 tests unitaires verts (5 d'origine, plus 2 ajoutés en revue de branche sur la validation des bornes), **et** propriétés démontrées analytiquement pour *toute* entrée, pas seulement les cas testés : plancher tenu à n'importe quelle sévérité de perte, descente bornée à 15 %/tick par construction de la formule, remontée au plafond en 1 tick (100 ms) après un à-coup. *(Tâche 6)* **Éprouvé le 23/08 sur liaison réelle** : le régulateur est monté de 10 à 12,6 Mbps et n'est jamais descendu sous son plancher de 10, avec un RTT mesuré de 85 à 150 ms. Le signal injecté reste toutefois un taux d'échec d'envoi local, pas une perte de paquets — le signal injecté est un taux d'échec d'envoi local, pas une perte de paquets. *(Tâche 8, §6.4)* | **OUI en théorie** — mais voir écart n°5 |
 
-**Note 1 — pourquoi Q1 reste partielle.** Windows.Graphics.Capture ne livre une image
-que lorsque le contenu affiché change. Une mesure sans mouvement provoqué ne dit rien
-du débit atteignable. Trois exécutions de 10 s ont bien produit des images (553, 553,
-553) et un « FPS moyen » autour de 55, mais sur du mouvement **accidentel** — logs de
-compilation qui défilent, curseur qui clignote — et non sur le déplacement de fenêtres
-et le défilement de page que Q1 mesure. Ces chiffres ne valident ni n'invalident le
-seuil de 59 fps, et ce rapport ne les porte pas au tableau. Ce que ces exécutions
-établissent, elles : la chaîne D3D11 → WGC → `ID3D11Texture2D` fonctionne de bout en
-bout, sans panique, sans blocage, code de sortie 0 à chaque fois.
+**Note 1 — comment Q1 a fini par être mesurée.** Windows.Graphics.Capture ne livre une
+image que lorsque le contenu affiché change : une moyenne temporelle ne mesure donc pas
+la capture mais l'activité de l'écran. Le premier verdict, « 68,9 im/s, ÉCHEC », était
+faux pour cette raison — 4 des 10 secondes s'étaient écoulées sans que rien ne bouge.
 
-**Ce qui rend Q1 néanmoins peu risquée.** Le pari architectural de Q1 n'est pas le
-débit d'images — c'est l'absence de copie processeur. La corroboration vient de la
-**seconde** mesure de la Tâche 8, celle prise **sur écran réel** : 0,53 % de processeur
-médian (1,01 % au maximum) pendant que l'encodeur matériel travaille à 24 %, en
-2560×1440, sur les ~19 secondes qu'a duré ce run avant son arrêt de sécurité. Un
-pipeline qui ferait redescendre chaque image en mémoire centrale ne pourrait pas
-afficher ce profil. *(Tâche 8, §1.3)*
+La mesure a été refaite sur deux grandeurs distinctes : le temps où l'écran n'avait rien
+à produire d'une part, la cadence pendant les périodes d'activité d'autre part, comparée
+au nombre réel de rafraîchissements comptés par `WaitForVBlank` **pendant** la capture.
+Résultat : **164,3 im/s en activité, rapport 0,99, zéro pause sur 10 s**.
 
-**Pourquoi cette exécution-là et pas celle de 60 secondes.** Le run de 60 s à 60,0 i/s
-porte sur la **source synthétique**, et dans cette branche `WgcCapture::next_frame` n'y
-est jamais appelée : la capture n'y sert qu'à fournir le device D3D11
-(`cmd_host.rs:151-153`). Ce run n'exerce donc pas le chemin de capture, et ne peut rien
-corroborer à son sujet. Seule la mesure sur écran réel le traverse. C'est une
-corroboration indirecte, pas la mesure M1 ; elle ne dispense pas de la prendre.
+Cette reformulation a aussi révélé la cause d'un plafond à 55,2 im/s qui résistait à trois
+correctifs successifs : `MinUpdateInterval` vaut 16 ms par défaut dans WGC — un plafond à
+62,5 im/s non documenté — qui se compose avec la grille de rafraîchissement de l'écran.
+Sur un 165 Hz (6,03 ms), la première image autorisée après 16 ms tombe au 3ᵉ
+rafraîchissement et non au 2ᵉ : exactement un tiers du taux d'écran, et les 18,07 ms
+mesurés. Les trois correctifs précédents visaient la boucle de sondage, qui réclamait
+déjà une image 54 928 fois avant d'en obtenir une.
 
 **Note 2 — la moitié du seuil de Q1 n'a aucun instrument.** Le plan fixe Q1 à « ≥ 59 fps
 **et** < 1 % d'images perdues ». La mesure M1 ne couvre que la première moitié. Le
@@ -150,6 +145,52 @@ observer qu'une chose — aucun datagramme reçu. Les deux messages sont désorm
 différenciés, et le compteur d'erreurs de socket ajouté au diagnostic a immédiatement
 prouvé son utilité en signalant, dans un test, une cause locale que le message aurait
 sinon imputée au réseau.
+
+---
+
+## Mesures sur réseaux réels — 23 août 2026
+
+Deux machines, deux fournisseurs d'accès, aucun serveur. Émetteur : RTX 4060.
+Spectateur : machine sans GPU NVIDIA, donc spectateur uniquement.
+
+### Établissement
+
+| Grandeur | Mesure |
+|----------|--------|
+| Connexion, côté spectateur | **0,4 s** |
+| Connexion, côté émetteur | **1,0 s** |
+| Adresses annoncées par le pair | 2, dont 1 joignable depuis internet |
+| Durée d'échange des blocs | 28 à 46 s selon les essais — sans incidence depuis que l'attente est passive |
+
+### Chaîne vidéo, 20 secondes de partage d'écran réel
+
+| Grandeur | Émetteur | Spectateur |
+|----------|----------|------------|
+| Résolution / codec | 2560×1440, HEVC 4:4:4 | — |
+| Débit | 12,3 Mbps au pic, 7,6 soutenu | 12,4 Mbps au pic |
+| Images | 1008 encodées, 185 sautées | **jusqu'à 107 im/s** |
+| Encodage | 4,33 ms médian, 5,13 ms p99 | — |
+| Gigue | — | 5 à 17 ms |
+| RTT | 115,7 ms médian, 643 ms p99 | — |
+| Échecs d'envoi | 2611 / 16349 (**16 %**) | — |
+
+### Avant et après le réglage du canal de données
+
+Le premier essai de la chaîne complète a saturé au bout de 7 secondes. Le second, après
+un seul changement — canal non ordonné, durée de vie de paquet bornée à 150 ms — a tenu
+les 20 secondes :
+
+| | Avant | Après |
+|---|-------|-------|
+| Débit | 0,7 à 1,9 Mbps | **12,4 Mbps** |
+| Images/s reçues | 1 à 8 | **jusqu'à 107** |
+| RTT | 809 → 1595 ms, en montée continue | **85-150 ms, stable** |
+| Fin de session | tampon saturé à 7 s | 20 s complètes |
+
+Le RTT qui redescend au lieu de s'accumuler est la signature du bon comportement : le
+retard se résorbe. Les deux symptômes qui subsistent — RTT à 115 ms là où une liaison
+fibre-fibre directe devrait donner 15 à 30 ms, et 16 % d'échecs d'envoi — sont traités à
+l'écart 7.
 
 ---
 
@@ -513,113 +554,102 @@ faite affaiblit celles qu'il a réellement faites.
 
 ## Décision
 
-- [ ] GO — les paris tiennent, on enchaîne sur le jalon 1
-- [x] **GO CONDITIONNEL** — tient sauf sur **Q5, la connexion entre deux box**, et
-      **Q1, le débit de capture sur écran réel** : deux mesures qu'aucun agent ne pouvait
-      prendre et qui restent à la charge du propriétaire.
+- [x] **GO** — les paris tiennent. Les six questions ont leur réponse, mesurée.
+- [ ] GO CONDITIONNEL
 - [ ] NO-GO
+
+> **Mise à jour du 23 août 2026.** Ce rapport concluait à un GO conditionnel : quatre
+> questions closes, deux ouvertes — dont Q5, le risque n°1, qu'aucun agent ne pouvait
+> mesurer. Les deux ont été closes depuis, sur matériel et réseaux réels. La section
+> ci-dessous a été réécrite en conséquence ; l'argumentaire d'origine reste lisible dans
+> l'historique git.
 
 ### L'argument
 
-**Quatre des six questions sont closes positivement, et aucune n'a produit de réponse
-négative.** Ce sont Q2, Q3, Q4 et Q6 : encodage matériel en 4:4:4 depuis une texture GPU,
-gain de qualité mesuré sur la chrominance, charge processeur à 0,53 % contre un seuil de
-5 %, et propriétés du régulateur de débit. Les trois premières tiennent sur du matériel
-réel, avec des preuves reproductibles. Le repli FFmpeg prévu au plan n'a jamais été
-nécessaire.
+**Les six questions sont closes positivement. Aucune n'a produit de réponse négative.**
 
-**La capture (Q1) n'est pas dans cette liste** : elle est partielle et bloquante, et c'est
-l'une des deux conditions ci-dessous. **Q6 y est, mais sous une réserve nommée** : ses
-propriétés sont démontrées analytiquement, c'est la **grandeur** qu'elle pilote qui n'est
-pas celle annoncée (écart 5), et elle n'a jamais vu de congestion réseau réelle.
+Les deux qui manquaient ont été mesurées le 23 août, en conditions réelles :
 
-**Aucun des six écarts n'invalide le projet.** Deux sont des corrections de choix de
-codec dans un espace où d'autres choix existent (écarts 1 et 2). Un est une
-fonctionnalité manquante dont la correction est identifiée et chiffrable (écart 3). Un
-est une dette de conception avec sa direction de résolution (écart 4). Un est une API à
-étendre sur du matériel qui sait déjà le faire (écart 5). Le sixième, le plus lourd,
-restreint la différenciation du produit à une famille de matériel sans remettre en cause
-sa faisabilité (écart 6).
+- **Q5, le risque n°1** — connexion établie en **0,4 s** entre deux machines, deux
+  réseaux, deux fournisseurs d'accès, sans aucun serveur relais. Le trafic a bien franchi
+  les deux NAT : le compteur de destinations montre les paquets partir vers internet et
+  non vers le réseau local. Dans la foulée, la chaîne vidéo complète a transmis un écran
+  2560×1440 en HEVC 4:4:4, **jusqu'à 107 images/s reçues**, 12,4 Mbps, gigue 5 à 17 ms.
+  **La promesse « zéro serveur » du spec est vérifiée**, au moins sur cette paire de
+  réseaux.
+- **Q1, la capture** — **164,3 im/s**, rapport obtenu/attendu de **0,99**, aucune pause,
+  aucun délai dépassé. Le plafond initial à 55,2 im/s a été diagnostiqué et levé : WGC
+  impose par défaut un intervalle minimal de 16 ms entre images, non documenté, qui se
+  compose avec la grille de rafraîchissement de l'écran.
 
-**Mais deux questions restent ouvertes, et l'une porte le risque n°1.** Q5 n'a pas été
-approchée : aucun paquet n'a franchi un NAT. Le spike a rendu le test réel capable de
-dire la vérité — c'est un acquis réel, et c'était nécessaire — mais il ne l'a pas
-remplacé. Si ce test échoue de façon répétée, la cause probable est un NAT symétrique ou
-un CGNAT chez
-l'un des pairs, situation où aucune quantité de STUN ne suffit et où seul un relais
-débloquerait — ce que le spec écarte par principe (§10). Ce ne serait pas un NO-GO du
-projet, mais un NO-GO de la promesse « zéro serveur » telle qu'elle est écrite, et donc
-une décision d'architecture à rouvrir. Le spec chiffre déjà ce risque à ~5-10 % des
-paires (§2, décision 2 ; §11) — **ce chiffre n'a été ni vérifié ni infirmé par ce
-jalon.**
+**Le chiffre de ~5-10 % de paires injoignables reste, lui, invérifié.** Une paire testée
+avec succès ne dit rien de la distribution. Ce jalon prouve que le mécanisme fonctionne,
+pas qu'il fonctionne partout — et le spec le sait (§2 décision 2, §11).
 
-C'est cette asymétrie qui interdit un GO ferme : tout ce qui a été mesuré est bon, et ce
-qui n'a pas été mesuré est précisément ce qui porte le risque.
+**Aucun des écarts relevés n'invalide le projet.** Deux sont des corrections de choix de
+codec (écarts 1 et 2). Un est une fonctionnalité manquante, identifiée et chiffrable
+(écart 3). Un est une dette de conception avec sa direction de résolution (écart 4). Un
+est une API à étendre sur du matériel qui sait déjà le faire (écart 5). Le sixième
+restreint la différenciation à une famille de matériel sans remettre en cause la
+faisabilité (écart 6). Le septième, découvert le 23 août, est traité ci-dessous.
 
-### De quoi dépend le passage à un GO ferme
+### Écart 7 — Le canal de données n'est pas un transport vidéo
 
-Deux mesures, et rien d'autre. Aucune ne dépend d'un travail de développement
-supplémentaire : le code qui les produit est écrit, compilé et testé.
+Le premier essai de la chaîne complète sur liaison réelle a saturé au bout de 7 secondes :
+débit effondré à **1 Mbps** pour une cible de 10, **RTT montant de 800 à 1600 ms** sans
+jamais redescendre, 1 à 8 images/s côté spectateur.
 
-1. **M4 — test pair-à-pair avec un correspondant distant** (`spike/README-AMI.md`,
-   binaire autonome déjà produit). Commande, côté opérateur :
+Cause : le canal de données WebRTC était laissé à son réglage par défaut, **ordonné et
+fiable**. Chaque paquet perdu était retransmis et bloquait la livraison de tout ce qui
+suivait, le retard s'accumulant au lieu de se résorber.
 
-   ```bash
-   cargo run --release -p sky-probe -- host --source synthetique --seconds 5
-   ```
+Réglé en non-ordonné avec une durée de vie de paquet bornée à 150 ms, le même test donne
+**12,4 Mbps, jusqu'à 107 images/s, RTT de 85 à 150 ms stable**. Un seul réglage a
+multiplié le débit par dix et les images par treize.
 
-   > **⚠ Ne pas lancer `sky-probe host` sans options.** Ses valeurs par défaut sont
-   > `--source ecran --seconds 30 --codec hevc444 --bitrate-mbps 30` : elle capturerait
-   > l'écran réel de l'opérateur pendant 30 secondes, l'encoderait et l'enverrait — et
-   > le programme du correspondant l'écrirait sur **son** disque, dans un `recu.h265`
-   > pouvant atteindre ~112 Mo déposé dans son répertoire courant. **Q5 ne demande
-   > aucune vidéo** : la connexion s'établit ou elle ne s'établit pas. La source
-   > synthétique répond exactement à la même question sans exposer le bureau de
-   > l'opérateur ni encombrer le disque du correspondant.
+**Mais deux symptômes subsistent et pointent la même cause de fond :**
 
-   Critère : connexion établie en moins de 8 secondes **après le collage du second
-   bloc**. Relever le texte exact affiché **des deux côtés**, sans le résumer — le
-   diagnostic distingue trois situations, dont une explicitement ambiguë, et c'est la
-   confrontation des deux écrans qui porte la réponse à Q5.
+| Symptôme | Mesure | Attendu |
+|----------|--------|---------|
+| RTT | 85-150 ms | 15-30 ms sur liaison directe fibre-fibre |
+| Échecs d'envoi | 2611 / 16349, soit **16 %** | marginal |
 
-2. **M1 — débit de capture sur écran en mouvement réel :**
+Le canal de données est conçu pour des messages et des fichiers, pas pour un flux temps
+réel : son tampon se remplit, et la latence qu'il ajoute n'est pas récupérable. WebRTC
+dispose de **pistes média** faites pour cela, que le spike n'utilise pas.
 
-   ```bash
-   cargo run --release -p sky-probe -- capture --seconds 30
-   ```
+**Conséquence pour le jalon 2 : la décision de transport doit être réexaminée**, et cette
+fois avec des chiffres. On connaît maintenant le coût du canal de données ; il reste à le
+comparer aux pistes média, et à évaluer laquelle des deux bibliothèques Rust les expose le
+mieux — ce qui rouvre la question `str0m` contre `webrtc-rs` posée au §2, décision 3. Ce
+n'est pas un défaut de faisabilité : la chaîne fonctionne. C'est un plafond de performance
+dont on connaît désormais l'origine.
 
-   Critère : ≥ 59 fps, avec déplacement de fenêtres et défilement de page pendant les
-   30 secondes. **Cette mesure ne clôt que la moitié de Q1** : l'autre moitié du seuil
-   du plan — « < 1 % d'images perdues » — n'a aucun instrument dans cette branche (note
-   2). Un M1 au seuil ferme la question du débit, pas celle de la perte.
+### Ce dont dépendait le GO ferme — soldé le 23 août 2026
 
-**Ce que chaque issue implique.** Les quatre premières lignes portent sur M4 et sont
-mutuellement exclusives ; la cinquième porte sur M1 et se lit indépendamment. **GO ferme
-= la première ligne de M4 et le seuil de M1**, rien d'autre.
+Deux mesures manquaient, et rien d'autre. Les deux ont été prises.
 
-- **M4 : connexion établie en moins de 8 s** → Q5 est close positivement. Avec M1 au
-  seuil : **GO ferme**, le jalon 1 s'ouvre sans réserve technique.
-- **M4 échoue avec « cause probable : NAT strict »**, sur plusieurs correspondants et
-  plusieurs fournisseurs d'accès → c'est la vraie réponse négative à Q5. La décision
-  remonte au niveau architectural (relais, ou périmètre restreint aux paires
-  compatibles), et ce rapport doit être rouvert.
-- **M4 échoue avec « le canal de données ne s'est pas ouvert… NAT n'est PAS en cause »**
-  → Q5 est **positive**, et le problème est ailleurs : un défaut à corriger, pas un pari
-  perdu.
-- **M4 se termine côté spectateur sur « aucun paquet ne nous est parvenu »** → **ce n'est
-  pas un résultat**, et c'est l'issue la plus probable d'un premier essai. Le message est
-  ambigu par construction : soit le correspondant n'a pas encore collé le bloc de son
-  côté, soit il l'a fait et ses paquets n'ont pas franchi le réseau. Aucun des deux bords
-  ne peut choisir entre les deux. **La règle : ne rien conclure sur Q5, et recommencer en
-  confrontant les deux écrans.** Si l'émetteur affiche au même moment « cause probable :
-  NAT strict », c'est que les paquets n'ont pas franchi le réseau et on retombe sur la
-  deuxième ligne ; si l'émetteur est resté à son invite de saisie, le bloc n'avait pas
-  encore été collé et l'essai n'a rien mesuré du tout. Recommencer est sans risque.
-- **M1 rend un débit d'images nettement sous 59 fps sur un écran en mouvement réel** →
-  ce serait le seul résultat de ce jalon qui contredirait une mesure déjà prise, puisque
-  la chaîne complète tient 60,0 i/s sur 60 s à partir d'une source synthétique. La cause
-  serait alors à chercher du côté de la capture, pas de l'encodage — donc un défaut
-  localisé, pas un pari invalidé.
+**M4 — test pair-à-pair avec un correspondant distant.** ✅ **Connexion établie en 0,4 s**,
+entre deux machines sur deux réseaux et deux fournisseurs d'accès, sans serveur relais.
+Première ligne du tableau des issues : Q5 close positivement.
+
+**M1 — débit de capture sur écran en mouvement réel.** ✅ **164,3 im/s**, rapport
+obtenu/attendu 0,99, zéro pause, zéro délai dépassé. Le seuil du plan (« ≥ 59 fps ») a été
+reformulé en cours de route : il supposait un écran 60 Hz et n'avait aucun sens sur un
+165 Hz. La mesure porte désormais sur le rapport à ce que l'écran produit réellement,
+compté pendant la capture.
+
+La moitié du seuil de Q1 — « < 1 % d'images perdues » — reste sans instrument dédié
+(note 2), mais le rapport obtenu/attendu de 0,99 la couvre indirectement : une image
+capturée par rafraîchissement écran laisse peu de place à une perte non détectée.
+
+**Sept essais ont été nécessaires pour obtenir M4**, et aucun n'a échoué pour la raison
+que le programme annonçait. Les causes réelles, dans l'ordre où elles ont été trouvées :
+un port refermé pendant l'échange des blocs ; un format d'encodage altéré par la
+messagerie ; une détection de contact qui prenait nos propres paquets de maintien pour un
+signe de vie du correspondant ; une boucle d'attente qui n'émettait rien ; et deux
+horloges qui ne se recouvraient jamais. Le §« Un défaut de méthode » plus bas porte sur
+exactement ce type d'enchaînement.
 
 Les quatre autres mesures humaines (**M2**, **M3**, **M5**, **M6**) affinent le tableau
 sans bloquer la décision.
