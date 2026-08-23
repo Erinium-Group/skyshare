@@ -24,6 +24,8 @@
 //!    adresses. La seule protection sur laquelle compter est l'absence de
 //!    collecteur.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
 
@@ -111,7 +113,7 @@ impl PeerLink {
 
         let blob = Blob {
             public_key: identity.public_key(),
-            sealed_sdp: offer.to_sdp_string().into_bytes(),
+            sealed_sdp: crate::handshake::comprimer(&offer.to_sdp_string()),
         };
 
         Ok((
@@ -137,7 +139,7 @@ impl PeerLink {
     /// Côté spectateur : consomme l'offre, produit la réponse scellée.
     pub fn viewer(identity: Identity, offre_texte: &str) -> anyhow::Result<(Self, String)> {
         let blob = Blob::from_text(offre_texte)?;
-        let sdp = String::from_utf8(blob.sealed_sdp).context("bloc illisible — texte invalide")?;
+        let sdp = crate::handshake::decomprimer(&blob.sealed_sdp)?;
         // L'erreur de `str0m` cite le SDP fautif : on ne la propage pas.
         let offer =
             SdpOffer::from_sdp_string(&sdp).map_err(|_| anyhow!("bloc illisible ou incomplet"))?;
@@ -152,7 +154,11 @@ impl PeerLink {
 
         // La réponse porte nos adresses : elle est scellée avec la clé de l'hôte,
         // donc seul lui pourra la lire, même si le bloc transite par ailleurs.
-        let sealed = identity.seal(&blob.public_key, answer.to_sdp_string().as_bytes());
+        // Comprimer AVANT de sceller : un contenu chiffré ne se comprime pas.
+        let sealed = identity.seal(
+            &blob.public_key,
+            &crate::handshake::comprimer(&answer.to_sdp_string()),
+        );
         let reponse = Blob {
             public_key: identity.public_key(),
             sealed_sdp: sealed,
@@ -178,6 +184,39 @@ impl PeerLink {
         ))
     }
 
+    /// Maintient le port ouvert tant que le garde rendu est vivant.
+    ///
+    /// À démarrer avant toute attente d'une saisie humaine. Le mapping NAT du
+    /// port qu'on vient d'annoncer expire en 30 à 120 s sans trafic, alors que
+    /// l'échange des blocs prend couramment plusieurs minutes.
+    pub fn maintenir_mapping(&self) -> anyhow::Result<GardeMapping> {
+        let socket = self
+            .socket
+            .try_clone()
+            .context("duplication du port UDP impossible")?;
+        let serveurs = stun::serveurs_autorises();
+        let stop = Arc::new(AtomicBool::new(false));
+        let drapeau = stop.clone();
+
+        // 15 s : bien en deçà des 30 s du mapping le plus court observé.
+        let handle = std::thread::spawn(move || {
+            while !drapeau.load(Ordering::Relaxed) {
+                stun::battement(&socket, &serveurs);
+                for _ in 0..30 {
+                    if drapeau.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        });
+
+        Ok(GardeMapping {
+            stop,
+            handle: Some(handle),
+        })
+    }
+
     /// Compteurs de circulation sur le port UDP : émis, reçus, erreurs.
     ///
     /// Destinés au message d'échec : ils disent lequel des trois scénarios
@@ -190,7 +229,7 @@ impl PeerLink {
     pub fn accept_answer(&mut self, texte: &str) -> anyhow::Result<()> {
         let blob = Blob::from_text(texte)?;
         let sdp = self.identity.open(&blob.sealed_sdp)?;
-        let sdp = String::from_utf8(sdp).context("réponse illisible — texte invalide")?;
+        let sdp = crate::handshake::decomprimer(&sdp)?;
         let answer = SdpAnswer::from_sdp_string(&sdp)
             .map_err(|_| anyhow!("réponse illisible ou incomplète"))?;
 
@@ -472,4 +511,22 @@ fn interface_sortante(serveurs: &[SocketAddr]) -> anyhow::Result<std::net::IpAdd
     let sonde = UdpSocket::bind("0.0.0.0:0").context("ouverture du port UDP impossible")?;
     sonde.connect(cible).context("réseau indisponible")?;
     Ok(sonde.local_addr().context("réseau indisponible")?.ip())
+}
+
+
+/// Tant qu'il vit, le port annoncé reste ouvert. Sa destruction arrête le
+/// battement — à laisser mourir dès que la négociation commence, car celle-ci
+/// produit son propre trafic.
+pub struct GardeMapping {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for GardeMapping {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
 }

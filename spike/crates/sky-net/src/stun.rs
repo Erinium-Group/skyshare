@@ -61,6 +61,24 @@ pub fn adresse_publique(socket: &UdpSocket, serveurs: &[SocketAddr]) -> Option<S
     None
 }
 
+/// Envoie une requête sans attendre la réponse, pour rafraîchir le mapping NAT.
+///
+/// Une box referme un mapping UDP après 30 à 120 s sans trafic. Or l'échange
+/// des blocs passe par un humain et une messagerie : plusieurs minutes. Sans ce
+/// battement, l'adresse annoncée dans l'offre n'existe plus quand la
+/// négociation démarre — on émet alors depuis un port que le correspondant ne
+/// connaît pas, et ses réponses arrivent sur un port fermé.
+///
+/// On ne lit pas la réponse : seul le paquet sortant compte, c'est lui qui
+/// rouvre le mapping. Le socket peut être non bloquant.
+pub fn battement(socket: &UdpSocket, serveurs: &[SocketAddr]) {
+    let trans_id = identifiant_transaction();
+    let requete = requete_binding(&trans_id);
+    for cible in serveurs {
+        let _ = socket.send_to(&requete, cible);
+    }
+}
+
 /// Résout les serveurs autorisés, une seule fois par lien.
 ///
 /// Seule fonction du spike à faire une résolution DNS, et seul endroit qui

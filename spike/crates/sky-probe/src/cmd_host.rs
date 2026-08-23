@@ -619,17 +619,6 @@ fn diagnostiquer(link: &PeerLink) {
             println!("aboutisse. Le réseau fait son travail : la traversée de NAT n'est pas");
             println!("en cause. Le défaut est dans notre code ou dans la négociation ICE.");
         }
-        println!();
-        println!("  Par ordre de fréquence :");
-        println!("   1. Un VPN actif chez l'un des deux — la cause la plus courante.");
-        println!("      Il suffit d'y exclure SkyShare, sans le couper :");
-        println!("      voir docs/vpn-split-tunneling.md");
-        println!("   2. Une connexion mobile (4G/5G) ou un réseau d'entreprise.");
-        println!("   3. Un fournisseur d'accès en CGNAT.");
-        println!();
-        println!("  Aucun logiciel ne perce ces réseaux sans relais — Discord et Zoom");
-        println!("  y passent par leurs serveurs. Exclure SkyShare du VPN est gratuit");
-        println!("  et prend trente secondes.");
     }
 
     let erreurs = link.erreurs_socket();
