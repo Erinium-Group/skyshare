@@ -68,7 +68,22 @@ pub enum EncodeError {
     #[error("aucun GPU NVIDIA utilisable : {0}")]
     Cuda(#[from] cudarc::driver::DriverError),
 
-    #[error("impossible de charger nvEncodeAPI64.dll : {0}")]
+    #[error(
+        "cette machine n'a pas d'encodeur NVIDIA.
+         
+         La bibliotheque nvEncodeAPI64.dll est installee avec le pilote NVIDIA :
+         son absence signifie qu'il n'y a pas de carte NVIDIA, ou que le pilote
+         n'est pas installe.
+         
+         La connexion reseau, elle, fonctionne : c'est l'encodage video qui ne
+         peut pas demarrer ici. Utilise l'autre machine comme emetteur et
+         celle-ci comme spectateur.
+         
+         (Le spike n'implemente que NVENC. Le repli logiciel x264 prevu par le
+          document d'architecture arrive au jalon 2.)
+         
+         Detail technique : {0}"
+    )]
     Dll(#[from] libloading::Error),
 
     #[error("appel NVENC échoué : {0:?}")]
