@@ -332,6 +332,15 @@ impl PeerLink {
         let sdp = self.identity.open(&blob.sealed_sdp)?;
         let sdp = crate::handshake::decomprimer(&sdp)?;
         self.cibles_pair = cibles_depuis_sdp(&sdp);
+        let publiques = self.cibles_pair.len();
+        let total = sdp.lines().filter(|l| l.starts_with("a=candidate:")).count();
+        println!("  Adresses annoncees par le correspondant : {total} au total, dont {publiques} joignables depuis internet.");
+        if publiques == 0 {
+            println!(">>> Aucune adresse publique de son cote : il n'annonce que son");
+            println!("        reseau local, ou nous ne pourrons jamais l'atteindre.");
+            println!("        Sa decouverte d'adresse publique a echoue — qu'il lance");
+            println!("        `sky-probe netcheck` : son pare-feu bloque probablement UDP.");
+        }
         let answer = SdpAnswer::from_sdp_string(&sdp)
             .map_err(|_| anyhow!("réponse illisible ou incomplète"))?;
 
