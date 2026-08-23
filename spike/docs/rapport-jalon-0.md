@@ -31,14 +31,17 @@ rapport ne reprend pas », en fin de section latence.
 
 ## Réponses aux 6 questions
 
+Chaque cellule nomme la tâche d'où vient sa mesure, pour qu'on puisse remonter au rapport
+d'origine sans passer par ce document.
+
 | Q | Question | Seuil | Mesuré | Verdict |
 |---|----------|-------|--------|---------|
-| Q1 | Capture 1440p60 sans copie CPU | ≥ 59 fps | **Débit d'images : non mesuré** (aucun agent ne peut produire un écran en mouvement réel — voir note 1). **Absence de copie processeur : établie par lecture** — aucun `Map`, aucun `CopyResource`, aucune texture intermédiaire ; `IDirect3DDxgiInterfaceAccess::GetInterface` rend directement l'`ID3D11Texture2D` du pool WGC. Corroborée indirectement par Q4. | **PARTIEL** |
-| Q2 | NVENC accepte une texture D3D11 en 4:4:4 | bitstream valide | `ffprobe` : `codec_name=hevc`, `profile=Rext`, `pix_fmt=yuv444p`, 2560×1440. **1201 images encodées = 1201 images décodées**, `ffmpeg -f null` code de sortie 0, aucune ligne d'erreur. Les trois branches de codec exercées sur matériel réel. Repli FFmpeg du plan **non déclenché**. | **OUI** |
-| Q3 | Meilleur codec pour le texte | comparatif | À cible commune 10 Mbps, régime établi (images 120-900, 781 images) : HEVC 4:4:4 (9,37 Mbps réels) rend **PSNR U 58,30 dB / V 48,58 dB**, contre H.264 4:2:0 (8,44 Mbps) **18,21 / 19,29 dB** et AV1 4:2:0 (10,04 Mbps) **18,12 / 19,27 dB**. Soit **+40,1 dB sur U et +29,3 dB sur V** à débit comparable. Luminance comparable dans les trois cas (50,2 à 74,9 dB). | **HEVC 4:4:4**, sur la chrominance. Lisibilité perçue **non jugée** (note 2) |
-| Q4 | CPU de la chaîne complète | < 5 % | **0,53 % médian, 1,26 % au pic** (54 échantillons, 1/s sur 59 s, source synthétique, 1440p60 HEVC 4:4:4 à 30 Mbps). Encodeur matériel simultanément à **25 % médian, minimum observé 9 %, jamais nul**. Seconde mesure indépendante sur écran réel : 0,53 % médian / 1,01 % max, encodeur 24 % médian — concordante. | **OUI** |
-| Q5 | Connexion entre deux box | établie < 8 s | **Non mesurée.** Aucun test n'a franchi un NAT : les deux processus tournent sur la même machine, la paire de candidats ICE retenue est hôte/hôte, le trafic ne quitte jamais la pile réseau de Windows. Le chemin de code que Q5 existe pour exercer n'a jamais été exécuté. | **OUVERTE** — risque n°1 |
-| Q6 | Plancher de débit tenu | jamais franchi | 5 tests unitaires verts, **et** propriétés démontrées analytiquement pour *toute* entrée, pas seulement les cas testés : plancher tenu à n'importe quelle sévérité de perte, descente bornée à 15 %/tick par construction de la formule, remontée au plafond en 1 tick (100 ms) après un à-coup. **Jamais éprouvé sur un signal de congestion réseau réel** — le signal injecté en Tâche 8 est un taux d'échec d'envoi local, pas une perte de paquets. | **OUI en théorie** — mais voir écart n°5 |
+| Q1 | Capture 1440p60 sans copie CPU | ≥ 59 fps | **Débit d'images : non mesuré** (aucun agent ne peut produire un écran en mouvement réel — voir note 1). **Absence de copie processeur : établie par lecture** — aucun `Map`, aucun `CopyResource`, aucune texture intermédiaire ; `IDirect3DDxgiInterfaceAccess::GetInterface` rend directement l'`ID3D11Texture2D` du pool WGC. *(Tâche 2)* Corroborée indirectement par la charge mesurée en Q4. *(Tâche 8)* | **PARTIEL** |
+| Q2 | NVENC accepte une texture D3D11 en 4:4:4 | bitstream valide | `ffprobe` : `codec_name=hevc`, `profile=Rext`, `pix_fmt=yuv444p`, 2560×1440. **1201 images encodées = 1201 images décodées**, `ffmpeg -f null` code de sortie 0, aucune ligne d'erreur. Les trois branches de codec exercées sur matériel réel. Repli FFmpeg du plan **non déclenché**. *(Tâche 3, §A et §F)* | **OUI** |
+| Q3 | Meilleur codec pour le texte | comparatif | À cible commune 10 Mbps, régime établi (images 120-900, 781 images) : HEVC 4:4:4 (9,37 Mbps réels) rend **PSNR U 58,30 dB / V 48,58 dB**, contre H.264 4:2:0 (8,44 Mbps) **18,21 / 19,29 dB** et AV1 4:2:0 (10,04 Mbps) **18,12 / 19,27 dB**. Soit **+40,1 dB sur U et +29,3 dB sur V** à débit comparable. Luminance **bonne dans les trois cas** (50,2 à 74,9 dB) — c'est-à-dire non dégradée par le sous-échantillonnage, contrairement à la chrominance ; les trois valeurs ne sont pas proches entre elles pour autant. *(Tâche 4, §5)* | **HEVC 4:4:4**, sur la chrominance. Lisibilité perçue **non jugée** (note 2) |
+| Q4 | CPU de la chaîne complète | < 5 % | **0,53 % médian, 1,26 % au pic** (54 échantillons, 1/s sur 59 s, source synthétique, 1440p60 HEVC 4:4:4 à 30 Mbps). Encodeur matériel simultanément à **25 % médian, minimum observé 9 %, jamais nul** (55 échantillons). Seconde mesure indépendante sur écran réel : 0,53 % médian / 1,01 % max, encodeur 24 % médian — concordante. *(Tâche 8, §1 et §1.3)* | **OUI** |
+| Q5 | Connexion entre deux box | établie < 8 s | **Non mesurée.** Aucun test n'a franchi un NAT : les deux processus tournent sur la même machine, la paire de candidats ICE retenue est hôte/hôte, le trafic ne quitte jamais la pile réseau de Windows. Le chemin de code que Q5 existe pour exercer n'a jamais été exécuté. *(Tâche 7, §5)* | **OUVERTE** — risque n°1 |
+| Q6 | Plancher de débit tenu | jamais franchi | 5 tests unitaires verts, **et** propriétés démontrées analytiquement pour *toute* entrée, pas seulement les cas testés : plancher tenu à n'importe quelle sévérité de perte, descente bornée à 15 %/tick par construction de la formule, remontée au plafond en 1 tick (100 ms) après un à-coup. *(Tâche 6)* **Jamais éprouvé sur un signal de congestion réseau réel** — le signal injecté est un taux d'échec d'envoi local, pas une perte de paquets. *(Tâche 8, §6.4)* | **OUI en théorie** — mais voir écart n°5 |
 
 **Note 1 — pourquoi Q1 reste partielle.** Windows.Graphics.Capture ne livre une image
 que lorsque le contenu affiché change. Une mesure sans mouvement provoqué ne dit rien
@@ -124,10 +127,10 @@ sinon imputée au réseau.
 
 | Composante | Valeur | Statut |
 |---|---|---|
-| Encodage p50 / p99 | **4,88 ms / 5,96 ms** | **Mesuré** — 3 599 échantillons, HEVC 4:4:4 2560×1440 à 30 Mbps, source synthétique, code courant. Couvre l'appel complet : enregistrement, mappage, encodage, attente du flux, copie des octets, démappage, désenregistrement. |
-| RTT réseau | **Non mesuré** | Les 16,90 ms de médiane relevés en Tâche 8 mesurent le chiffrement DTLS et le transport SCTP **en mémoire**, entre deux processus du même noyau. Ils ne prédisent rien d'un vrai lien. |
-| Transit sur le lien | 0,18 ms médian | Même réserve : boucle locale, aucun réseau traversé. |
-| Mesure photographique (médiane sur 5) | **Non mesurée** | Exige deux écrans physiques, un chronomètre plein écran, un appareil photo et deux lectures humaines. Hors de portée d'un agent — c'est la mesure **M6**. |
+| Encodage p50 / p99 | **4,88 ms / 5,96 ms** | **Mesuré** — 3 599 échantillons, HEVC 4:4:4 2560×1440 à 30 Mbps, source synthétique, code courant. Couvre l'appel complet : enregistrement, mappage, encodage, attente du flux, copie des octets, démappage, désenregistrement. *(Tâche 8, §1)* |
+| RTT réseau | **Non mesuré** | Les 16,90 ms de médiane relevés mesurent le chiffrement DTLS et le transport SCTP **en mémoire**, entre deux processus du même noyau. Ils ne prédisent rien d'un vrai lien. *(Tâche 8, §1 et §6.2)* |
+| Transit sur le lien | 0,18 ms médian | Même réserve : boucle locale, aucun réseau traversé. *(Tâche 8, §1)* |
+| Mesure photographique (médiane sur 5) | **Non mesurée** | Exige deux écrans physiques, un chronomètre plein écran, un appareil photo et deux lectures humaines. Hors de portée d'un agent — c'est la mesure **M6**. *(Tâche 8, §6.1)* |
 
 **Estimation basse, et rien de plus.** La somme des deux composantes mesurées donne
 ≈ 5,06 ms. Ce n'est **pas** une latence de bout en bout : il y manque la capture
@@ -156,9 +159,10 @@ Deux réserves de mesure à conserver :
 ### Deux chiffres que ce rapport ne reprend pas
 
 - **La médiane d'encodage H.264 4:4:4 de 5,46 ms** citée dans le tableau de remesure de
-  la Tâche 3. Elle est identique à sa valeur d'avant correction alors que son p99
-  associé chutait fortement (10,39 → 6,24 ms) et que les deux autres codecs voyaient
-  leur médiane monter. Possible recopie. **Non vérifiable** : le motif de test et la
+  la Tâche 3 *(§A)*. Elle est identique à sa valeur d'avant correction *(Tâche 3, §3 —
+  sortie console conservée verbatim)* alors que son p99 associé chutait fortement dans
+  le même intervalle (10,39 ms au §3 → 6,24 ms au §A) et que les deux autres codecs
+  voyaient leur médiane monter. Possible recopie. **Non vérifiable** : le motif de test et la
   configuration de l'encodeur ont changé depuis (motif refondu en Tâche 4, double
   passage désactivé), une réexécution ne reproduirait pas cette mesure mais en
   produirait une autre. Les temps d'encodage par codec à citer sont ceux de la Tâche 4,
@@ -266,9 +270,14 @@ récupérer une fois et les transmettre hors du flux vidéo. La seconde option e
 
 ### Écart 4 — L'offre de connexion voyage en clair
 
-**Le spec (§5.2)** promet, pour l'adresse réseau : « Non — enveloppe scellée ».
-**Le spec (§2, décision 5)** promet qu'« un inconnu qui clique sur un lien public
-n'obtient aucune adresse tant que l'hôte n'a pas approuvé ».
+**Le spec (§2, décision 4)** promet que « ni Vercel ni la base ne voient jamais une
+adresse en clair ». **Le spec (§2, décision 5)** promet qu'« un inconnu qui clique sur un
+lien public n'obtient aucune adresse tant que l'hôte n'a pas approuvé ». **Le spec
+(§5.2)**, qui en dérive, promet pour l'adresse réseau : « Non — enveloppe scellée ».
+
+Les trois sont corrigées, **la décision 4 et la décision 5 d'abord** : le registre des
+décisions est ce qu'on lit en premier, et corriger seulement l'énoncé dérivé du §5.2
+aurait laissé la promesse intacte à l'endroit qui compte.
 
 **La mesure.** Le bloc d'offre contient **deux adresses de l'émetteur en clair** — celle
 de son réseau local et sa publique — décodables par simple base64. Mesuré précisément :
@@ -366,9 +375,11 @@ matérielle, pas un défaut d'implémentation.
 **Trois voies, aucune indolore. Aucune n'est tranchée ici** — voir la décision D1.
 
 1. Encodage **logiciel** en 4:4:4 pour AMD et Intel. Texte net préservé, mais la charge
-   processeur passe de 0,5 % à plusieurs dizaines de pourcents et le 1440p60 devient
-   difficile — donc on troque la différenciation « texte net » contre la différenciation
-   « ne coûte rien à la machine ».
+   quitte l'encodeur matériel pour le processeur — donc on troque potentiellement la
+   différenciation « texte net » contre la différenciation « ne coûte rien à la machine ».
+   **Le coût réel n'est pas connu : aucune mesure de ce jalon ne couvre l'encodage
+   logiciel.** Toute valeur avancée serait une estimation, et cette voie ne peut être ni
+   retenue ni écartée avant d'avoir été mesurée.
 2. Accepter le 4:2:0 sur AMD et Intel, en le **disant dans l'interface** plutôt qu'en
    laissant l'utilisateur croire à un défaut du logiciel.
 3. Hybride : 4:4:4 matériel sur NVIDIA, 4:4:4 logiciel sous un seuil de résolution
@@ -377,9 +388,9 @@ matérielle, pas un défaut d'implémentation.
 **Travail déjà engagé sur cette question, hors périmètre de ce jalon.** Une note de
 référence du 23 août 2026,
 `docs/superpowers/notes/2026-08-23-compatibilite-toutes-cartes-graphiques.md`, instruit
-déjà le sujet — elle n'était pas commitée à la date de rédaction de ce rapport, et je ne
-l'ai ni écrite ni vérifiée. Deux de ses apports méritent d'être connus avant d'arbitrer
-D1, en les attribuant à leur source plutôt qu'à une mesure de ce jalon :
+déjà le sujet — je ne l'ai ni écrite ni vérifiée. Deux de ses apports méritent d'être
+connus avant d'arbitrer D1, en les attribuant à leur source plutôt qu'à une mesure de ce
+jalon :
 
 - **Le décodage 4:4:4 serait aussi rare que l'encodage.** Si c'est exact, la voie 1
   ci-dessus ne résout que la moitié du problème : produire du 4:4:4 depuis une carte
@@ -439,13 +450,16 @@ macOS reste à 0 €. Déjà intégré au document.
 ### L'argument
 
 **Quatre des six questions sont closes positivement, et aucune n'a produit de réponse
-négative.** Le cœur technique du projet — capture GPU, encodage matériel en 4:4:4 sans
-copie processeur, gain de qualité mesurable sur la chrominance, charge processeur à
-0,53 % contre un seuil de 5 % — tient sur du matériel réel, avec des preuves
-reproductibles. Le repli FFmpeg prévu au plan n'a jamais été nécessaire. Q6 est close
-sous une réserve nommée : ses propriétés sont démontrées, c'est la **grandeur** qu'elle
-pilote qui n'est pas celle annoncée (écart 5), et elle n'a jamais vu de congestion
-réseau réelle.
+négative.** Ce sont Q2, Q3, Q4 et Q6 : encodage matériel en 4:4:4 depuis une texture GPU,
+gain de qualité mesuré sur la chrominance, charge processeur à 0,53 % contre un seuil de
+5 %, et propriétés du régulateur de débit. Les trois premières tiennent sur du matériel
+réel, avec des preuves reproductibles. Le repli FFmpeg prévu au plan n'a jamais été
+nécessaire.
+
+**La capture (Q1) n'est pas dans cette liste** : elle est partielle et bloquante, et c'est
+l'une des deux conditions ci-dessous. **Q6 y est, mais sous une réserve nommée** : ses
+propriétés sont démontrées analytiquement, c'est la **grandeur** qu'elle pilote qui n'est
+pas celle annoncée (écart 5), et elle n'a jamais vu de congestion réseau réelle.
 
 **Aucun des six écarts n'invalide le projet.** Deux sont des corrections de choix de
 codec dans un espace où d'autres choix existent (écarts 1 et 2). Un est une
@@ -458,8 +472,8 @@ sa faisabilité (écart 6).
 **Mais deux questions restent ouvertes, et l'une porte le risque n°1.** Q5 n'a pas été
 approchée : aucun paquet n'a franchi un NAT. Le spike a rendu le test réel capable de
 dire la vérité — c'est un acquis réel, et c'était nécessaire — mais il ne l'a pas
-remplacé. Si ce
-test échoue de façon répétée, la cause probable est un NAT symétrique ou un CGNAT chez
+remplacé. Si ce test échoue de façon répétée, la cause probable est un NAT symétrique ou
+un CGNAT chez
 l'un des pairs, situation où aucune quantité de STUN ne suffit et où seul un relais
 débloquerait — ce que le spec écarte par principe (§10). Ce ne serait pas un NO-GO du
 projet, mais un NO-GO de la promesse « zéro serveur » telle qu'elle est écrite, et donc
@@ -477,22 +491,34 @@ supplémentaire : le code qui les produit est écrit, compilé et testé.
 
 1. **M4 — test pair-à-pair avec un correspondant distant** (`spike/README-AMI.md`,
    binaire autonome déjà produit). Critère : connexion établie en moins de 8 secondes
-   **après le collage du second bloc**. Relever le texte exact affiché des deux côtés,
-   sans le résumer — le diagnostic distingue désormais trois situations, et c'est cette
-   distinction qui porte la réponse à Q5.
+   **après le collage du second bloc**. Relever le texte exact affiché **des deux côtés**,
+   sans le résumer — le diagnostic distingue trois situations, dont une explicitement
+   ambiguë, et c'est la confrontation des deux écrans qui porte la réponse à Q5.
 2. **M1 — débit de capture sur écran en mouvement réel.** Critère : ≥ 59 fps, avec
    déplacement de fenêtres et défilement de page pendant les 30 secondes.
 
-Les quatre issues possibles, et ce que chacune implique :
+**Ce que chaque issue implique.** Les quatre premières lignes portent sur M4 et sont
+mutuellement exclusives ; la cinquième porte sur M1 et se lit indépendamment. **GO ferme
+= la première ligne de M4 et le seuil de M1**, rien d'autre.
 
-- **M4 réussit et M1 atteint le seuil** → **GO ferme**, le jalon 1 s'ouvre sans réserve
-  technique.
+- **M4 : connexion établie en moins de 8 s** → Q5 est close positivement. Avec M1 au
+  seuil : **GO ferme**, le jalon 1 s'ouvre sans réserve technique.
 - **M4 échoue avec « cause probable : NAT strict »**, sur plusieurs correspondants et
-  plusieurs fournisseurs d'accès → la décision remonte au niveau architectural (relais,
-  ou périmètre restreint aux paires compatibles), et ce rapport doit être rouvert.
+  plusieurs fournisseurs d'accès → c'est la vraie réponse négative à Q5. La décision
+  remonte au niveau architectural (relais, ou périmètre restreint aux paires
+  compatibles), et ce rapport doit être rouvert.
 - **M4 échoue avec « le canal de données ne s'est pas ouvert… NAT n'est PAS en cause »**
   → Q5 est **positive**, et le problème est ailleurs : un défaut à corriger, pas un pari
   perdu.
+- **M4 se termine côté spectateur sur « aucun paquet ne nous est parvenu »** → **ce n'est
+  pas un résultat**, et c'est l'issue la plus probable d'un premier essai. Le message est
+  ambigu par construction : soit le correspondant n'a pas encore collé le bloc de son
+  côté, soit il l'a fait et ses paquets n'ont pas franchi le réseau. Aucun des deux bords
+  ne peut choisir entre les deux. **La règle : ne rien conclure sur Q5, et recommencer en
+  confrontant les deux écrans.** Si l'émetteur affiche au même moment « cause probable :
+  NAT strict », c'est que les paquets n'ont pas franchi le réseau et on retombe sur la
+  deuxième ligne ; si l'émetteur est resté à son invite de saisie, le bloc n'avait pas
+  encore été collé et l'essai n'a rien mesuré du tout. Recommencer est sans risque.
 - **M1 rend un débit d'images nettement sous 59 fps sur un écran en mouvement réel** →
   ce serait le seul résultat de ce jalon qui contredirait une mesure déjà prise, puisque
   la chaîne complète tient 60,0 i/s sur 60 s à partir d'une source synthétique. La cause
@@ -524,8 +550,14 @@ Détail complet et commandes dans
 journal réseau détaillé pendant M4. Le filtrage de données personnelles de la
 bibliothèque réseau ne couvre pas son point de trace le plus volumineux : les adresses
 des deux machines sortiraient en clair dans la console, et donc dans toute capture
-d'écran partagée ensuite. Le diagnostic intégré suffit à identifier le côté fautif sans
-exposer d'adresse.
+d'écran partagée ensuite.
+
+Le diagnostic intégré est ce qu'on a de mieux, et il est honnête sur ses limites.
+**Il ne désigne aucun côté fautif** — aucun des deux bords ne peut savoir ce qui se passe
+chez l'autre, et un message qui l'affirmerait affirmerait une cause qu'il ne peut pas
+connaître (c'est l'objet de la correction du §5.5 du spec, plus haut). Il distingue trois
+situations, dont une explicitement ambiguë. **Recopier le texte affiché des deux côtés** :
+c'est leur confrontation, et non l'un des deux seul, qui permettra de conclure.
 
 **Deux pièges de jugement**, pour M2 et M3. Ne jamais juger la qualité sur la première
 seconde d'un flux : le tampon de sortie est réglé à une seule image, donc la toute
@@ -546,14 +578,16 @@ peut rester sur l'implémentation NVENC en dur en signalant la limite dans l'int
 Il détermine aussi si le §6.4 continue de promettre un socle universel en 4:4:4 — ce que
 la mesure et la recherche contredisent toutes deux.
 
-*Cette décision est déjà partiellement engagée hors de ce jalon* : la note de référence
-`docs/superpowers/notes/2026-08-23-compatibilite-toutes-cartes-graphiques.md` (non
-commitée à ce jour, non vérifiée par moi) consigne quatre décisions de périmètre — 4:4:4
-natif conservé sur NVIDIA, objectif de faire mieux que 4:2:0 ailleurs plutôt que de s'y
-résigner, ordinateur avant mobile, application native sur ordinateur — et recommande un
-spike dédié après le jalon 3. Ce que ce rapport maintient malgré cela : **rien ne peut
-être engagé avant une confirmation sur matériel AMD et Intel réel**, puisque tout le
-constat de l'écart 6 est documentaire.
+*Cette décision est instruite ailleurs, en dehors de ce jalon.* La note de référence
+`docs/superpowers/notes/2026-08-23-compatibilite-toutes-cartes-graphiques.md` — que je
+n'ai ni écrite ni vérifiée — **consigne** quatre décisions de périmètre : 4:4:4 natif
+conservé sur NVIDIA, objectif de faire mieux que 4:2:0 ailleurs plutôt que de s'y
+résigner, ordinateur avant mobile, application native sur ordinateur. Elle les présente
+comme déjà prises par le propriétaire ; je les rapporte **telles que cette note les
+consigne**, sans les vérifier auprès de lui. Elle recommande par ailleurs un spike dédié
+après le jalon 3. Ce que ce rapport maintient malgré tout : **rien ne peut être engagé
+avant une confirmation sur matériel AMD et Intel réel**, puisque tout le constat de
+l'écart 6 est documentaire.
 
 **D2 — Comment restructurer le signaling pour que l'offre soit scellée ?** (écart 4)
 La direction est identifiée — un annuaire de clés interrogeable **avant** production de

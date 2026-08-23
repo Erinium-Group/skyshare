@@ -30,7 +30,7 @@
 |---|-------|----------|
 | 1 | Stack | Tauri (UI React) + cœur Rust natif — capture/encodage/transport natifs |
 | 2 | Infra | **Zéro serveur.** Signaling via API routes Vercel + Neon. STUN publics. Pas de TURN. |
-| 3 | Vie privée | Candidats ICE chiffrés E2E (Vercel/DB ne voient jamais d'IP en clair), IP jamais affichée ni loguée, IP locales masquées en mDNS `.local` |
+| 3 | Vie privée | Candidats ICE chiffrés E2E (Vercel/DB ne voient jamais d'IP en clair), IP jamais affichée ni loguée, IP locales masquées en mDNS `.local`. **⚠ Conditionné à D2 (écart 4 du jalon 0)** : seule la *réponse* est scellée aujourd'hui ; l'*offre* part avant qu'une clé de destinataire n'existe, donc en clair. Tant que la boîte aux lettres est un simple relais, l'opérateur du serveur voit l'adresse publique de chaque émetteur — voir spec §2 décisions 4 et 5, et §5.1 |
 | 4 | Accès public | Ami accepté → entrée directe. Inconnu via lien → salle d'attente + approbation de l'hôte. |
 | 5 | Multi-spectateurs | 10+ supportés. Simulcast 3 couches (encodage constant, réseau linéaire). Jauge d'upload en direct. |
 | 6 | Audio | Son du partage uniquement (Opus haute qualité). Pas de micro/vocal — Discord s'en charge. |
@@ -58,7 +58,7 @@
    - [x] Tâche 4 : Comparatif des codecs à débit égal (Q3) — DONE. **Q3 = OUI, large.** À cible 10 Mbps, régime établi (781 images) : HEVC 4:4:4 rend PSNR U 58,30 / V 48,58 dB contre 18,21 / 19,29 dB (H.264 4:2:0) et 18,12 / 19,27 dB (AV1 4:2:0), soit **+40,1 dB sur U, +29,3 dB sur V**. Deux codecs 4:2:0 différents convergent sur le même plancher chroma : l'écart est un artefact du sous-échantillonnage, pas d'un réglage. Lisibilité perçue non jugée → M3. Découverte portant l'écart n°2 : H.264 4:4:4 rend 70,93 Mbps quelle que soit la cible. Détail : `task-4-report.md`.
    - [x] Tâche 7 : Connexion pair-à-pair entre deux machines (Q5) — DONE_WITH_CONCERNS. **Q5 reste OUVERTE** : aucun test n'a franchi un NAT, tout s'est fait en boucle locale. Ce que la tâche a produit : la suppression de **trois mécanismes distincts pouvant produire une fausse réponse négative**, dont aucun n'était visible dans un test local réussi (la bibliothèque ne découvre pas l'adresse publique ; un champ mal renseigné aurait fait rejeter tous les paquets entrants distants ; une minuterie interne coupait à 30 s). Détail : `task-7-report.md`.
    - [x] Tâche 8 : Chaîne complète et mesures de bout en bout (Q4) — DONE_WITH_CONCERNS. **Q4 = OUI** : processeur 0,53 % médian / 1,26 % max, encodeur matériel 25 % médian et jamais nul, 60,0 i/s soutenues sur 60 s en 1440p60 HEVC 4:4:4. Seconde mesure sur écran réel concordante. Porte l'écart n°5 (le régulateur pilote la cadence, pas le débit). Détail : `task-8-report.md`.
-   - [x] Tâche 9 : Rapport de faisabilité — DONE. `spike/docs/rapport-jalon-0.md`. Spec révisé (§5.1, §5.2, §5.3, §6.1, §6.2, §6.4, §6.5, §7.5, §9, §11). Détail : `task-9-report.md`.
+   - [x] Tâche 9 : Rapport de faisabilité — DONE. `spike/docs/rapport-jalon-0.md`. Spec révisé, douze sections : §2 (décisions 4 et 5), §5.1, §5.2, §5.3, §5.5, §6.1, §6.2, §6.4, §6.5, §7.5, §9, §11. Détail : `task-9-report.md`.
 
 ## Jalon 0 — les six écarts avec le document d'architecture
 
@@ -70,19 +70,20 @@ jalon ; le sixième sur une recherche documentaire, sans matériel de test.
 | 1 | AV1 ne fait pas de 4:4:4 sur NVENC, même sur Ada | §6.4 | **Corrigé.** AV1 réservé au partage de vidéo, pas d'écran de travail |
 | 2 | H.264 4:4:4 rend 70,93 Mbps quelle que soit la cible (RTX 4060 / pilote 610.74) | §6.4 | **Corrigé.** Écarté du socle ; fusionne avec l'écart 6 dans la décision **D1** |
 | 3 | Les en-têtes de séquence ne sont émis qu'une fois → un spectateur qui rejoint en cours ne verrait **rien** | §5.3, §5.4, §6.4, §6.5 | **Corrigé + à implémenter au jalon 2** : émission à l'arrivée d'un spectateur, ou transmission hors flux vidéo |
-| 4 | L'offre de connexion voyage **en clair** et a une forme de diffusion ; au jalon 1 l'opérateur du serveur verrait l'adresse publique de chaque émetteur | §5.1, §5.2, §2 (déc. 5) | **Inscrit comme décision D2**, non tranchée. Direction : annuaire de clés interrogeable **avant** production de l'offre |
+| 4 | L'offre de connexion voyage **en clair** et a une forme de diffusion ; au jalon 1 l'opérateur du serveur verrait l'adresse publique de chaque émetteur | §2 (déc. 4 et 5), §5.1, §5.2 | **Inscrit comme décision D2**, non tranchée. Direction : annuaire de clés interrogeable **avant** production de l'offre |
 | 5 | Le régulateur ne peut que sauter des images ; il ne pilote pas le débit | §6.1, §6.5, §7.5 | **Corrigé + à implémenter** : exposer `nvEncReconfigureEncoder` dans `sky-encode` |
 | 6 | Le 4:4:4 n'existe pas sur AMD (aucune surface dans AMF, `AMF_INVALID_FORMAT` sur RDNA 3), non attesté sur Intel | §6.1, §6.4, §11 | **Corrigé + décision D1**, non tranchée. Prérequis : extraire un trait `VideoEncoder`, inexistant |
 
 ## Jalon 0 — décisions remontées au propriétaire, non tranchées
 
 - **D1 — que promet-on aux utilisateurs non-NVIDIA ?** Arbitrage entre « sans compromis
-  partout » (repli d'encodage coûteux) et « sans compromis sur NVIDIA » (4:2:0 ailleurs,
-  dit dans l'interface). Voies décrites au §6.4 du spec. **Partiellement engagée hors
-  jalon** : voir `docs/superpowers/notes/2026-08-23-compatibilite-toutes-cartes-graphiques.md`
-  (note de référence non commitée), qui consigne quatre décisions de périmètre et
-  recommande un spike dédié après le jalon 3. Prérequis absolu : confirmer sur matériel
-  AMD et Intel réel — tout le constat de l'écart 6 est documentaire.
+  partout » (repli d'encodage hors NVENC, coût non mesuré) et « sans compromis sur NVIDIA » (4:2:0 ailleurs,
+  dit dans l'interface). Voies décrites au §6.4 du spec. **Instruite ailleurs** :
+  `docs/superpowers/notes/2026-08-23-compatibilite-toutes-cartes-graphiques.md` consigne
+  quatre décisions de périmètre qu'elle présente comme déjà prises par le propriétaire, et
+  recommande un spike dédié après le jalon 3 — note non vérifiée par la Tâche 9. Prérequis
+  absolu : confirmer sur matériel AMD et Intel réel — tout le constat de l'écart 6 est
+  documentaire.
 - **D2 — comment restructurer le signaling pour que l'offre soit scellée ?** La direction
   est identifiée ; la conception appartient au jalon 1, qui construit la boîte aux lettres.
 

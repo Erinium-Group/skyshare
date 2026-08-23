@@ -3,8 +3,9 @@
 > Partage d'écran pair-à-pair haute qualité, sans les plafonds de Discord.
 > Date : 22 août 2026 · Statut : validé, référence stable du projet
 > **Révisé le 23 août 2026** après le jalon 0, sur la base de
-> `spike/docs/rapport-jalon-0.md`. Sections touchées : §5.1, §5.2, §5.3, §5.5, §6.1,
-> §6.2, §6.4, §6.5, §7.5, §9, §11. Chaque correction cite la mesure ou la recherche qui la
+> `spike/docs/rapport-jalon-0.md`. Sections touchées : **§2 (décisions 4 et 5)**, §5.1,
+> §5.2, §5.3, §5.5, §6.1, §6.2, §6.4, §6.5, §7.5, §9, §11 — douze au total.
+> Chaque correction cite la mesure ou la recherche qui la
 > fonde. Les **décisions produit** qui en découlent — D1 (que promet-on hors NVIDIA ?) et
 > D2 (comment sceller l'offre de connexion ?) — sont **inscrites sans être tranchées** :
 > elles appartiennent au propriétaire, pas au rapport de faisabilité.
@@ -39,8 +40,8 @@ et sans plafond imposé par un tiers.
 | 1 | **Tauri (UI React) + cœur Rust natif** | Une UI web permet le lecteur riche exigé (multi-flux, zoom, recadrage) ; un cœur natif est indispensable pour la capture GPU et les encodeurs matériels. Electron plafonnerait à ~1080p60 — c'est précisément la limite de Discord, qui est une app Electron. |
 | 2 | **Zéro serveur : signaling sur Vercel + Neon** | Coût nul, aucune machine à administrer. Contrepartie assumée : ~5-10 % des paires (CGNAT, NAT symétrique, 4G) ne pourront pas se joindre. La couche transport est abstraite pour permettre l'ajout ultérieur d'un relais TURN sans réécriture. |
 | 3 | **WebRTC via `str0m`, contrôle de congestion réécrit** | On conserve ICE (perçage NAT éprouvé) et DTLS-SRTP (chiffrement obligatoire), on remplace le limiteur de débit — c'est lui, et non une politique commerciale, qui bride la qualité chez Discord. |
-| 4 | **Adresses réseau scellées de bout en bout** | Une connexion pair-à-pair expose nécessairement les IP aux deux pairs : c'est le protocole IP lui-même, aucun chiffrement ne le contourne. En revanche, ni Vercel ni la base ne voient jamais une adresse en clair, et aucune IP n'est affichée ni journalisée. |
-| 5 | **Amis → entrée directe · inconnus → salle d'attente** | La confiance est établie par la demande d'ami mutuelle. Un inconnu qui clique sur un lien public n'obtient aucune adresse tant que l'hôte n'a pas approuvé. |
+| 4 | **Adresses réseau scellées de bout en bout** · **conditionné à D2, voir §5.1** | Une connexion pair-à-pair expose nécessairement les IP aux deux pairs : c'est le protocole IP lui-même, aucun chiffrement ne le contourne. En revanche, ni Vercel ni la base ne voient jamais une adresse en clair, et aucune IP n'est affichée ni journalisée. **Corrigé au jalon 0 :** cette dernière phrase n'est vraie que de la *réponse*. L'*offre* part avant qu'une clé de destinataire n'existe, donc en clair — mesuré : deux adresses de l'émetteur lisibles dans le bloc. Tant que la boîte aux lettres est un simple relais, l'opérateur du serveur voit l'adresse publique de chaque émetteur. |
+| 5 | **Amis → entrée directe · inconnus → salle d'attente** · **conditionné à D2, voir §5.1** | La confiance est établie par la demande d'ami mutuelle. Un inconnu qui clique sur un lien public n'obtient aucune adresse tant que l'hôte n'a pas approuvé. **Corrigé au jalon 0 :** cette garantie n'est tenable que si l'offre est scellée *pour un destinataire connu*, donc après approbation — ce qui impose un annuaire de clés interrogeable avant production de l'offre. Avec un relais simple, l'offre a une forme de diffusion et tout lecteur du canal apprend l'adresse publique. |
 | 6 | **10+ spectateurs via simulcast 3 couches** | Le coût GPU reste constant quel que soit le nombre de spectateurs ; seul le réseau croît linéairement. Indispensable car les cartes grand public plafonnent à ~8 sessions d'encodage simultanées. |
 | 7 | **Son du partage uniquement, pas de micro** | Un vocal correct (écho, bruit, mixage, push-to-talk) est un projet à part entière que Discord assure déjà gratuitement, et où les utilisateurs sont déjà connectés. |
 | 8 | **Windows d'abord, abstraction OS dès le premier jour** | Chaque OS a une API de capture radicalement différente. Seul `sky-capture` change au portage ; les quatre autres modules sont déjà multiplateformes. |
@@ -322,7 +323,9 @@ Le 4:4:4 est le facteur le plus déterminant pour la lisibilité du texte et du 
 > 10 Mbps sur un motif de texte à bords durs, HEVC 4:4:4 rend un PSNR de chrominance de
 > 58,30 dB (U) et 48,58 dB (V), contre 18,21 / 19,29 dB pour H.264 4:2:0 et 18,12 /
 > 19,27 dB pour AV1 4:2:0 — soit **+40,1 dB sur U et +29,3 dB sur V à débit comparable**,
-> la luminance restant comparable dans les trois cas. Deux codecs 4:2:0 différents
+> la luminance restant **bonne dans les trois cas** (50,2 à 74,9 dB) — non dégradée par le
+> sous-échantillonnage, contrairement à la chrominance, sans que les trois valeurs soient
+> proches entre elles pour autant. Deux codecs 4:2:0 différents
 > convergent sur le même plancher de chrominance malgré des efficacités de luminance
 > nettement différentes : l'écart est un artefact du sous-échantillonnage, pas le réglage
 > d'un encodeur. **Ce que la mesure n'établit pas** : la lisibilité perçue à l'œil, qui
@@ -388,7 +391,7 @@ Le tableau ci-dessous a été **corrigé après le jalon 0**. Trois de ses quatr
 | **AV1 4:2:0** | RTX 40+, RX 7000+, Arc | ~40 % de débit en moins à qualité égale | **Non** — voir écart 1. Pertinent pour partager de la *vidéo*, pas un écran de travail |
 | **H.264 4:2:0** | Matériel des 12 dernières années | Socle universel de repli | **Non** |
 | **H.264 4:4:4** | ⚠ **Ne pas utiliser en l'état** — voir écart 2 | — | Oui sur le papier, mais débit incontrôlable |
-| **x264 logiciel** | Aucun encodeur matériel 4:4:4 détecté | Seule voie 4:4:4 hors NVIDIA. Coûte plusieurs dizaines de pourcents de processeur — signalé à l'utilisateur | Oui, au prix du processeur |
+| **x264 logiciel** | Aucun encodeur matériel 4:4:4 détecté | Seule voie 4:4:4 hors NVIDIA côté émetteur. Coûte du processeur — signalé à l'utilisateur. **Coût réel non mesuré** : aucune mesure du jalon 0 ne couvre l'encodage logiciel | Oui, au prix du processeur |
 
 **Écart 1 — AV1 ne fait pas de 4:4:4.** NVENC ne produit pas de 4:4:4 en AV1, même sur
 architecture Ada. Vérifié par énumération matérielle des formats d'entrée par codec, puis
@@ -421,8 +424,9 @@ le 4:2:2 sur certaines configurations, aucune source ne confirme le 4:4:4 en enc
 >
 > Trois voies, aucune indolore, à arbitrer entre « sans compromis partout » et « sans
 > compromis sur NVIDIA » :
-> 1. Encodage **logiciel** 4:4:4 sur AMD et Intel — texte net préservé, mais on troque la
->    différenciation « texte net » contre la différenciation « ne coûte rien à la machine ».
+> 1. Encodage **logiciel** 4:4:4 sur AMD et Intel — texte net préservé, mais on troque
+>    potentiellement la différenciation « texte net » contre la différenciation « ne coûte
+>    rien à la machine ». **Coût non mesuré au jalon 0**, donc voie ni retenue ni écartée.
 > 2. Accepter le 4:2:0 hors NVIDIA, en le **disant dans l'interface** plutôt qu'en laissant
 >    l'utilisateur croire à un défaut du logiciel.
 > 3. Hybride : 4:4:4 matériel sur NVIDIA, 4:4:4 logiciel sous un seuil de résolution
@@ -619,9 +623,12 @@ avant qu'on construise par-dessus. Un mur découvert à trois jours d'investisse
 coûte infiniment moins qu'un mur découvert à trois mois.
 
 **Statut du jalon 0 au 23 août 2026 : GO CONDITIONNEL.** Quatre des six questions sont
-closes positivement (encodage matériel 4:4:4 depuis une texture GPU, gain de chrominance
-mesuré, charge processeur, propriétés du régulateur), aucune n'a produit de réponse
-négative, et aucun des six écarts constatés n'invalide le projet. Deux questions restent
+closes positivement — encodage matériel 4:4:4 depuis une texture GPU, gain de chrominance
+mesuré, charge processeur, et **propriétés du régulateur, closes « en théorie » seulement**
+(démontrées analytiquement et par tests unitaires, jamais éprouvées sur une congestion
+réseau réelle, et portant sur une grandeur que le code ne pilote pas encore — voir
+l'encadré du §6.1 et le §11). Aucune n'a produit de réponse négative, et aucun des six
+écarts constatés n'invalide le projet. Deux questions restent
 ouvertes faute de mesures qu'aucun agent ne pouvait prendre : la **connexion entre deux
 box** (risque n°1) et le **débit de capture sur écran en mouvement réel**. Rapport
 complet, preuves et conditions du passage à un GO ferme :
