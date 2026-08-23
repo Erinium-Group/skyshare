@@ -116,8 +116,22 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
     println!("=== ÉTAPE 2 : colle sa réponse ici puis Entrée ===\n");
     std::io::stdout().flush().ok();
 
+    // Le mapping NAT du port qu'on vient d'annoncer expire en 30 a 120 s sans
+    // trafic, alors que l'echange des blocs par messagerie prend couramment
+    // plusieurs minutes. Sans ce battement, on negocie depuis un port que le
+    // correspondant ne connait pas, et ses reponses arrivent sur un port ferme.
+    let garde = link.maintenir_mapping()?;
+
     let mut reponse = String::new();
+    let debut_attente = Instant::now();
     std::io::stdin().read_line(&mut reponse)?;
+    let attente = debut_attente.elapsed();
+    println!("
+(echange des blocs : {} s, port maintenu ouvert)", attente.as_secs());
+
+    // La negociation produit son propre trafic : le battement n'a plus lieu d'etre.
+    drop(garde);
+
     link.accept_answer(&reponse)?;
 
     println!("\nNégociation en cours...");

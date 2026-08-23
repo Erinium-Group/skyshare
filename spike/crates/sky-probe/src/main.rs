@@ -1,5 +1,6 @@
 mod cmd_capture;
 mod cmd_netcheck;
+mod cmd_selftest;
 mod cmd_codecs;
 mod cmd_encode;
 mod cmd_host;
@@ -21,6 +22,8 @@ enum Cmd {
     Hw,
     /// Teste si ton réseau permet une connexion directe (à lancer seul)
     Netcheck,
+    /// Négocie avec soi-même : teste tout le code, sans réseau ni correspondant
+    Selftest,
     /// Mesure la capture d'écran (Q1)
     Capture {
         #[arg(long, default_value_t = 30)]
@@ -99,6 +102,7 @@ fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Hw => cmd_hw::run(),
         Cmd::Netcheck => cmd_netcheck::run(),
+        Cmd::Selftest => cmd_selftest::run(),
         Cmd::Capture {
             seconds,
             monitor,
