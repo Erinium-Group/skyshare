@@ -133,7 +133,22 @@ impl PeerLink {
         let (socket, locale) = Self::socket_et_candidats(&mut rtc)?;
 
         let mut change = rtc.sdp_api();
-        change.add_channel(CANAL.to_string());
+        // Le canal par defaut est ordonne ET fiable : chaque paquet perdu est
+        // retransmis, et tout ce qui suit attend son arrivee. Pour de la video
+        // en direct, c'est le pire choix — mesure sur reseau reel : le temps
+        // d'aller-retour montait de 800 ms a 1600 ms pendant que le debit
+        // s'effondrait a 1 Mbps pour une cible de 10, jusqu'a saturation du
+        // tampon d'emission.
+        //
+        // Une image perdue vaut mieux qu'un flux qui prend une seconde de
+        // retard : on retire l'ordre, et on borne la duree de vie d'un paquet a
+        // 150 ms. Au-dela, il n'a plus d'interet — l'image suivante est deja la.
+        change.add_channel_with_config(str0m::channel::ChannelConfig {
+            label: CANAL.to_string(),
+            ordered: false,
+            reliability: str0m::channel::Reliability::MaxPacketLifetime { lifetime: 150 },
+            ..Default::default()
+        });
         let (offer, pending) = change
             .apply()
             .ok_or_else(|| anyhow!("aucun changement à négocier"))?;
