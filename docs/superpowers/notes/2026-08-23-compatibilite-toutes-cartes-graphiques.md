@@ -90,7 +90,7 @@ strictement côté émetteur pour cette marque.
 | **A — Empaquetage** | Luminance et couleur pleine résolution rangées dans **une seule image plus grande**, encodée en 4:2:0 ordinaire | ~2× les pixels | ✅ | ✅ | **1** |
 | **B — Flux auxiliaire** | Deux flux 4:2:0 séparés, recombinés à l'affichage | 2 sessions, +30-50 % débit | ✅ | ✅ | 2 |
 | **C — Double résolution** | Agrandir ×2 avant d'encoder : la couleur sous-échantillonnée retrouve la résolution native | **4× les pixels** | ✅ | ✅ | 1 |
-| **D — Logiciel** | `x264` en 4:4:4 sur le processeur | Charge CPU massive | ✅ | ❌ décodage | 0 (matériel) |
+| **D — Logiciel** | `x264` en 4:4:4 sur le processeur | Charge CPU **non mesurée** (voir note ci-dessous) | ✅ | ❌ décodage | 0 (matériel) |
 | **E — 4:2:2** | Compromis, double la couleur horizontalement | Modéré | ⚠️ Intel peut-être, AMD non | ⚠️ | 1 |
 
 ### Pourquoi la voie A est la candidate à instruire en premier
@@ -148,6 +148,12 @@ ignorera que la moitie basse porte des donnees de couleur : il pourrait donc
 sacrifier la precision chromatique en pensant compresser une zone peu detaillee —
 l'inverse exact du but recherche. C'est ce qui rend la mesure de qualite apres
 recomposition (inconnue n2 de la section 4) non negociable avant tout engagement.
+
+> **Aucun chiffre n'est disponible sur le coût de la voie D.** Le jalon 0 n'a jamais
+> mesuré d'encodage logiciel, et toute valeur avancee ici — y compris dans mes propres
+> messages anterieurs — serait une estimation. Elle doit etre mesuree avant d'ecarter
+> ou de retenir cette voie, d'autant qu'elle pese sur la decision D1, reservee au
+> proprietaire.
 
 ### Pourquoi la voie D est la moins bonne, contrairement à ce qu'on pourrait croire
 
