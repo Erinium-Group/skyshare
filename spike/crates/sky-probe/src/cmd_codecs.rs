@@ -51,7 +51,7 @@ pub fn run(seconds: u64, bitrate_mbps: u32, monitor: usize) -> anyhow::Result<()
     // le device Direct3D 11 sur lequel NVENC doit ouvrir sa session. Rien de
     // son contenu n'est utilisé ensuite : la source synthétique l'ignore
     // complètement.
-    let mut cap = WgcCapture::new(monitor).context("démarrage de la capture (device D3D11)")?;
+    let mut cap = WgcCapture::new(monitor, None).context("démarrage de la capture (device D3D11)")?;
     let premiere = attendre_premiere_image(&mut cap)?;
     let (largeur, hauteur) = (premiere.width, premiere.height);
 

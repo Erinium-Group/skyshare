@@ -24,6 +24,9 @@ enum Cmd {
         seconds: u64,
         #[arg(long, default_value_t = 0)]
         monitor: usize,
+        /// Cadence maximale de capture. Absent = suit le taux de l'écran.
+        #[arg(long)]
+        fps_max: Option<u32>,
     },
     /// Encode des textures Direct3D 11 avec NVENC, sans copie CPU (Q2)
     Encode {
@@ -92,7 +95,11 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Hw => cmd_hw::run(),
-        Cmd::Capture { seconds, monitor } => cmd_capture::run(seconds, monitor),
+        Cmd::Capture {
+            seconds,
+            monitor,
+            fps_max,
+        } => cmd_capture::run(seconds, monitor, fps_max),
         Cmd::Encode {
             seconds,
             codec,

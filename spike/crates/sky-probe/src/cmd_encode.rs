@@ -72,7 +72,7 @@ pub fn run(
     monitor: usize,
     source: Source,
 ) -> anyhow::Result<()> {
-    let mut cap = WgcCapture::new(monitor).context("démarrage de la capture")?;
+    let mut cap = WgcCapture::new(monitor, None).context("démarrage de la capture")?;
     println!("Adaptateur GPU    : {}", nom_adaptateur(cap.d3d_device())?);
 
     // Première image réelle : elle donne les dimensions et prouve que la

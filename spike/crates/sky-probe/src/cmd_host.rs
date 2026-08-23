@@ -134,7 +134,7 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
     // différence avec une vraie image. Sur un écran figé, WGC ne livre presque
     // aucune image et la mesure de charge serait flatteuse sans être fausse —
     // d'où le choix de mesurer Q4 sur cette source, documenté dans le rapport.
-    let mut cap = WgcCapture::new(p.monitor)?;
+    let mut cap = WgcCapture::new(p.monitor, None)?;
     let (largeur, hauteur, mut synth) = match p.source {
         Source::Ecran => {
             let attente_max = Instant::now() + Duration::from_secs(5);

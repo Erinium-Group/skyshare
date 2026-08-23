@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11Texture2D, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
     D3D11_SDK_VERSION,
 };
-use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIDevice, IDXGIFactory1};
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR, MONITORENUMPROC};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
@@ -34,7 +34,9 @@ pub struct WgcCapture {
 }
 
 impl WgcCapture {
-    pub fn new(monitor_index: usize) -> anyhow::Result<Self> {
+    /// `fps_max` borne la cadence de capture. `None` = aucune limite : on capture
+    /// chaque image que produit l'écran.
+    pub fn new(monitor_index: usize, fps_max: Option<u32>) -> anyhow::Result<Self> {
         let hmonitor = enumerate_monitors()?
             .into_iter()
             .nth(monitor_index)
@@ -74,12 +76,12 @@ impl WgcCapture {
         let size = item.Size()?;
         let (width, height) = (size.Width as u32, size.Height as u32);
 
-        // 4. Le frame pool. 2 tampons suffisent et minimisent la latence :
-        //    davantage ne ferait qu'accumuler des images périmées.
+        // 4. Le frame pool. 6 tampons : de quoi absorber une pause de l'appelant
+        //    sans que WGC recycle une image qu'on n'a pas encore lue.
         let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &winrt_device,
             DirectXPixelFormat::B8G8R8A8UIntNormalized,
-            2,
+            6,
             size,
         )
         .context("création du frame pool")?;
@@ -90,6 +92,31 @@ impl WgcCapture {
         let _ = session.SetIsBorderRequired(false);
         // Le curseur est transmis séparément (spec §6.3), pas incrusté ici.
         let _ = session.SetIsCursorCaptureEnabled(false);
+
+        // CORRECTIF (23/08/2026) — le plafond de capture le plus coûteux du projet.
+        //
+        // WGC impose par défaut un intervalle minimal de 16 ms entre deux images,
+        // soit 62,5 im/s. Ce défaut n'est mis en avant nulle part et se compose
+        // avec la grille de rafraîchissement de l'écran : sur un 165 Hz (6,03 ms
+        // par rafraîchissement), la première image autorisée après 16 ms tombe au
+        // 3e rafraîchissement et non au 2e — la capture s'effondre à 55 im/s, soit
+        // exactement un tiers du taux d'écran.
+        //
+        // On règle donc l'intervalle sur la cadence réellement voulue. Laisser WGC
+        // limiter lui-même vaut mieux que capturer trop puis jeter : les images en
+        // trop ne sont jamais produites.
+        //
+        // L'API demande Windows 11 ; sur un système plus ancien l'appel échoue et
+        // la capture reste plafonnée à 60 im/s. C'est une dégradation acceptable,
+        // pas une erreur : on la signale sans interrompre.
+        let intervalle = intervalle_min_pour(fps_max);
+        if let Err(e) =
+            session.SetMinUpdateInterval(windows::Foundation::TimeSpan { Duration: intervalle })
+        {
+            eprintln!(
+                "Cadence de capture non réglable sur ce système ({e}) :                  plafond de 60 im/s hérité de Windows."
+            );
+        }
 
         session.StartCapture().context("StartCapture")?;
 
@@ -131,13 +158,15 @@ impl WgcCapture {
                 }));
             }
             if Instant::now() >= deadline {
-                // "dropped" compte les délais d'attente dépassés (timeouts de
-                // next_frame), pas des images perdues par WGC lui-même : le nom
-                // vient de l'interface attendue par les tâches suivantes.
+                // Compte les délais d'attente dépassés, pas des images perdues par
+                // WGC : le nom vient de l'interface attendue par les tâches suivantes.
                 self.dropped += 1;
                 return Ok(None);
             }
-            std::thread::sleep(Duration::from_micros(200));
+            // TODO(jalon 2) : attendre l'événement `FrameArrived` du frame pool.
+            // Ce sondage actif brûle un cœur entier — mesuré à ~2,7 millions de
+            // tours par seconde — ce qui fausserait la mesure de charge processeur.
+            std::thread::yield_now();
         }
     }
 
@@ -189,4 +218,142 @@ fn enumerate_monitors() -> anyhow::Result<Vec<HMONITOR>> {
         .context("EnumDisplayMonitors")?;
     }
     Ok(out)
+}
+
+/// INSTRUMENTATION TEMPORAIRE (23/08/2026) — compte les rafraîchissements réels
+/// de l'écran pendant une durée donnée.
+///
+/// Tranche une question à laquelle le taux annoncé par Windows ne répond pas.
+/// L'écran est configuré à 165 Hz, mais le VRR couvre 50-170 Hz : le taux réel
+/// varie avec le contenu. Si le compositeur ne rafraîchit qu'à ~55 Hz pendant la
+/// mesure, la capture ne PEUT pas dépasser 55 images/s — WGC n'émet qu'à la
+/// composition — et notre boucle est hors de cause.
+///
+/// À supprimer une fois la question tranchée.
+pub fn compter_vblanks(duree: Duration) -> anyhow::Result<u64> {
+    // Factory propre au thread : les objets COM ne traversent pas les threads.
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1")?;
+    let adapter = unsafe { factory.EnumAdapters(0) }.context("EnumAdapters")?;
+    let output = unsafe { adapter.EnumOutputs(0) }.context("EnumOutputs")?;
+
+    let fin = Instant::now() + duree;
+    let mut n = 0u64;
+    while Instant::now() < fin {
+        unsafe { output.WaitForVBlank() }.context("WaitForVBlank")?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Convertit une cadence maximale en intervalle minimal WGC (unités de 100 ns).
+///
+/// `None` — ou une cadence nulle, qui n'aurait pas de sens — donne 0 : aucune
+/// limite, la capture suit le taux de rafraîchissement de l'écran.
+pub fn intervalle_min_pour(fps_max: Option<u32>) -> i64 {
+    match fps_max {
+        Some(fps) if fps > 0 => 10_000_000 / fps as i64,
+        _ => 0,
+    }
+}
+
+/// Cadence réellement atteignable pour une demande donnée.
+///
+/// WGC n'émet qu'aux rafraîchissements de l'écran : les seules cadences
+/// possibles sont le taux d'écran divisé par un entier. Sur un 165 Hz, demander
+/// 120 im/s ne donne pas 120 mais 82,9 — le sous-multiple juste en dessous.
+/// Mesuré, pas déduit : 120 demandées ont rendu 82,9, et 60 en ont rendu 55,3.
+///
+/// Sans cette fonction, l'interface promettrait une cadence que le matériel ne
+/// peut pas produire.
+pub fn cadence_atteignable(fps_demande: u32, hz_ecran: f32) -> f32 {
+    if fps_demande == 0 || hz_ecran <= 0.0 {
+        return hz_ecran.max(0.0);
+    }
+    let brut = hz_ecran / fps_demande as f32;
+    // Tolérance de 2 % : demander 165 sur un écran mesuré à 165,8 Hz doit donner
+    // le taux plein, pas la moitié à cause d'un arrondi de mesure.
+    let diviseur = if (brut - brut.round()).abs() < 0.02 {
+        brut.round()
+    } else {
+        brut.ceil()
+    };
+    hz_ecran / diviseur.max(1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cadence_atteignable, intervalle_min_pour};
+
+    #[test]
+    fn cadence_pleine_si_on_demande_le_taux_ecran() {
+        // 165 demandées sur 165,8 mesurés : la tolérance évite de tomber à 82,9.
+        assert!((cadence_atteignable(165, 165.8) - 165.8).abs() < 0.1);
+    }
+
+    #[test]
+    fn cent_vingt_sur_ecran_165_donne_la_moitie() {
+        // Valeur mesurée sur la machine de référence : 82,9.
+        assert!((cadence_atteignable(120, 165.8) - 82.9).abs() < 0.1);
+    }
+
+    #[test]
+    fn soixante_sur_ecran_165_donne_le_tiers() {
+        // Valeur mesurée sur la machine de référence : 55,3.
+        assert!((cadence_atteignable(60, 165.8) - 55.27).abs() < 0.1);
+    }
+
+    #[test]
+    fn soixante_sur_ecran_60_donne_soixante() {
+        // Sur un écran 60 Hz, aucune quantification : la demande est servie.
+        assert!((cadence_atteignable(60, 60.0) - 60.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn demande_absurde_bornee_au_taux_ecran() {
+        // On ne peut pas capturer plus vite que l'écran ne rafraîchit.
+        assert!((cadence_atteignable(1000, 165.8) - 165.8).abs() < 0.1);
+    }
+
+    #[test]
+    fn aucune_limite_demandee() {
+        assert_eq!(intervalle_min_pour(None), 0);
+    }
+
+    #[test]
+    fn cadence_nulle_traitee_comme_aucune_limite() {
+        // Sans ce garde-fou, la division renverrait une erreur d'exécution.
+        assert_eq!(intervalle_min_pour(Some(0)), 0);
+    }
+
+    #[test]
+    fn soixante_images_par_seconde() {
+        assert_eq!(intervalle_min_pour(Some(60)), 166_666);
+    }
+
+    #[test]
+    fn cent_vingt_images_par_seconde() {
+        assert_eq!(intervalle_min_pour(Some(120)), 83_333);
+    }
+
+    #[test]
+    fn cent_soixante_cinq_images_par_seconde() {
+        assert_eq!(intervalle_min_pour(Some(165)), 60_606);
+    }
+
+    #[test]
+    fn strictement_sous_le_defaut_de_wgc() {
+        // Le défaut non documenté de WGC vaut 160 000 (16 ms, 62,5 im/s). Toute
+        // cadence au-dessus de 62 im/s doit produire un intervalle plus court,
+        // sinon le plafond se réinstalle en silence.
+        for fps in [63, 60, 90, 120, 144, 165, 240] {
+            let intervalle = intervalle_min_pour(Some(fps));
+            if fps > 62 {
+                assert!(
+                    intervalle < 160_000,
+                    "{fps} im/s donne {intervalle}, au-dessus du défaut WGC"
+                );
+            }
+        }
+    }
 }
