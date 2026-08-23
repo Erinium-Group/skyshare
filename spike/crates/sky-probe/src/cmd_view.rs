@@ -55,14 +55,27 @@ pub fn run(secondes: u64) -> anyhow::Result<()> {
 
     let debut_attente = Instant::now();
     if !attendre_contact(&mut link)? {
-        // La durée réelle, pas la fenêtre accordée : dire « en 10 minutes »
-        // après un abandon à 31 s ferait chercher la panne au mauvais endroit.
+        // Formuler ce qu'on observe, pas ce qu'on en déduit.
+        //
+        // Tout ce que `contact_en_attente` constate, c'est qu'aucun datagramme
+        // n'a atteint le socket. En conclure que « personne n'a essayé » serait
+        // faux dans le cas même que Q5 existe pour tester : derrière un NAT
+        // symétrique, l'émetteur peut avoir lancé toute sa négociation et émis
+        // tous ses sondages sans qu'un seul ne parvienne. Affirmer ici ferait
+        // lire « rien ne s'est passé » là où il faut lire « le réseau a tout
+        // bloqué » — l'exact symétrique du défaut corrigé côté émetteur.
+        //
+        // D'où la même prudence que `cmd_host::diagnostiquer` : les deux causes
+        // sont laissées ouvertes, car rien ici ne permet de trancher.
         println!(
-            "\nÉCHEC : le correspondant ne s'est pas manifesté (attente de {} s).",
+            "\nÉCHEC : aucun paquet ne nous est parvenu en {} s.",
             debut_attente.elapsed().as_secs()
         );
-        println!("Ce n'est pas un échec de connexion : personne n'a jamais essayé de");
-        println!("nous joindre. Redemande-lui un bloc et recommence, c'est sans risque.");
+        println!("Deux causes possibles, et rien de ce qu'on voit d'ici ne permet");
+        println!("de choisir entre elles :");
+        println!("  - le correspondant n'a pas encore collé notre bloc de son côté ;");
+        println!("  - il l'a fait, mais ses paquets n'ont pas franchi le réseau.");
+        println!("Redemande-lui un bloc et recommence, c'est sans risque.");
         return Ok(());
     }
 

@@ -82,11 +82,18 @@ une seconde.
 
 **Un échec m'apprend autant qu'un succès.** Ce test existe justement parce que je
 ne sais pas si ça marche. Si l'écran affiche `ÉCHEC`, ce n'est ni ta faute ni un
-problème de ton ordinateur : cela veut dire que l'une de nos deux box refuse les
-connexions directes, et c'est exactement l'information que je cherche. Elle
-décidera de la suite du projet.
+problème de ton ordinateur, et c'est exactement l'information que je cherche.
+Elle décidera de la suite du projet.
 
-Donc surtout, ne recommence pas dix fois en pensant avoir mal fait : envoie-moi
-la capture, échec compris, et c'est parfait comme ça.
+En revanche, ne cherche pas à interpréter toi-même la cause : le programme le
+fait mieux que nous deux. Il y a plusieurs raisons possibles — l'une de nos deux
+box qui refuse les connexions directes, mais aussi une négociation qui aboutit
+puis se casse plus loin, ou simplement un bloc parti trop tard. Le texte affiché
+sous le mot `ÉCHEC` dit laquelle, et il prend soin de ne pas accuser au hasard.
+
+C'est pour ça que **la capture d'écran compte plus que ton résumé** : envoie-moi
+l'écran entier, avec toutes les lignes, plutôt que « ça n'a pas marché ». Et
+surtout, ne recommence pas dix fois en pensant avoir mal fait — une seule
+tentative, réussie ou non, est parfaite comme ça.
 
 Merci.
