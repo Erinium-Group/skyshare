@@ -1,5 +1,17 @@
 # TODO — SkyShare
 
+> ## ⛔ ARRÊT DEMANDÉ PAR LE PROPRIÉTAIRE — 23/08/2026
+>
+> **Ne pas lancer le jalon 1 tant que le propriétaire n'a pas dit « go » explicitement.**
+>
+> Cela vaut aussi après la clôture du jalon 0, après la revue de branche, et après
+> une éventuelle reprise de session. Aucune interprétation, aucune anticipation :
+> le feu vert doit être donné par le propriétaire, en toutes lettres.
+>
+> Ce qui reste autorisé sans son accord : terminer la revue du jalon 0, la revue de
+> branche, et répondre à ses questions.
+
+
 ## État actuel
 - **Phase : jalon 0 terminé côté agents — GO CONDITIONNEL.**
   Rapport de faisabilité : `spike/docs/rapport-jalon-0.md`.
