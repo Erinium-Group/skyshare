@@ -182,9 +182,12 @@ dédié plutôt qu'une décision sur plan.
 7. **Capacités de décodage**, jamais testées au jalon 0 — le spike écrit dans un
    fichier relu par un lecteur externe. À mesurer par génération et par fabricant,
    séparément de l'encodage.
-8. **Coût d'un transfert entre deux cartes** sur portable hybride et sur carte
-   externe, par image à 60 images par seconde. C'est ce qui déterminera si le pari
-   zéro-copie du jalon 0 tient hors d'une configuration à carte unique.
+8. **Coût d'un transfert entre deux cartes**, par image, dans les deux topologies :
+   portable hybride sur lien PCIe interne, et e-GPU sur Thunderbolt. Les debits
+   theoriques du §5.1 doivent etre confrontes a la mesure — latence par image,
+   variabilite, et comportement quand le lien approche la saturation. C'est ce qui
+   determinera si le pari zero-copie du jalon 0 tient hors d'une configuration a
+   carte unique, et a quelle resolution il cesse de tenir.
 9. **Coût du décodage logiciel** en dernier recours, pour un spectateur dont aucune
    carte ne sait lire le format reçu — et son plafond en nombre de flux simultanés,
    le spec §7.1 promettant six flux en 1440p60 pour environ 15 % d'un processeur
@@ -222,6 +225,31 @@ défaut :
 | **Portable hybride** — puce Intel intégrée + carte NVIDIA dédiée | L'écran est piloté par l'une, l'encodeur performant est sur l'autre |
 | **Carte externe (e-GPU)** | Ajoute un lien Thunderbolt entre les deux, avec sa latence propre |
 | **Bureau à plusieurs cartes** | Quelle carte capture, quelle carte encode ? |
+
+**Un e-GPU n'est pas une marque de plus, c'est une topologie de plus.** La carte qu'il
+contient reste une NVIDIA, AMD ou Intel ordinaire, avec les capacités decrites en §1.
+Ce qui change est le lien entre elle et le reste de la machine — et ce lien se chiffre.
+
+Debit necessaire pour transferer chaque image **non compressee** (RGBA 8 bits) :
+
+| Cas | Debit | Part d'un Thunderbolt 3/4 (~22 Gb/s utiles) |
+|-----|-------|---------------------------------------------|
+| 1440p a 60 im/s | ~7 Gb/s | 32 % — confortable |
+| 4K a 60 im/s | ~16 Gb/s | 73 % — serre |
+| 1440p a 144 im/s | ~17 Gb/s | 77 % — serre |
+| 4K a 144 im/s | ~38 Gb/s | **impossible** |
+
+**Ces chiffres ne valent que dans un seul cas de figure**, et c'est ce qui rend la
+detection de topologie decisive :
+
+| Ou est branche l'ecran | Consequence |
+|------------------------|-------------|
+| **Sur l'e-GPU** | Capture et encodage sur la meme carte. Aucun transfert. La chaine sans copie du jalon 0 s'applique telle quelle. |
+| **Sur le portable** (ecran interne ou sortie integree) | La texture nait sur la puce integree, l'encodeur vise est sur l'e-GPU. Transfert Thunderbolt a chaque image, avec les debits ci-dessus. |
+
+La meme distinction vaut pour un portable hybride sans e-GPU, avec un lien PCIe interne
+plus rapide (typiquement PCIe 4.0 x8 ou x16, largement au-dessus des besoins) — ce qui
+rend ce cas nettement moins critique que celui de l'e-GPU.
 
 **Le problème de fond que cela révèle :** le jalon 0 a validé une chaîne **sans
 aucune copie vers la mémoire centrale**, et c'est ce qui donne les 0,53 % de
