@@ -2,6 +2,12 @@
 
 > Partage d'écran pair-à-pair haute qualité, sans les plafonds de Discord.
 > Date : 22 août 2026 · Statut : validé, référence stable du projet
+> **Révisé le 23 août 2026** après le jalon 0, sur la base de
+> `spike/docs/rapport-jalon-0.md`. Sections touchées : §5.1, §5.2, §5.3, §5.5, §6.1,
+> §6.2, §6.4, §6.5, §7.5, §9, §11. Chaque correction cite la mesure ou la recherche qui la
+> fonde. Les **décisions produit** qui en découlent — D1 (que promet-on hors NVIDIA ?) et
+> D2 (comment sceller l'offre de connexion ?) — sont **inscrites sans être tranchées** :
+> elles appartiennent au propriétaire, pas au rapport de faisabilité.
 
 ---
 
@@ -203,11 +209,34 @@ uniquement « voici l'adresse d'où tu m'écris ».
 **L'IPv6 est tentée en priorité.** Quand les deux pairs l'ont activée — cas courant
 sur les box françaises — il n'y a plus de NAT du tout et le perçage devient inutile.
 
+> **Deux précisions établies au jalon 0** (`spike/docs/rapport-jalon-0.md`, écart 4).
+>
+> **La bibliothèque ICE ne découvre pas les adresses.** `str0m` est une bibliothèque
+> sans-IO : elle joue l'agent ICE mais ne ramasse aucun candidat. L'interrogation des
+> serveurs STUN et la déclaration des candidats sont à la charge de l'application, et
+> constituent un composant à part entière de `sky-net`, pas un effet de bord de la
+> bibliothèque. Sans lui, l'offre ne contient que l'adresse privée de la machine et
+> aucune traversée de NAT n'est possible.
+>
+> **L'étape ② présuppose que la clé publique du destinataire est déjà connue.** C'est
+> le point qui n'était pas explicite : tant que la boîte aux lettres n'est qu'un relais,
+> l'offre part avant qu'une clé de destinataire n'existe, donc **en clair**. Mesuré sur
+> le spike : le bloc d'offre contient deux adresses de l'émetteur, décodables par
+> quiconque le reçoit ; seule la réponse est scellée.
+>
+> **Décision à prendre au jalon 1 (D2), volontairement non tranchée ici.** La direction
+> est identifiée : la boîte aux lettres doit être un **annuaire de clés interrogeable
+> avant** production de l'offre — on récupère la clé du destinataire, puis on scelle,
+> puis on envoie. La conception appartient au jalon qui construit cette boîte aux
+> lettres. Ce qui est acquis : tant que l'offre n'est pas scellée, l'opérateur du
+> serveur voit l'adresse publique de chaque émetteur, ce qui contredit le principe
+> directeur n°2 et la ligne « Adresse réseau : non » du §5.2.
+
 ### 5.2 Ce que Vercel peut observer
 
 | Élément | Visible ? |
 |---------|-----------|
-| Adresse réseau | Non — enveloppe scellée |
+| Adresse réseau | Non — enveloppe scellée · **conditionné à D2, voir §5.1** |
 | Image, son | Non — ne transitent jamais |
 | Clé privée | Non — ne quitte jamais la machine |
 | « L'appareil A a écrit à l'appareil B » | **Oui** — métadonnée visible |
@@ -226,6 +255,14 @@ mais le document ne prétend pas à une confidentialité absolue.
 
 Dans tous les cas, un bandeau permanent affiche qui regarde, avec éjection immédiate
 en un clic (connexion coupée, pas seulement masquée).
+
+> **Prérequis technique mesuré au jalon 0, à traiter au jalon 2.** Les trois modes
+> supposent qu'un spectateur puisse rejoindre un partage **déjà en cours**. Avec le
+> réglage de groupe d'images infini retenu au §6.4, les en-têtes de séquence ne sont
+> émis qu'une seule fois, au tout début du flux : un spectateur qui arrive ensuite
+> n'obtient qu'un flux indécodable — écran noir. Mesuré : 1 seul jeu d'en-têtes sur
+> 1 201 images, et les flux coupés en leur milieu sont refusés par le décodeur. Voir
+> §6.4 pour la correction à appliquer.
 
 ### 5.4 Liens publics
 
@@ -247,11 +284,25 @@ nouveaux sont refusés.
 
 ### 5.5 Échec de connexion
 
-Abandon au bout de 8 secondes, avec diagnostic explicite indiquant lequel des deux
-réseaux pose problème et les pistes concrètes (passer en Wi-Fi, activer l'IPv6).
-Un test réseau est disponible dans les réglages, indépendamment de tout partage.
+Abandon au bout de 8 secondes, avec diagnostic explicite et pistes concrètes (passer en
+Wi-Fi, activer l'IPv6). Un test réseau est disponible dans les réglages, indépendamment
+de tout partage.
 
 **Jamais d'attente indéfinie.**
+
+> **Correction du jalon 0.** Ce paragraphe promettait un diagnostic « indiquant lequel
+> des deux réseaux pose problème ». Le jalon 0 a établi que ce n'est pas observable
+> depuis un bord : chacun ne constate que l'absence de paquets, jamais la raison de
+> cette absence. Un message qui désignerait un côté affirmerait une cause qu'il ne peut
+> pas connaître — et dans le cas précis que Q5 existe pour tester, il ferait lire
+> « rien ne s'est passé » là où il fallait lire « le réseau a tout bloqué ».
+>
+> Ce que le diagnostic distingue réellement, et c'est déjà beaucoup : **le perçage a
+> échoué** (« cause probable : NAT strict d'un côté ») ; **le perçage a réussi mais le
+> canal chiffré ne s'est pas ouvert** (« NAT n'est PAS en cause ») ; **aucun paquet n'est
+> parvenu**, ce qui laisse volontairement deux causes ouvertes. S'y ajoute un compteur
+> d'erreurs sur le port local, qui nuance le verdict quand une cause locale (pare-feu,
+> interface qui change) n'est pas exclue.
 
 ---
 
@@ -261,11 +312,40 @@ Un test réseau est disponible dans les réglages, indépendamment de tout parta
 
 | Limite chez Discord | Correction |
 |---------------------|------------|
-| Sous-échantillonnage 4:2:0 — couleur au quart de la résolution, texte illisible | **4:4:4** — couleur pleine résolution |
+| Sous-échantillonnage 4:2:0 — couleur au quart de la résolution, texte illisible | **4:4:4** — couleur pleine résolution. **Confirmé sur NVIDIA uniquement** — voir §6.4 |
 | Débit plafonné (~2,5 Mbps, ~8 Mbps avec Nitro) | Plancher garanti défini par l'utilisateur, jusqu'à 100 Mbps |
-| Congestion frileuse | Contrôle réécrit : descente lente, remontée rapide, jamais sous le plancher |
+| Congestion frileuse | Contrôle réécrit : descente lente, remontée rapide, jamais sous le plancher. **Non tenable en l'état** — voir l'encadré ci-dessous |
 
 Le 4:4:4 est le facteur le plus déterminant pour la lisibilité du texte et du code.
+
+> **Mesuré au jalon 0** (`spike/docs/rapport-jalon-0.md`, Q3). À cible commune de
+> 10 Mbps sur un motif de texte à bords durs, HEVC 4:4:4 rend un PSNR de chrominance de
+> 58,30 dB (U) et 48,58 dB (V), contre 18,21 / 19,29 dB pour H.264 4:2:0 et 18,12 /
+> 19,27 dB pour AV1 4:2:0 — soit **+40,1 dB sur U et +29,3 dB sur V à débit comparable**,
+> la luminance restant comparable dans les trois cas. Deux codecs 4:2:0 différents
+> convergent sur le même plancher de chrominance malgré des efficacités de luminance
+> nettement différentes : l'écart est un artefact du sous-échantillonnage, pas le réglage
+> d'un encodeur. **Ce que la mesure n'établit pas** : la lisibilité perçue à l'œil, qui
+> reste un jugement humain.
+
+> **Correction du jalon 0 — le régulateur pilote la cadence, pas le débit** (écart 5).
+>
+> La ligne « Congestion frileuse » ci-dessus se lit comme un ajustement fin et continu
+> du **débit par image**. Ce n'est pas ce que le code peut faire aujourd'hui :
+> `sky-encode` n'expose que la création d'une session (débit fixé à l'ouverture) et
+> l'encodage d'une image, sans reconfiguration à chaud. Le seul levier restant au
+> régulateur est de **sauter des images entières**.
+>
+> Les propriétés du régulateur lui-même sont, elles, démontrées analytiquement et par
+> tests : plancher inviolable à n'importe quelle sévérité de perte, descente bornée à
+> 15 % par tick, remontée au plafond en un tick. C'est la grandeur pilotée qui n'est pas
+> celle annoncée.
+>
+> **Conséquence :** la promesse « en cas de congestion, perdre des images plutôt que de
+> la netteté » n'est pas violée, elle est **vide** — l'autre terme du choix n'existe pas.
+> **Le jalon 2 ne peut pas tenir ce §6.1 sans étendre l'API de `sky-encode` pour
+> reconfigurer le débit à chaud** (`nvEncReconfigureEncoder`), ce que le matériel sait
+> faire.
 
 ### 6.2 Chaîne de traitement
 
@@ -274,9 +354,14 @@ Le 4:4:4 est le facteur le plus déterminant pour la lisibilité du texte et du 
 ```
 
 **La texture ne redescend jamais en mémoire centrale.** Seul le flux compressé
-traverse le processeur. C'est ce qui permet du 4K 144 fps à 1-3 % de CPU ; un
-pipeline avec allers-retours GPU↔RAM saturerait un processeur haut de gamme dès le
-1440p60.
+traverse le processeur. Un pipeline avec allers-retours GPU↔RAM saturerait un
+processeur haut de gamme dès le 1440p60.
+
+> **Mesuré au jalon 0** (Q4) : chaîne complète capture → encodage → réseau en 1440p60
+> HEVC 4:4:4 à 30 Mbps sur RTX 4060, **0,53 % de processeur en médiane, 1,26 % au pic**,
+> pendant que l'encodeur matériel travaille à 25 % en médiane (jamais nul). Deux mesures
+> indépendantes concordent. L'ordre de grandeur « 1-3 % de CPU » est donc confirmé à
+> cette résolution ; **le 4K 144 fps n'a pas été mesuré** et reste une extrapolation.
 
 ### 6.3 Capture Windows
 
@@ -293,16 +378,83 @@ kbps chez Discord).
 
 Détection matérielle au premier lancement, puis négociation avec chaque spectateur.
 
-| Codec | Condition | Gain |
-|-------|-----------|------|
-| AV1 | RTX 40+, RX 7000+, Arc | ~40 % de débit en moins à qualité égale |
-| HEVC | GTX 10+, RX 400+, Intel 7ᵉ gén | ~30 % de moins que H.264 |
-| H.264 4:4:4 | Matériel des 12 dernières années | Socle universel |
-| x264 logiciel | Aucun encodeur détecté | Fonctionne, coûte du CPU — signalé à l'utilisateur |
+Le tableau ci-dessous a été **corrigé après le jalon 0**. Trois de ses quatre lignes
+étaient factuellement fausses ; le détail et les preuves sont dans
+`spike/docs/rapport-jalon-0.md` (écarts 1, 2 et 6).
+
+| Codec | Condition | Gain | Texte net (4:4:4) ? |
+|-------|-----------|------|---------------------|
+| **HEVC 4:4:4** | **NVIDIA** (GTX 10+) — mesuré sur RTX 4060 | ~30 % de moins que H.264, et la seule combinaison qui tienne à la fois sa cible de débit et le 4:4:4 | **Oui** — choix par défaut pour le partage d'écran |
+| **AV1 4:2:0** | RTX 40+, RX 7000+, Arc | ~40 % de débit en moins à qualité égale | **Non** — voir écart 1. Pertinent pour partager de la *vidéo*, pas un écran de travail |
+| **H.264 4:2:0** | Matériel des 12 dernières années | Socle universel de repli | **Non** |
+| **H.264 4:4:4** | ⚠ **Ne pas utiliser en l'état** — voir écart 2 | — | Oui sur le papier, mais débit incontrôlable |
+| **x264 logiciel** | Aucun encodeur matériel 4:4:4 détecté | Seule voie 4:4:4 hors NVIDIA. Coûte plusieurs dizaines de pourcents de processeur — signalé à l'utilisateur | Oui, au prix du processeur |
+
+**Écart 1 — AV1 ne fait pas de 4:4:4.** NVENC ne produit pas de 4:4:4 en AV1, même sur
+architecture Ada. Vérifié par énumération matérielle des formats d'entrée par codec, puis
+en sortie : un flux AV1 réellement produit sort en `Main` / `yuv420p`. **AV1 et « texte
+net » s'excluent sur ce matériel.**
+
+**Écart 2 — H.264 4:4:4 ne respecte pas la cible de débit.** Mesuré sur RTX 4060 (pilote
+610.74) : 70,93 Mbps réels pour une cible de 10 Mbps, et un débit bloqué entre 67 et
+72 Mbps quelle que soit la cible demandée entre 3 et 20 Mbps — donc indépendant de la
+cible. Son p99 d'encodage est le double des autres. Les paramètres ont été journalisés et
+sont identiques à ceux de H.264 4:2:0, qui tient sa cible : l'anomalie est propre au
+profil High 4:4:4 Predictive sur cette combinaison matériel/pilote, non généralisée à
+d'autres. Un codec dont le débit ne se pilote pas est inutilisable ici : ni plancher
+garanti, ni plafond respecté, ni couches de qualité multiples (§6.5).
+
+**Écart 6 — le 4:4:4 n'existe pas sur AMD, et n'est pas attesté sur Intel.** *Établi par
+recherche documentaire, non testé sur matériel : aucune carte AMD ni Intel n'était
+disponible au jalon 0.* Le SDK d'encodage AMF ne comporte aucune surface 4:4:4 ; sur
+RDNA 3, soumettre un format 4:4:4 renvoie `AMF_INVALID_FORMAT`. Ce n'est pas une limite de
+génération, la capacité est absente de la plateforme (le 4:4:4 ajouté en AMF 1.5.0
+concerne le convertisseur de couleur, pas l'encodeur). Côté Intel, la documentation atteste
+le 4:2:2 sur certaines configurations, aucune source ne confirme le 4:4:4 en encodage.
+
+> **Décision à prendre (D1), volontairement non tranchée par le jalon 0.**
+>
+> Il n'y a **pas** de socle universel en 4:4:4. Un utilisateur AMD conserverait le débit
+> libre, la résolution et la cadence, mais retomberait en 4:2:0 pour la couleur — donc au
+> niveau de Discord sur le point précis qui motive le projet. Contrairement aux autres
+> écarts, aucune quantité de travail ne l'ajoutera : c'est une contrainte matérielle.
+>
+> Trois voies, aucune indolore, à arbitrer entre « sans compromis partout » et « sans
+> compromis sur NVIDIA » :
+> 1. Encodage **logiciel** 4:4:4 sur AMD et Intel — texte net préservé, mais on troque la
+>    différenciation « texte net » contre la différenciation « ne coûte rien à la machine ».
+> 2. Accepter le 4:2:0 hors NVIDIA, en le **disant dans l'interface** plutôt qu'en laissant
+>    l'utilisateur croire à un défaut du logiciel.
+> 3. Hybride : 4:4:4 matériel sur NVIDIA, 4:4:4 logiciel sous un seuil de résolution
+>    ailleurs, 4:2:0 au-delà.
+>
+> **Prérequis commun aux trois :** aucune abstraction d'encodeur n'existe aujourd'hui.
+> `sky-encode` ne contient que l'implémentation NVENC en dur, sans trait `VideoEncoder`.
+> La décision 8 du §2 promet une abstraction OS pour la capture ; il n'y a pas
+> d'équivalent pour l'encodage, et brancher un second fabricant demandera de l'extraire
+> d'abord.
 
 Réglages communs : pas d'images bidirectionnelles (latence), rafraîchissement
 progressif au lieu d'images-clés complètes (supprime les pics de débit périodiques
 et les micro-saccades).
+
+> **Écart 3 — conséquence directe du groupe d'images infini, à traiter au jalon 2.**
+> Le rafraîchissement progressif implique une seule image-clé, au tout début du flux, donc
+> **un seul jeu d'en-têtes de séquence**. Mesuré : 1 VPS, 1 SPS, 1 PPS sur 1 201 images,
+> malgré les drapeaux de répétition — ceux-ci n'ont d'effet qu'aux images-clés, dont il
+> n'y en a qu'une. Coupés en leur milieu, les flux H.264, HEVC et AV1 sont tous refusés
+> par le décodeur.
+>
+> **Un spectateur qui rejoint un partage en cours ne verrait rien** (§5.3, §5.4, §6.5).
+> Correction identifiée, non implémentée : soit demander explicitement l'émission des
+> en-têtes sur une image choisie à l'arrivée de chaque spectateur, soit les récupérer une
+> fois et les transmettre **hors du flux vidéo** — la seconde option est la plus économe
+> en débit.
+
+**Portabilité, à inscrire comme non traité plutôt que comme acquis.** Le jalon 0 n'a visé
+qu'une cible, `x86_64-pc-windows-msvc`. ARM64 Windows n'a jamais été abordé et constitue
+une inconnue complète, y compris sur la disponibilité d'un encodeur exploitable. Apple
+Silicon est prévu au jalon 7 via VideoToolbox, non vérifié.
 
 ### 6.5 Couches de qualité
 
@@ -317,6 +469,12 @@ inférieures en sont dérivées.
   spectateur la demande, meurt quand le dernier la quitte.
 - **Le coût GPU ne dépend pas du nombre de spectateurs.** Seul le réseau croît, et la
   jauge d'upload l'affiche en direct.
+
+> **Deux prérequis mesurés au jalon 0.** (1) Une couche qui naît en cours de partage
+> doit émettre ses en-têtes de séquence pour le spectateur qui l'ouvre — voir l'écart 3
+> au §6.4, sans quoi ce spectateur n'obtient qu'un écran noir. (2) Les couches ne peuvent
+> pas être dérivées par simple ajustement du débit d'une session existante tant que la
+> reconfiguration à chaud n'est pas exposée — voir l'encadré du §6.1.
 
 ### 6.6 Profils
 
@@ -380,6 +538,11 @@ s'agit de s'abonner à une couche déjà encodée, sans renégociation ni coupur
 
 Le mode Auto mesure la bande passante réelle et n'affecte que le spectateur
 concerné : une connexion faible ne dégrade jamais l'expérience des autres.
+
+> **Limite du jalon 0 à lever avant le jalon 3.** Le mode Auto ne dispose aujourd'hui que
+> du basculement entre couches ; l'adaptation fine du débit *à l'intérieur* d'une couche
+> suppose la reconfiguration à chaud de l'encodeur, qui n'est pas exposée — voir
+> l'encadré du §6.1. Sans elle, le seul levier de dégradation est le saut d'images.
 
 Panneau de statistiques accessible au clavier : débit reçu, images par seconde,
 latence, pertes.
@@ -455,6 +618,15 @@ susceptible de déraper : c'est là que le réseau théorique rencontre les box 
 avant qu'on construise par-dessus. Un mur découvert à trois jours d'investissement
 coûte infiniment moins qu'un mur découvert à trois mois.
 
+**Statut du jalon 0 au 23 août 2026 : GO CONDITIONNEL.** Quatre des six questions sont
+closes positivement (encodage matériel 4:4:4 depuis une texture GPU, gain de chrominance
+mesuré, charge processeur, propriétés du régulateur), aucune n'a produit de réponse
+négative, et aucun des six écarts constatés n'invalide le projet. Deux questions restent
+ouvertes faute de mesures qu'aucun agent ne pouvait prendre : la **connexion entre deux
+box** (risque n°1) et le **débit de capture sur écran en mouvement réel**. Rapport
+complet, preuves et conditions du passage à un GO ferme :
+`spike/docs/rapport-jalon-0.md`.
+
 ---
 
 ## 10. Hors périmètre
@@ -484,8 +656,9 @@ coûte infiniment moins qu'un mur découvert à trois mois.
 
 | Risque | Impact | Atténuation |
 |--------|--------|-------------|
-| NAT symétrique / CGNAT chez un pair | Connexion impossible (~5-10 % des paires) | IPv6 tentée en priorité, diagnostic explicite, ajout ultérieur possible d'un relais TURN |
-| Contrôle de congestion maison instable | Image qui pulse ou fige sous charge réseau | Validé au jalon 0 sur réseau réel ; repli sur l'algorithme standard conservé en option |
+| NAT symétrique / CGNAT chez un pair | Connexion impossible (~5-10 % des paires — **chiffre issu de la littérature, ni vérifié ni infirmé par le jalon 0**) | IPv6 tentée en priorité, diagnostic explicite différencié (le programme distingue désormais « perçage raté » de « perçage réussi, canal en échec »), ajout ultérieur possible d'un relais TURN. **Risque n°1, non levé : aucun test du jalon 0 n'a franchi un NAT** |
+| Contrôle de congestion maison instable | Image qui pulse ou fige sous charge réseau | **Non validé sur réseau réel au jalon 0** : les propriétés du régulateur sont démontrées analytiquement et par tests unitaires, mais le seul signal de congestion qu'il ait reçu est un taux d'échec d'envoi local, jamais une perte de paquets. Repli sur l'algorithme standard conservé en option |
+| **4:4:4 indisponible hors NVIDIA** | La différenciation principale du produit (texte net) disparaît pour les utilisateurs AMD, et probablement Intel — ils retombent au niveau de Discord sur la couleur | Contrainte matérielle, non contournable par du travail. Trois voies décrites au §6.4, **décision D1 à prendre**. Prérequis : extraire un trait `VideoEncoder`, inexistant aujourd'hui |
 | Heures de calcul Neon dépassées | Base suspendue, site Erinium affecté | Sync groupé en une requête ; frais explicitement acceptés par le propriétaire |
 | Limite de sessions d'encodage GPU | Blocage au-delà de ~8 flux | Architecture simulcast : le nombre d'encodages est indépendant du nombre de spectateurs |
 | Portage macOS sans matériel de test | Jalon 7 bloqué | Runners macOS GitHub pour la construction ; test réel requis avant publication |
