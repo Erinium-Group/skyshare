@@ -592,7 +592,18 @@ fn diagnostiquer(link: &PeerLink) {
             DELAI_ETABLISSEMENT.as_secs()
         );
         println!("Les deux machines ne se sont jamais trouvées.");
-        println!("Cause probable : NAT strict d'un côté (4G, CGNAT, réseau d'entreprise).");
+        println!("Cause probable : NAT strict d'un côté.");
+        println!();
+        println!("  Par ordre de fréquence :");
+        println!("   1. Un VPN actif chez l'un des deux — la cause la plus courante.");
+        println!("      Il suffit d'y exclure SkyShare, sans le couper :");
+        println!("      voir docs/vpn-split-tunneling.md");
+        println!("   2. Une connexion mobile (4G/5G) ou un réseau d'entreprise.");
+        println!("   3. Un fournisseur d'accès en CGNAT.");
+        println!();
+        println!("  Aucun logiciel ne perce ces réseaux sans relais — Discord et Zoom");
+        println!("  y passent par leurs serveurs. Exclure SkyShare du VPN est gratuit");
+        println!("  et prend trente secondes.");
     }
 
     let erreurs = link.erreurs_socket();

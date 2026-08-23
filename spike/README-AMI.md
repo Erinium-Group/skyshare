@@ -58,6 +58,18 @@ que le bloc de texte du point 2 ci-dessus.
 À la fin du test, tu peux supprimer les deux fichiers : `sky-probe.exe` et
 `recu.h265`. Il ne reste alors plus rien.
 
+## Si tu utilises un VPN — à lire avant de commencer
+
+Un VPN empêche la connexion directe de s'établir : il partage une même adresse
+entre des milliers d'abonnés et en change le port à chaque destination, ce qui
+rend l'autre machine introuvable. Ce n'est pas propre à SkyShare — Discord et
+Zoom contournent le problème en faisant passer le flux par leurs serveurs.
+
+**Tu n'as pas besoin de couper ton VPN.** Il suffit d'y ajouter une exception
+pour cette seule application ; tout ton autre trafic reste protégé. La marche à
+suivre pour chaque VPN est dans `docs/vpn-split-tunneling.md`, joint à cet
+envoi.
+
 ## Marche à suivre
 
 1. Télécharge `sky-probe.exe` et mets-le où tu veux, par exemple sur le Bureau.
