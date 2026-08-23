@@ -303,16 +303,26 @@ impl PeerLink {
     /// correspondant : le paquet est seulement observé, pas consommé — le
     /// `poll` suivant le lira normalement — et `str0m` n'est pas touché, donc
     /// aucune de ses minuteries ne court.
-    pub fn contact_en_attente(&self) -> bool {
-        let mut buf = [0u8; TAILLE_DATAGRAMME];
-        self.socket.peek_from(&mut buf).is_ok()
+    /// Vrai dès qu'un datagramme **du pair** a été reçu.
+    ///
+    /// L'ancienne version regardait simplement si un datagramme quelconque
+    /// attendait sur le port. Depuis l'ajout du battement de maintien, les
+    /// serveurs STUN répondent en permanence : le spectateur prenait ces
+    /// réponses pour un contact du correspondant, sautait son attente et
+    /// abandonnait avant même que l'autre ait collé sa réponse.
+    ///
+    /// On s'appuie donc sur le compteur alimenté par `poll`, qui filtre déjà
+    /// les réponses des serveurs. L'appelant doit appeler `poll` en boucle —
+    /// ce qui est de toute façon nécessaire pour que l'agent ICE émette.
+    pub fn contact_etabli(&self) -> bool {
+        self.paquets_recus > 0
     }
 
     /// Un tour de la boucle : vider les sorties de `str0m`, écouter le socket,
     /// avancer le temps. Ne bloque jamais.
     pub fn poll(&mut self) -> anyhow::Result<LinkEvent> {
         if !self.rtc.is_alive() {
-            return Ok(LinkEvent::Failed("connexion interrompue".into()));
+            return Ok(LinkEvent::Failed("session declaree morte par l agent".into()));
         }
 
         // 1. Vider les sorties de str0m.
@@ -320,7 +330,21 @@ impl PeerLink {
             let sortie = match self.rtc.poll_output() {
                 Ok(s) => s,
                 // Le message d'origine peut contenir du SDP, donc des adresses.
-                Err(_) => return Ok(LinkEvent::Failed("connexion interrompue".into())),
+                Err(e) => {
+                    // On nomme la CATEGORIE sans le message : celui-ci peut
+                    // contenir du SDP, donc des adresses.
+                    let categorie = match &e {
+                        str0m::RtcError::Dtls(_) => "poignee de main chiffree (DTLS)",
+                        str0m::RtcError::Ice(_) => "agent ICE",
+                        str0m::RtcError::Io(_) => "entree/sortie reseau",
+                        str0m::RtcError::Net(_) => "lecture d un paquet",
+                        str0m::RtcError::Sdp(_) => "description de session",
+                        str0m::RtcError::RemoteSdp(_) => "description distante",
+                        str0m::RtcError::Rtp(_) => "flux RTP",
+                        _ => "autre",
+                    };
+                    return Ok(LinkEvent::Failed(format!("erreur en sortie — {categorie}")));
+                }
             };
 
             match sortie {
@@ -391,7 +415,7 @@ impl PeerLink {
                             .handle_input(Input::Receive(instant, recu))
                             .is_err()
                         {
-                            return Ok(LinkEvent::Failed("connexion interrompue".into()));
+                            return Ok(LinkEvent::Failed("erreur a l injection d un paquet recu".into()));
                         }
                     }
                 }
@@ -533,7 +557,20 @@ fn nouveau_rtc() -> (Rtc, Instant) {
     str0m::crypto::from_feature_flags().install_process_default();
 
     let origine = Instant::now();
-    (Rtc::new(origine), origine)
+
+    // Le réglage par défaut vise la visioconférence : l'agent abandonne après
+    // environ trente secondes sans réponse. Or ici l'échange des blocs passe par
+    // deux humains et une messagerie — mesuré à 33 s sur un essai réel, et le
+    // spectateur mourait juste avant que l'émetteur colle sa réponse.
+    //
+    // On allonge donc la persistance : davantage de tentatives, et un délai
+    // maximal entre deux qui reste court pour que la connexion s'établisse vite
+    // une fois l'autre bord présent.
+    let mut config = Rtc::builder();
+    config.set_max_stun_retransmits(120);
+    config.set_max_stun_rto(std::time::Duration::from_secs(3));
+
+    (config.build(origine), origine)
 }
 
 /// Adresse de l'interface que le système emprunterait pour sortir.

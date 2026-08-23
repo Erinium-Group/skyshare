@@ -256,7 +256,14 @@ fn attendre_contact(link: &mut PeerLink) -> anyhow::Result<bool> {
     let mut dernier_rappel = Instant::now();
 
     while debut.elapsed() < ATTENTE_CORRESPONDANT {
-        if link.contact_en_attente() {
+        // Sonder activement : sans `poll`, l'agent ICE n'émet rien et cette
+        // attente reste purement passive — le correspondant ne nous trouve
+        // jamais, et notre port se referme.
+        if let LinkEvent::Failed(e) = link.poll()? {
+            println!("  interruption pendant l'attente : {e}");
+            return Ok(false);
+        }
+        if link.contact_etabli() {
             return Ok(true);
         }
 
@@ -273,7 +280,7 @@ fn attendre_contact(link: &mut PeerLink) -> anyhow::Result<bool> {
             dernier_rappel = Instant::now();
         }
 
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(1));
     }
     Ok(false)
 }

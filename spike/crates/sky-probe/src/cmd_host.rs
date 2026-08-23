@@ -120,6 +120,13 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
     // trafic, alors que l'echange des blocs par messagerie prend couramment
     // plusieurs minutes. Sans ce battement, on negocie depuis un port que le
     // correspondant ne connait pas, et ses reponses arrivent sur un port ferme.
+    println!("  >>>  COMPTE A REBOURS : 30 SECONDES");
+    println!("       La poignee de main chiffree abandonne au-dela. Ayez tous les");
+    println!("       deux vos fenetres pretes AVANT d'echanger les blocs.");
+    println!("       (limite du protocole manuel du spike : au jalon 1 le bloc");
+    println!("        transite par le serveur en moins d'une seconde)");
+    println!();
+
     let garde = link.maintenir_mapping()?;
 
     let mut reponse = String::new();
@@ -128,6 +135,11 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
     let attente = debut_attente.elapsed();
     println!("
 (echange des blocs : {} s, port maintenu ouvert)", attente.as_secs());
+    if attente.as_secs() >= 28 {
+        println!("  >>>  {} s : au-dela de la fenetre de 30 s. Si la negociation echoue,", attente.as_secs());
+        println!("       c'est la cause la plus probable — recommencez en ayant les deux");
+        println!("       fenetres pretes.");
+    }
 
     // La negociation produit son propre trafic : le battement n'a plus lieu d'etre.
     drop(garde);
