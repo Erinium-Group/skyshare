@@ -77,6 +77,10 @@ pub struct PeerLink {
     /// ferait attribuer au NAT un échec qui vient peut-être d'ailleurs. On les
     /// compte pour que le diagnostic final puisse nuancer sa conclusion.
     erreurs_socket: u64,
+    /// Adresses des serveurs STUN, pour distinguer leurs réponses de celles du
+    /// pair. Sans ce filtre, le battement de maintien gonfle le compteur de
+    /// paquets reçus et fait croire que le correspondant répond.
+    serveurs_stun: Vec<SocketAddr>,
     /// Datagrammes réellement émis et reçus sur le port UDP.
     ///
     /// Sans ces deux nombres, un échec de négociation est indiscernable : on ne
@@ -127,6 +131,7 @@ impl PeerLink {
                 peer_key: None,
                 connected: false,
                 erreurs_socket: 0,
+                serveurs_stun: stun::serveurs_autorises(),
                 paquets_emis: 0,
                 paquets_recus: 0,
                 horloge,
@@ -175,6 +180,7 @@ impl PeerLink {
                 peer_key: Some(blob.public_key),
                 connected: false,
                 erreurs_socket: 0,
+                serveurs_stun: stun::serveurs_autorises(),
                 paquets_emis: 0,
                 paquets_recus: 0,
                 horloge,
@@ -339,6 +345,13 @@ impl PeerLink {
         let mut buf = vec![0u8; TAILLE_DATAGRAMME];
         match self.socket.recv_from(&mut buf) {
             Ok((n, source)) => {
+                // Une réponse d'un serveur STUN est le retour de notre propre
+                // battement de maintien, pas un signe de vie du correspondant. La
+                // compter fausserait le diagnostic, et la passer à l'agent ICE
+                // n'aurait aucun sens.
+                if self.serveurs_stun.contains(&source) {
+                    return Ok(LinkEvent::Idle);
+                }
                 self.paquets_recus += 1;
                 buf.truncate(n);
                 // Un datagramme illisible (parasite, scan de port) est ignoré :

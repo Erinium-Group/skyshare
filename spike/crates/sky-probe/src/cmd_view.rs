@@ -61,6 +61,12 @@ pub fn run(secondes: u64, sortie: &str) -> anyhow::Result<()> {
     );
     std::io::stdout().flush().ok();
 
+    // Même bug que côté émetteur, et il est ici encore plus dommageable :
+    // l'attente y dure plus longtemps. Tant que rien n'est reçu, l'agent ICE
+    // n'a aucune raison d'émettre, donc le port annoncé dans notre réponse
+    // n'est plus ouvert quand le correspondant s'en sert enfin.
+    let garde = link.maintenir_mapping()?;
+
     let debut_attente = Instant::now();
     if !attendre_contact(&mut link)? {
         // Formuler ce qu'on observe, pas ce qu'on en déduit — voir Tâche 7.
@@ -84,6 +90,9 @@ pub fn run(secondes: u64, sortie: &str) -> anyhow::Result<()> {
         println!("sans risque.");
         return Ok(());
     }
+
+    // Le contact est établi : la négociation produit désormais son propre trafic.
+    drop(garde);
 
     let Some(duree) = etablir(&mut link)? else {
         return Ok(());
@@ -253,11 +262,13 @@ fn attendre_contact(link: &mut PeerLink) -> anyhow::Result<bool> {
 
         if dernier_rappel.elapsed() >= PERIODE_RAPPEL {
             let reste = ATTENTE_CORRESPONDANT.saturating_sub(debut.elapsed());
+            let (emis, recus, _) = link.trafic();
             println!(
                 "  toujours en attente — encore {} min {:02} s. Ne ferme pas cette fenêtre.",
                 reste.as_secs() / 60,
                 reste.as_secs() % 60
             );
+            println!("    (émis {emis}, reçus {recus} — reçus > 0 signifie qu'il nous a trouvés)");
             std::io::stdout().flush().ok();
             dernier_rappel = Instant::now();
         }
