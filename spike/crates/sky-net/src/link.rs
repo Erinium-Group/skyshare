@@ -629,9 +629,30 @@ impl PeerLink {
         rtc.add_local_candidate(candidat_hote);
 
         // Le socket est encore bloquant : c'est ce dont la découverte STUN a besoin.
-        if let Some(publique) = stun::adresse_publique(&socket, &serveurs) {
-            if let Ok(c) = Candidate::server_reflexive(publique, locale, "udp") {
-                rtc.add_local_candidate(c);
+        //
+        // Deux echecs sont possibles ici et tous deux etaient silencieux : la
+        // decouverte peut ne rien rendre, ou la creation du candidat peut etre
+        // refusee. Dans les deux cas on n'annonce que l'adresse locale, et le
+        // correspondant ne peut jamais nous joindre — sans qu'aucun message ne
+        // le signale. On les distingue desormais.
+        match stun::adresse_publique(&socket, &serveurs) {
+            Some(publique) => match Candidate::server_reflexive(publique, locale, "udp") {
+                Ok(c) => {
+                    rtc.add_local_candidate(c);
+                    println!("  Mon adresse publique est decouverte et annoncee.");
+                }
+                Err(e) => {
+                    println!(">>> Adresse publique decouverte mais REFUSEE comme candidat : {e}");
+                    println!("    Nous n'annoncerons que notre reseau local, et le");
+                    println!("    correspondant ne pourra pas nous joindre.");
+                }
+            },
+            None => {
+                println!(">>> Adresse publique INTROUVABLE : aucun serveur n'a repondu");
+                println!("    dans le delai imparti. Nous n'annoncerons que notre reseau");
+                println!("    local, et le correspondant ne pourra pas nous joindre.");
+                println!("    (`sky-probe netcheck` peut reussir la ou ceci echoue : il");
+                println!("     dispose de plus de temps.)");
             }
         }
         // `locale` reste l'adresse du candidat hôte, et pas l'adresse publique :

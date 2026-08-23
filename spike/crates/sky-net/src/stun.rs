@@ -35,7 +35,7 @@ const ATTR_XOR_MAPPED: u16 = 0x0020;
 /// Le document d'architecture interdit toute attente non bornée : si les deux
 /// serveurs se taisent, on repart avec le seul candidat hôte plutôt que de
 /// bloquer l'utilisateur.
-const BUDGET: Duration = Duration::from_millis(1200);
+const BUDGET: Duration = Duration::from_millis(4000);
 
 /// Demande à un serveur STUN quelle adresse il voit, depuis ce socket précis.
 ///
