@@ -1479,6 +1479,13 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 ## Task 7: Connexion pair-à-pair entre deux machines (Q5)
 
+> ⚠️ **Archive d'exécution, pas un protocole vivant.** Ce plan n'a pas été rouvert
+> depuis la revue de branche. Le protocole faisant foi pour rejouer ce test est
+> `spike/docs/mesures-a-realiser.md`. Les commandes citées plus bas sont périmées :
+> `sky-probe host` nu capture l'écran réel de l'opérateur au lieu de la source
+> synthétique, et `RUST_LOG=str0m=debug` expose en clair les adresses réseau des
+> deux machines.
+
 **Files:**
 - Create: `spike/crates/sky-net/src/handshake.rs`
 - Create: `spike/crates/sky-probe/src/cmd_host.rs`
@@ -1927,6 +1934,13 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ---
 
 ## Task 9: Rapport de faisabilité
+
+> ⚠️ **Archive d'exécution, pas un protocole vivant.** Ce plan n'a pas été rouvert
+> depuis la revue de branche. Le protocole faisant foi pour les mesures restantes est
+> `spike/docs/mesures-a-realiser.md`. Les commandes citées dans ce plan sont périmées :
+> `sky-probe host` nu capture l'écran réel de l'opérateur au lieu de la source
+> synthétique, et `RUST_LOG=str0m=debug` expose en clair les adresses réseau des
+> deux machines.
 
 C'est le livrable réel du jalon 0. Le code est jetable ; ce document ne l'est pas.
 

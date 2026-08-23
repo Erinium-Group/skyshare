@@ -74,7 +74,7 @@ afficher ce profil. *(Tâche 8, §1.3)*
 **Pourquoi cette exécution-là et pas celle de 60 secondes.** Le run de 60 s à 60,0 i/s
 porte sur la **source synthétique**, et dans cette branche `WgcCapture::next_frame` n'y
 est jamais appelée : la capture n'y sert qu'à fournir le device D3D11
-(`cmd_host.rs:139-143`). Ce run n'exerce donc pas le chemin de capture, et ne peut rien
+(`cmd_host.rs:151-153`). Ce run n'exerce donc pas le chemin de capture, et ne peut rien
 corroborer à son sujet. Seule la mesure sur écran réel le traverse. C'est une
 corroboration indirecte, pas la mesure M1 ; elle ne dispense pas de la prendre.
 

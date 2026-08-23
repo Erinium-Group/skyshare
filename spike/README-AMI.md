@@ -65,7 +65,7 @@ que le bloc de texte du point 2 ci-dessus.
    « Ouvrir dans le Terminal ».
 3. Tape ceci, puis Entrée :
 
-       .\sky-probe.exe view
+       .\sky-probe.exe view --seconds 10
 
 4. Je t'envoie un long bloc de texte qui commence par `SKY1:`. Copie-le **en
    entier**, colle-le dans le terminal (clic droit = coller), puis Entrée.

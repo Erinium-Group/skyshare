@@ -8,4 +8,3 @@ cmp-reference.bgra
 test.h265
 psnr_*.log
 ssim_*.log
-mesures/*.log
