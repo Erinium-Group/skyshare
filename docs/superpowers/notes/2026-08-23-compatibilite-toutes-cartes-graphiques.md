@@ -14,21 +14,58 @@ rend un texte fin lisible au lieu de baveux.
 
 Or cette capacité n'existe pas partout :
 
-| Fabricant | Encodage 4:4:4 | Source |
-|-----------|----------------|--------|
-| **NVIDIA** | ✅ H.264 et HEVC, **mesuré** sur RTX 4060 | Jalon 0, tâches 1 à 4 |
-| **AMD** | ❌ Aucune surface 4:4:4 dans AMF. `AMF_INVALID_FORMAT` sur RDNA 3 | Documentation AMD |
-| **Intel** | ❌ Non attesté. 4:2:2 documenté sur certaines générations | Documentation Intel |
-| **Mobile** | ❌ Encodage et **décodage** quasi inexistants | Recherche documentaire |
+### 1.1 Il faut raisonner en deux capacités distinctes, pas une
 
-**Le point le plus important, découvert en creusant :** le **décodage** 4:4:4 est
-aussi rare que l'encodage. Même en produisant du 4:4:4 depuis une carte NVIDIA, un
-spectateur sur téléphone ou sur navigateur ne pourrait pas le décoder. Le problème
-n'est donc pas seulement côté émetteur.
+**Encoder et décoder sont deux circuits séparés.** Une carte peut savoir produire un
+format qu'elle ne sait pas lire. C'est le piège central de ce dossier, et le jalon 0
+ne l'a pas vu : il écrit le flux dans un fichier relu par un lecteur externe, donc
+**il n'a jamais testé le décodage.**
 
-**Asymétrie favorable notée :** le décodage 4:4:4 semble fonctionner sur Intel via
-Vulkan Video, contrairement à l'encodage. À vérifier, mais cela signifierait qu'un
-spectateur Intel peut recevoir du 4:4:4 natif sans contournement.
+### 1.2 NVIDIA — le seuil est septembre 2018, pas « NVIDIA »
+
+| Génération | Encoder H.264 4:4:4 | Encoder HEVC 4:4:4 | **Décoder** HEVC 4:4:4 |
+|------------|:---:|:---:|:---:|
+| Maxwell — GTX 900 | ✅ | ❌ | ❌ |
+| Pascal — GTX 10xx | ✅ | ❌ | ❌ |
+| Volta | ✅ | ❌ | ❌ |
+| **Turing — RTX 20xx** | ✅ | ✅ | ✅ |
+| Ampere — RTX 30xx | ✅ | ✅ | ✅ |
+| Ada — RTX 40xx *(machine de référence)* | ✅ | ✅ | ✅ |
+| Blackwell — RTX 50xx | ✅ | ✅ | ✅ |
+
+Deux conséquences que le jalon 0 n'avait pas établies :
+
+1. **Le 4:4:4 exploitable commence à Turing.** Une GTX 1080, haut de gamme récent,
+   ne fait pas de HEVC 4:4:4 du tout. Le parc NVIDIA d'avant 2018 est dans la même
+   situation qu'AMD.
+2. **H.264 4:4:4 n'est décodable en matériel sur aucune carte NVIDIA**, quelle que
+   soit sa génération. NVIDIA sait l'encoder depuis dix ans sans jamais avoir su le
+   lire. C'est un troisième argument contre ce codec, qui s'ajoute à son débit
+   incontrôlable (70 Mbps mesurés au lieu de 10) et à son temps d'encodage double.
+
+### 1.3 Les autres
+
+| Fabricant | Encodage 4:4:4 | Décodage 4:4:4 | Source |
+|-----------|----------------|----------------|--------|
+| **AMD** | ❌ Aucune surface 4:4:4 dans AMF. `AMF_INVALID_FORMAT` sur RDNA 3 | ❌ non attesté | Documentation AMD |
+| **Intel** | ❌ Non attesté. 4:2:2 documenté sur certaines générations | ⚠️ Semblerait fonctionner via Vulkan Video — **à vérifier** | Documentation Intel, Vulkan |
+| **Mobile** | ❌ | ❌ | Recherche documentaire |
+
+### 1.4 Reformulation du problème
+
+Ce n'est donc pas « NVIDIA contre les autres ». C'est :
+
+> **NVIDIA de 2018 ou plus récent, contre tout le reste.**
+
+Ce qui élargit considérablement la portée du contournement : la voie retenue ne
+servira pas seulement AMD et Intel, elle rattrapera aussi tout le parc NVIDIA
+antérieur à Turing, les portables anciens et les téléphones. Un seul mécanisme pour
+une couverture quasi totale.
+
+**Asymétrie favorable à confirmer :** le décodage 4:4:4 semble fonctionner sur Intel
+via Vulkan Video, contrairement à l'encodage. Si c'est exact, un spectateur Intel
+pourrait recevoir du 4:4:4 natif sans contournement — le problème serait alors
+strictement côté émetteur pour cette marque.
 
 ---
 
@@ -97,6 +134,16 @@ dédié plutôt qu'une décision sur plan.
 6. **Confirmation matérielle** : aucune carte AMD ni Intel n'était disponible pendant
    le jalon 0. Les constats de la section 1 reposent sur de la documentation, pas sur
    une mesure. **À vérifier sur matériel réel avant tout engagement.**
+7. **Capacités de décodage**, jamais testées au jalon 0 — le spike écrit dans un
+   fichier relu par un lecteur externe. À mesurer par génération et par fabricant,
+   séparément de l'encodage.
+8. **Coût d'un transfert entre deux cartes** sur portable hybride et sur carte
+   externe, par image à 60 images par seconde. C'est ce qui déterminera si le pari
+   zéro-copie du jalon 0 tient hors d'une configuration à carte unique.
+9. **Coût du décodage logiciel** en dernier recours, pour un spectateur dont aucune
+   carte ne sait lire le format reçu — et son plafond en nombre de flux simultanés,
+   le spec §7.1 promettant six flux en 1440p60 pour environ 15 % d'un processeur
+   graphique moderne, chiffre qui suppose un décodage matériel.
 
 ---
 
@@ -111,6 +158,47 @@ dédié plutôt qu'une décision sur plan.
   universel » puisqu'il ne respecte pas la cible de débit sur le matériel testé.
 - **Cible de compilation unique** : `x86_64-pc-windows-msvc`. ARM64 n'a jamais été
   abordé.
+
+### 5.1 La détection matérielle doit être refondue — demande du propriétaire
+
+`sky-probe hw` existe déjà et interroge NVENC pour connaître les codecs encodables.
+Il est insuffisant sur trois plans.
+
+**a) Il ne détecte que l'encodage.** Or, comme établi en §1.1, encoder et décoder
+sont deux circuits distincts. Une carte peut produire un format qu'elle ne sait pas
+lire — c'est précisément le cas de H.264 4:4:4 sur toutes les cartes NVIDIA. La
+détection doit interroger **les deux** capacités séparément.
+
+**b) Il suppose une seule carte.** Trois configurations très répandues le mettent en
+défaut :
+
+| Configuration | Difficulté |
+|---------------|-----------|
+| **Portable hybride** — puce Intel intégrée + carte NVIDIA dédiée | L'écran est piloté par l'une, l'encodeur performant est sur l'autre |
+| **Carte externe (e-GPU)** | Ajoute un lien Thunderbolt entre les deux, avec sa latence propre |
+| **Bureau à plusieurs cartes** | Quelle carte capture, quelle carte encode ? |
+
+**Le problème de fond que cela révèle :** le jalon 0 a validé une chaîne **sans
+aucune copie vers la mémoire centrale**, et c'est ce qui donne les 0,53 % de
+processeur mesurés. Mais cette validation portait sur **une seule carte**. Sur un
+portable hybride, la texture capturée vit sur la puce qui pilote l'écran tandis que
+l'encodeur visé est sur l'autre carte : une copie devient inévitable, et le pari
+zéro-copie tombe partiellement.
+
+C'est une inconnue de plus à mesurer — le coût réel d'un transfert entre deux cartes
+par image, à 60 images par seconde. Elle n'était identifiée nulle part avant que le
+propriétaire pose la question.
+
+**c) La détection ne suffit pas : il faut une négociation.** L'émetteur ne peut pas
+choisir son format tout seul, puisque le format doit être **décodable par chaque
+spectateur**. Le spec §6.4 prévoit déjà « détection matérielle au premier lancement,
+puis négociation avec chaque spectateur » — mais la moitié décodage de cette
+détection n'existe pas.
+
+Conséquence concrète avec plusieurs spectateurs : si l'un d'eux ne sait pas décoder
+le 4:4:4, faut-il dégrader pour tout le monde, ou produire deux formats différents ?
+La réponse dépend du mécanisme de couches de qualité du jalon 3, et doit être posée
+là.
 
 ---
 
