@@ -7,7 +7,7 @@
 > §5.2, §5.3, §5.5, §6.1, §6.2, §6.4, §6.5, §7.5, §9, §11 — douze au total.
 > Chaque correction cite la mesure ou la recherche qui la
 > fonde. Les **décisions produit** qui en découlent — D1 (que promet-on au matériel qui ne fait pas de 4:4:4 ?) et
-> D2 (comment sceller l'offre de connexion ?) — sont **inscrites sans être tranchées** :
+> D2 (comment sceller l'offre de connexion ?) — ont été **tranchées le 23/08/2026** :
 > elles appartiennent au propriétaire, pas au rapport de faisabilité.
 
 ---
@@ -40,8 +40,8 @@ et sans plafond imposé par un tiers.
 | 1 | **Tauri (UI React) + cœur Rust natif** | Une UI web permet le lecteur riche exigé (multi-flux, zoom, recadrage) ; un cœur natif est indispensable pour la capture GPU et les encodeurs matériels. Electron plafonnerait à ~1080p60 — c'est précisément la limite de Discord, qui est une app Electron. |
 | 2 | **Zéro serveur : signaling sur Vercel + Neon** | Coût nul, aucune machine à administrer. Contrepartie assumée : ~5-10 % des paires (CGNAT, NAT symétrique, 4G) ne pourront pas se joindre. La couche transport est abstraite pour permettre l'ajout ultérieur d'un relais TURN sans réécriture. |
 | 3 | **WebRTC via `str0m`, contrôle de congestion réécrit** | On conserve ICE (perçage NAT éprouvé) et DTLS-SRTP (chiffrement obligatoire), on remplace le limiteur de débit — c'est lui, et non une politique commerciale, qui bride la qualité chez Discord. |
-| 4 | **Adresses réseau scellées de bout en bout** · **conditionné à D2, voir §5.1** | Une connexion pair-à-pair expose nécessairement les IP aux deux pairs : c'est le protocole IP lui-même, aucun chiffrement ne le contourne. En revanche, ni Vercel ni la base ne voient jamais une adresse en clair, et aucune IP n'est affichée ni journalisée. **Corrigé au jalon 0 :** cette dernière phrase n'est vraie que de la *réponse*. L'*offre* part avant qu'une clé de destinataire n'existe, donc en clair — mesuré : deux adresses de l'émetteur lisibles dans le bloc. Tant que la boîte aux lettres est un simple relais, l'opérateur du serveur voit l'adresse publique de chaque émetteur. |
-| 5 | **Amis → entrée directe · inconnus → salle d'attente** · **conditionné à D2, voir §5.1** | La confiance est établie par la demande d'ami mutuelle. Un inconnu qui clique sur un lien public n'obtient aucune adresse tant que l'hôte n'a pas approuvé. **Corrigé au jalon 0 :** cette garantie n'est tenable que si l'offre est scellée *pour un destinataire connu*, donc après approbation — ce qui impose un annuaire de clés interrogeable avant production de l'offre. Avec un relais simple, l'offre a une forme de diffusion et tout lecteur du canal apprend l'adresse publique. |
+| 4 | **Adresses réseau scellées de bout en bout** · **tranché — D2, voir §5.1** | Une connexion pair-à-pair expose nécessairement les IP aux deux pairs : c'est le protocole IP lui-même, aucun chiffrement ne le contourne. En revanche, ni Vercel ni la base ne voient jamais une adresse en clair, et aucune IP n'est affichée ni journalisée. **Corrigé au jalon 0 :** cette dernière phrase n'est vraie que de la *réponse*. L'*offre* part avant qu'une clé de destinataire n'existe, donc en clair — mesuré : deux adresses de l'émetteur lisibles dans le bloc. Tant que la boîte aux lettres est un simple relais, l'opérateur du serveur voit l'adresse publique de chaque émetteur. |
+| 5 | **Amis → entrée directe · inconnus → salle d'attente** · **tranché — D2, voir §5.1** | La confiance est établie par la demande d'ami mutuelle. Un inconnu qui clique sur un lien public n'obtient aucune adresse tant que l'hôte n'a pas approuvé. **Corrigé au jalon 0 :** cette garantie n'est tenable que si l'offre est scellée *pour un destinataire connu*, donc après approbation — ce qui impose un annuaire de clés interrogeable avant production de l'offre. Avec un relais simple, l'offre a une forme de diffusion et tout lecteur du canal apprend l'adresse publique. |
 | 6 | **10+ spectateurs via simulcast 3 couches** | Le coût GPU reste constant quel que soit le nombre de spectateurs ; seul le réseau croît linéairement. Indispensable car les cartes grand public plafonnent à ~8 sessions d'encodage simultanées. |
 | 7 | **Son du partage uniquement, pas de micro** | Un vocal correct (écho, bruit, mixage, push-to-talk) est un projet à part entière que Discord assure déjà gratuitement, et où les utilisateurs sont déjà connectés. |
 | 8 | **Windows d'abord, abstraction OS dès le premier jour** | Chaque OS a une API de capture radicalement différente. Seul `sky-capture` change au portage ; les quatre autres modules sont déjà multiplateformes. |
@@ -225,19 +225,52 @@ sur les box françaises — il n'y a plus de NAT du tout et le perçage devient 
 > le spike : le bloc d'offre contient deux adresses de l'émetteur, décodables par
 > quiconque le reçoit ; seule la réponse est scellée.
 >
-> **Décision à prendre au jalon 1 (D2), volontairement non tranchée ici.** La direction
-> est identifiée : la boîte aux lettres doit être un **annuaire de clés interrogeable
-> avant** production de l'offre — on récupère la clé du destinataire, puis on scelle,
-> puis on envoie. La conception appartient au jalon qui construit cette boîte aux
-> lettres. Ce qui est acquis : tant que l'offre n'est pas scellée, l'opérateur du
-> serveur voit l'adresse publique de chaque émetteur, ce qui contredit le principe
-> directeur n°2 et la ligne « Adresse réseau : non » du §5.2.
+> ### D2 — tranchée le 23/08/2026 : le sens de l'échange est inversé
+>
+> **C'est le spectateur qui produit l'offre, pas l'hôte.**
+>
+> Un annuaire de clés seul ne suffisait pas. Il résout le cas des amis, où l'on sait à
+> qui l'on parle — mais pas le mode public : un hôte qui partage ne sait pas d'avance
+> qui va cliquer, donc il n'a aucune clé à laquelle sceller. Il publierait ses adresses
+> à la cantonade en attendant des visiteurs. Inverser le sens supprime le problème
+> plutôt que de le contourner.
+>
+> **Le déroulement retenu :**
+>
+> 1. L'hôte publie son identité, son statut « en partage » et **sa clé publique**.
+>    **Aucune adresse.** Rien de ce qu'il publie ne le localise.
+> 2. Le spectateur qui veut rejoindre récupère cette clé, produit **son** offre, la
+>    scelle avec la clé de l'hôte, la dépose.
+> 3. L'hôte déchiffre — lui seul le peut — et voit qui demande. Ami accepté : entrée
+>    directe. Inconnu : salle d'attente.
+> 4. **Après acceptation seulement**, l'hôte produit sa réponse et la scelle avec la
+>    clé du spectateur, contenue dans l'offre qu'il vient d'ouvrir.
+>
+> **Ce que cela garantit, et que le spike ne garantissait pas :**
+>
+> - Vercel ne voit **jamais** une adresse en clair, dans aucun sens — le principe
+>   directeur n°2 redevient vrai sans réserve.
+> - L'hôte n'expose ses adresses **qu'après avoir accepté**. La promesse du §5.3 —
+>   « un inconnu qui clique n'obtient strictement rien tant que l'hôte n'a pas
+>   approuvé » — devient structurelle au lieu d'être déclarative.
+> - L'offre perd sa forme de diffusion : elle est adressée à une clé, pas collée dans
+>   un canal partagé.
+>
+> **Ce que cela coûte, et qui est assumé :** le spectateur expose ses propres adresses
+> avant d'être accepté. C'est acceptable et symétrique — c'est lui qui demande, elles
+> sont scellées, et seul l'hôte qu'il a choisi de contacter peut les lire. Un hôte
+> malveillant apprendrait l'adresse de qui tente de le rejoindre : c'est le prix de
+> toute connexion directe, et il n'est payé que par celui qui a fait le premier pas.
+>
+> **Conséquence technique pour le jalon 2 :** cela inverse le rôle ICE contrôlant. Le
+> jalon 0 avait l'hôte en initiateur ; la Tâche 7 est donc à reprendre dans ce sens.
+> Le format du bloc scellé, lui, ne change pas.
 
 ### 5.2 Ce que Vercel peut observer
 
 | Élément | Visible ? |
 |---------|-----------|
-| Adresse réseau | Non — enveloppe scellée · **conditionné à D2, voir §5.1** |
+| Adresse réseau | Non — enveloppe scellée · **tranché — D2, voir §5.1** |
 | Image, son | Non — ne transitent jamais |
 | Clé privée | Non — ne quitte jamais la machine |
 | « L'appareil A a écrit à l'appareil B » | **Oui** — métadonnée visible |
@@ -423,7 +456,35 @@ codec retenu ci-dessus. La formulation exacte de l'écart est
 autres ». Voir `docs/superpowers/notes/2026-08-23-compatibilite-toutes-cartes-graphiques.md`,
 §1.2 et §1.4.
 
-> **Décision à prendre (D1), volontairement non tranchée par le jalon 0.**
+> ### D1 — tranchée le 23/08/2026 : la voie A, sans renoncer à rien
+>
+> **Retenue : l'empaquetage** (voie A de la note du 23/08/2026). La couleur pleine
+> résolution est rangée dans une image porteuse encodée en 4:2:0 ordinaire, puis
+> recomposée sur le processeur graphique du spectateur.
+>
+> **Les trois exigences posées par le propriétaire sont cumulatives, aucune ne cède :**
+> compatibilité de toutes les cartes, qualité, et fluidité. Le 4:4:4 natif reste utilisé
+> là où le matériel le permet ; l'empaquetage prend le relais ailleurs, sans que le
+> produit annonce deux niveaux de promesse.
+>
+> **Pourquoi cette voie et pas les quatre autres :** elle ne demande au matériel que
+> d'encoder une vidéo ordinaire et d'exécuter un shader — deux capacités présentes sur
+> pratiquement tout le parc des quinze dernières années. Elle résout d'un même geste
+> l'encodage sur AMD et Intel **et** le décodage sur mobile et navigateur, où le 4:4:4
+> est tout aussi absent. Elle ne consomme qu'une session d'encodage, ce qui préserve le
+> budget des trois couches de qualité du §6.5.
+>
+> **Ce qui reste à mesurer avant d'écrire son spec** — neuf inconnues, section 4 de la
+> note. Les deux qui peuvent invalider la voie A : le comportement à haute résolution,
+> une image 1440p empaquetée dépassant la taille d'une 4K ; et les trois pièges
+> identifiés — rangement respectant la nature de chaque plan, artefacts aux frontières,
+> modèle perceptuel de l'encodeur qui ignore que la zone basse porte de la couleur.
+>
+> **Prérequis :** extraire un trait `VideoEncoder`, inexistant aujourd'hui, et confirmer
+> les constats sur matériel AMD et Intel réel — aucun n'était disponible au jalon 0.
+>
+> Les trois voies ci-dessous sont conservées comme repli documenté, non comme options
+> ouvertes.
 >
 > Il n'y a **pas** de socle universel en 4:4:4. Un utilisateur AMD — ou un utilisateur
 > NVIDIA d'avant 2018 — conserverait le débit libre, la résolution et la cadence, mais
@@ -684,7 +745,7 @@ complet, preuves et conditions du passage à un GO ferme :
 |--------|--------|-------------|
 | NAT symétrique / CGNAT chez un pair | Connexion impossible (~5-10 % des paires — **chiffre issu de la littérature, ni vérifié ni infirmé par le jalon 0**) | IPv6 tentée en priorité, diagnostic explicite différencié (le programme distingue désormais « perçage raté » de « perçage réussi, canal en échec »), ajout ultérieur possible d'un relais TURN. **Risque n°1, non levé : aucun test du jalon 0 n'a franchi un NAT** |
 | Contrôle de congestion maison instable | Image qui pulse ou fige sous charge réseau | **Non validé sur réseau réel au jalon 0** : les propriétés du régulateur sont démontrées analytiquement et par tests unitaires, mais le seul signal de congestion qu'il ait reçu est un taux d'échec d'envoi local, jamais une perte de paquets. Repli sur l'algorithme standard conservé en option |
-| **4:4:4 indisponible hors NVIDIA Turing ou plus récent** | La différenciation principale du produit (texte net) disparaît pour les utilisateurs AMD, probablement Intel, **et tout le parc NVIDIA d'avant septembre 2018** (GTX 10xx comprises) — ils retombent au niveau de Discord sur la couleur. La population concernée est plus large que « les non-NVIDIA » | Contrainte matérielle, non contournable par du travail. Trois voies décrites au §6.4, quatre autres dans la note du 23/08/2026, **décision D1 à prendre**. Prérequis : extraire un trait `VideoEncoder`, inexistant aujourd'hui |
+| **4:4:4 indisponible hors NVIDIA Turing ou plus récent** | La différenciation principale du produit (texte net) disparaît pour les utilisateurs AMD, probablement Intel, **et tout le parc NVIDIA d'avant septembre 2018** (GTX 10xx comprises) — ils retombent au niveau de Discord sur la couleur. La population concernée est plus large que « les non-NVIDIA » | Contrainte matérielle, non contournable par du travail. Trois voies décrites au §6.4, quatre autres dans la note du 23/08/2026, **décision D1 tranchée : voie A, empaquetage — voir §6.4**. Prérequis : extraire un trait `VideoEncoder`, inexistant aujourd'hui |
 | Heures de calcul Neon dépassées | Base suspendue, site Erinium affecté | Sync groupé en une requête ; frais explicitement acceptés par le propriétaire |
 | Limite de sessions d'encodage GPU | Blocage au-delà de ~8 flux | Architecture simulcast : le nombre d'encodages est indépendant du nombre de spectateurs |
 | Portage macOS sans matériel de test | Jalon 7 bloqué | Runners macOS GitHub pour la construction ; test réel requis avant publication |

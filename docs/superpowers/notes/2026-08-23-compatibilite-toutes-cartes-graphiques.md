@@ -1,6 +1,8 @@
 # Note technique — Couleur pleine résolution sur toutes les cartes graphiques
 
-> Statut : **note de référence, pas un spec.** Aucune décision n'est figée ici.
+> Statut : **note de référence.** La décision D1 a été **tranchée le 23/08/2026** par le
+> propriétaire — voir §2 point 5. Le reste demeure une matière première : les neuf
+> inconnues de la §4 doivent être mesurées avant qu'un spec ne soit écrit.
 > Date : 23 août 2026 · Origine : question du propriétaire en fin de jalon 0
 
 ---
@@ -80,6 +82,16 @@ strictement côté émetteur pour cette marque.
 4. Sur ordinateur, c'est **l'application native** qui est utilisée, sans exception.
    L'application web est destinée **aux téléphones uniquement**, et sera un pur client
    de visionnage — elle ne capture jamais d'écran.
+5. **D1 tranchée le 23/08/2026 : la voie A est retenue.** L'empaquetage de la couleur
+   pleine résolution dans une image porteuse 4:2:0, recomposée sur le processeur
+   graphique du spectateur. Les trois exigences posées sont **cumulatives** —
+   compatibilité de toutes les cartes, qualité, fluidité — et aucune ne cède au profit
+   des autres. Le 4:4:4 natif reste employé là où le matériel le permet ; l'empaquetage
+   prend le relais ailleurs, sans que le produit annonce deux niveaux de promesse.
+   Les voies B à E restent documentées comme replis, non comme options ouvertes.
+   **Cette décision ne dispense d'aucune des neuf mesures de la §4** : elle fixe la
+   direction, pas la faisabilité. Les deux inconnues qui peuvent encore l'invalider sont
+   le comportement à haute résolution et les trois pièges de la §3.
 
 ---
 
