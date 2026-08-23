@@ -1,7 +1,9 @@
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context};
 use windows::core::Interface;
+use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
@@ -31,6 +33,9 @@ pub struct WgcCapture {
     dropped: u64,
     width: u32,
     height: u32,
+    /// Signalé par WGC à chaque image disponible. Remplace le sondage actif :
+    /// on dort jusqu'au réveil au lieu de brûler un cœur à demander.
+    reveil: Receiver<()>,
 }
 
 impl WgcCapture {
@@ -118,6 +123,24 @@ impl WgcCapture {
             );
         }
 
+        // On s'abonne AVANT de démarrer : une image arrivée entre l'abonnement et
+        // le premier appel serait sinon perdue.
+        //
+        // Capacité 1 et `try_send` : le signal dit « au moins une image est
+        // prête », pas « en voici une de plus ». Un canal plein n'a rien à
+        // apprendre de plus, et le gestionnaire ne doit jamais bloquer — il tourne
+        // sur un thread de WGC.
+        let (tx, reveil) = sync_channel::<()>(1);
+        frame_pool
+            .FrameArrived(&TypedEventHandler::<
+                Direct3D11CaptureFramePool,
+                windows::core::IInspectable,
+            >::new(move |_, _| {
+                let _ = tx.try_send(());
+                Ok(())
+            }))
+            .context("abonnement à FrameArrived")?;
+
         session.StartCapture().context("StartCapture")?;
 
         Ok(Self {
@@ -130,6 +153,7 @@ impl WgcCapture {
             dropped: 0,
             width,
             height,
+            reveil,
         })
     }
 
@@ -157,16 +181,23 @@ impl WgcCapture {
                     captured_at: Instant::now(),
                 }));
             }
-            if Instant::now() >= deadline {
+            let reste = deadline.saturating_duration_since(Instant::now());
+            if reste.is_zero() {
                 // Compte les délais d'attente dépassés, pas des images perdues par
                 // WGC : le nom vient de l'interface attendue par les tâches suivantes.
                 self.dropped += 1;
                 return Ok(None);
             }
-            // TODO(jalon 2) : attendre l'événement `FrameArrived` du frame pool.
-            // Ce sondage actif brûle un cœur entier — mesuré à ~2,7 millions de
-            // tours par seconde — ce qui fausserait la mesure de charge processeur.
-            std::thread::yield_now();
+            match self.reveil.recv_timeout(reste) {
+                Ok(()) => continue,
+                Err(RecvTimeoutError::Timeout) => {
+                    self.dropped += 1;
+                    return Ok(None);
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(anyhow!("la capture s'est arrêtée"));
+                }
+            }
         }
     }
 

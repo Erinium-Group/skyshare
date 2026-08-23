@@ -81,6 +81,100 @@ pub fn serveurs_autorises() -> Vec<SocketAddr> {
         .collect()
 }
 
+/// Ce que le réseau local laisse espérer d'une connexion directe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeNat {
+    /// Les deux serveurs voient la même adresse et le même port : le port public
+    /// ne dépend pas du destinataire, donc l'adresse annoncée au pair sera la
+    /// bonne. Le perçage peut aboutir.
+    Traversable,
+    /// Le port change selon le destinataire. L'adresse découverte auprès d'un
+    /// serveur ne vaut pour personne d'autre : aucun perçage n'est possible,
+    /// quel que soit le logiciel. C'est le comportement des VPN commerciaux et
+    /// de nombreux réseaux mobiles.
+    Symetrique,
+    /// Un seul serveur a répondu, ou aucun. On ne conclut pas.
+    Indetermine,
+}
+
+/// Décide du type de NAT à partir des adresses vues par chaque serveur.
+///
+/// Séparée de l'appel réseau pour être testable sans socket.
+fn verdict(vues: &[SocketAddr]) -> TypeNat {
+    match vues {
+        [] | [_] => TypeNat::Indetermine,
+        [a, reste @ ..] => {
+            if reste.iter().all(|b| b == a) {
+                TypeNat::Traversable
+            } else {
+                TypeNat::Symetrique
+            }
+        }
+    }
+}
+
+/// Interroge tous les serveurs autorisés et compare ce que chacun voit.
+///
+/// C'est le seul test qui distingue « mon réseau empêche le perçage » de « le
+/// sien l'empêche » : chacun peut le lancer de son côté, sans coordination.
+///
+/// Ne rend jamais d'adresse — seulement le verdict.
+pub fn type_de_nat(socket: &UdpSocket, serveurs: &[SocketAddr]) -> TypeNat {
+    let vues: Vec<SocketAddr> = serveurs
+        .iter()
+        .filter_map(|cible| interroger(socket, *cible, BUDGET / 2))
+        .collect();
+    verdict(&vues)
+}
+
+#[cfg(test)]
+mod tests_nat {
+    use super::{verdict, TypeNat};
+    use std::net::SocketAddr;
+
+    fn a(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn aucune_reponse_ne_conclut_pas() {
+        assert_eq!(verdict(&[]), TypeNat::Indetermine);
+    }
+
+    #[test]
+    fn une_seule_reponse_ne_conclut_pas() {
+        // Avec un seul point de vue, rien ne distingue un NAT symétrique d'un
+        // autre : il faut deux observateurs pour comparer.
+        assert_eq!(verdict(&[a("192.0.2.1:5000")]), TypeNat::Indetermine);
+    }
+
+    #[test]
+    fn meme_port_vu_des_deux_cotes_est_traversable() {
+        assert_eq!(
+            verdict(&[a("192.0.2.1:5000"), a("192.0.2.1:5000")]),
+            TypeNat::Traversable
+        );
+    }
+
+    #[test]
+    fn port_different_est_symetrique() {
+        // Le cas des VPN commerciaux : un port par destination.
+        assert_eq!(
+            verdict(&[a("192.0.2.1:5000"), a("192.0.2.1:7431")]),
+            TypeNat::Symetrique
+        );
+    }
+
+    #[test]
+    fn adresse_differente_est_symetrique() {
+        // Sortie par deux passerelles distinctes : même conséquence pratique.
+        assert_eq!(
+            verdict(&[a("192.0.2.1:5000"), a("198.51.100.9:5000")]),
+            TypeNat::Symetrique
+        );
+    }
+}
+
 fn interroger(socket: &UdpSocket, cible: SocketAddr, budget: Duration) -> Option<SocketAddr> {
     let trans_id = identifiant_transaction();
     let requete = requete_binding(&trans_id);

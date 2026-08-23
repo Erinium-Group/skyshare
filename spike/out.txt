@@ -1,0 +1,20 @@
+Capture démarrée. Bouge des fenêtres pour générer du mouvement.
+
+--- Q1 : capture ---
+Images capturées  : 1972
+Rafraîchissements : 1987 en 12 s, soit 165.6 Hz réels
+
+--- écran figé : rien à capturer ---
+  Pauses > 24 ms   : 0 (+ 0 délais dépassés)
+  Temps sans contenu : 0.0 s sur 12 s, soit 0 %
+
+--- pendant que l'écran bougeait ---
+  Intervalle médian  : 6.07 ms
+  Intervalle p90     : 8.20 ms
+  Intervalle p99     : 10.78 ms
+  Pire intervalle    : 15.8 ms
+  Cadence en activité : 164.9 im/s
+
+Obtenu / attendu (en activité) : 1.00
+Verdict           : SUCCÈS
+(FPS moyen brut, pauses comprises : 164.2)

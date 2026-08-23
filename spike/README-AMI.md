@@ -70,6 +70,23 @@ pour cette seule application ; tout ton autre trafic reste protégé. La marche 
 suivre pour chaque VPN est dans `docs/vpn-split-tunneling.md`, joint à cet
 envoi.
 
+## D'abord : teste ton réseau, tout seul
+
+Avant même qu'on essaie de se connecter, lance ceci — ça prend deux secondes et
+tu n'as besoin de personne :
+
+    .\sky-probe.exe netcheck
+
+Ça interroge deux serveurs publics et compare ce qu'ils voient. Aucune adresse
+n'est affichée, rien n'est envoyé à qui que ce soit.
+
+- **✅ compatible** → ton réseau va bien, on peut passer à la suite
+- **🔴 empêche la connexion directe** → un VPN, la 4G ou ton réseau bloque.
+  Le message affiché dit quoi faire. Relance la commande après chaque
+  changement : tu sauras tout de suite si c'est réglé, sans m'attendre.
+
+Envoie-moi le résultat, quel qu'il soit.
+
 ## Marche à suivre
 
 1. Télécharge `sky-probe.exe` et mets-le où tu veux, par exemple sur le Bureau.

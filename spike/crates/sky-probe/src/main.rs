@@ -1,4 +1,5 @@
 mod cmd_capture;
+mod cmd_netcheck;
 mod cmd_codecs;
 mod cmd_encode;
 mod cmd_host;
@@ -18,6 +19,8 @@ struct Cli {
 enum Cmd {
     /// Détecte le GPU et liste les codecs réellement encodables
     Hw,
+    /// Teste si ton réseau permet une connexion directe (à lancer seul)
+    Netcheck,
     /// Mesure la capture d'écran (Q1)
     Capture {
         #[arg(long, default_value_t = 30)]
@@ -95,6 +98,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Hw => cmd_hw::run(),
+        Cmd::Netcheck => cmd_netcheck::run(),
         Cmd::Capture {
             seconds,
             monitor,
