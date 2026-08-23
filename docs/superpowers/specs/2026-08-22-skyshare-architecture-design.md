@@ -6,7 +6,7 @@
 > `spike/docs/rapport-jalon-0.md`. Sections touchées : **§2 (décisions 4 et 5)**, §5.1,
 > §5.2, §5.3, §5.5, §6.1, §6.2, §6.4, §6.5, §7.5, §9, §11 — douze au total.
 > Chaque correction cite la mesure ou la recherche qui la
-> fonde. Les **décisions produit** qui en découlent — D1 (que promet-on hors NVIDIA ?) et
+> fonde. Les **décisions produit** qui en découlent — D1 (que promet-on au matériel qui ne fait pas de 4:4:4 ?) et
 > D2 (comment sceller l'offre de connexion ?) — sont **inscrites sans être tranchées** :
 > elles appartiennent au propriétaire, pas au rapport de faisabilité.
 
@@ -313,7 +313,7 @@ de tout partage.
 
 | Limite chez Discord | Correction |
 |---------------------|------------|
-| Sous-échantillonnage 4:2:0 — couleur au quart de la résolution, texte illisible | **4:4:4** — couleur pleine résolution. **Confirmé sur NVIDIA uniquement** — voir §6.4 |
+| Sous-échantillonnage 4:2:0 — couleur au quart de la résolution, texte illisible | **4:4:4** — couleur pleine résolution. **Confirmé sur NVIDIA Turing ou plus récent uniquement** (RTX 20xx et au-delà) — voir §6.4 |
 | Débit plafonné (~2,5 Mbps, ~8 Mbps avec Nitro) | Plancher garanti défini par l'utilisateur, jusqu'à 100 Mbps |
 | Congestion frileuse | Contrôle réécrit : descente lente, remontée rapide, jamais sous le plancher. **Non tenable en l'état** — voir l'encadré ci-dessous |
 
@@ -387,11 +387,11 @@ Le tableau ci-dessous a été **corrigé après le jalon 0**. Trois de ses quatr
 
 | Codec | Condition | Gain | Texte net (4:4:4) ? |
 |-------|-----------|------|---------------------|
-| **HEVC 4:4:4** | **NVIDIA** (GTX 10+) — mesuré sur RTX 4060 | ~30 % de moins que H.264, et la seule combinaison qui tienne à la fois sa cible de débit et le 4:4:4 | **Oui** — choix par défaut pour le partage d'écran |
+| **HEVC 4:4:4** | **NVIDIA Turing ou plus récent** (RTX 20xx et au-delà, septembre 2018) — mesuré sur RTX 4060. **Pas Pascal (GTX 10xx), pas Maxwell, pas Volta** : ces générations ne font pas de HEVC 4:4:4 du tout | ~30 % de moins que H.264, et la seule combinaison qui tienne à la fois sa cible de débit et le 4:4:4 | **Oui** — choix par défaut pour le partage d'écran |
 | **AV1 4:2:0** | RTX 40+, RX 7000+, Arc | ~40 % de débit en moins à qualité égale | **Non** — voir écart 1. Pertinent pour partager de la *vidéo*, pas un écran de travail |
 | **H.264 4:2:0** | Matériel des 12 dernières années | Socle universel de repli | **Non** |
 | **H.264 4:4:4** | ⚠ **Ne pas utiliser en l'état** — voir écart 2 | — | Oui sur le papier, mais débit incontrôlable |
-| **x264 logiciel** | Aucun encodeur matériel 4:4:4 détecté | Seule voie 4:4:4 hors NVIDIA côté émetteur. Coûte du processeur — signalé à l'utilisateur. **Coût réel non mesuré** : aucune mesure du jalon 0 ne couvre l'encodage logiciel | Oui, au prix du processeur |
+| **x264 logiciel** | Aucun encodeur matériel 4:4:4 détecté | **Une voie parmi cinq**, et celle que la note de référence du 23/08/2026 classe **dernière** : elle ne traite que l'émetteur, alors que le spectateur doit encore savoir décoder du 4:4:4. Coûte du processeur — signalé à l'utilisateur. **Coût réel non mesuré** : aucune mesure du jalon 0 ne couvre l'encodage logiciel | Oui, au prix du processeur |
 
 **Écart 1 — AV1 ne fait pas de 4:4:4.** NVENC ne produit pas de 4:4:4 en AV1, même sur
 architecture Ada. Vérifié par énumération matérielle des formats d'entrée par codec, puis
@@ -415,21 +415,33 @@ génération, la capacité est absente de la plateforme (le 4:4:4 ajouté en AMF
 concerne le convertisseur de couleur, pas l'encodeur). Côté Intel, la documentation atteste
 le 4:2:2 sur certaines configurations, aucune source ne confirme le 4:4:4 en encodage.
 
+**Et la frontière n'est pas le fabricant, c'est la génération.** Le HEVC 4:4:4 commence à
+**Turing** (RTX 20xx, septembre 2018) : Pascal (GTX 10xx), Maxwell et Volta ne le font pas
+du tout. Une GTX 1080 est donc du même côté de la frontière qu'une carte AMD vis-à-vis du
+codec retenu ci-dessus. La formulation exacte de l'écart est
+**« NVIDIA de 2018 ou plus récent contre tout le reste »**, et non « NVIDIA contre les
+autres ». Voir `docs/superpowers/notes/2026-08-23-compatibilite-toutes-cartes-graphiques.md`,
+§1.2 et §1.4.
+
 > **Décision à prendre (D1), volontairement non tranchée par le jalon 0.**
 >
-> Il n'y a **pas** de socle universel en 4:4:4. Un utilisateur AMD conserverait le débit
-> libre, la résolution et la cadence, mais retomberait en 4:2:0 pour la couleur — donc au
-> niveau de Discord sur le point précis qui motive le projet. Contrairement aux autres
-> écarts, aucune quantité de travail ne l'ajoutera : c'est une contrainte matérielle.
+> Il n'y a **pas** de socle universel en 4:4:4. Un utilisateur AMD — ou un utilisateur
+> NVIDIA d'avant 2018 — conserverait le débit libre, la résolution et la cadence, mais
+> retomberait en 4:2:0 pour la couleur, donc au niveau de Discord sur le point précis qui
+> motive le projet. Contrairement aux autres écarts, aucune quantité de travail ne
+> l'ajoutera : c'est une contrainte matérielle.
 >
 > Trois voies, aucune indolore, à arbitrer entre « sans compromis partout » et « sans
-> compromis sur NVIDIA » :
-> 1. Encodage **logiciel** 4:4:4 sur AMD et Intel — texte net préservé, mais on troque
->    potentiellement la différenciation « texte net » contre la différenciation « ne coûte
->    rien à la machine ». **Coût non mesuré au jalon 0**, donc voie ni retenue ni écartée.
-> 2. Accepter le 4:2:0 hors NVIDIA, en le **disant dans l'interface** plutôt qu'en laissant
->    l'utilisateur croire à un défaut du logiciel.
-> 3. Hybride : 4:4:4 matériel sur NVIDIA, 4:4:4 logiciel sous un seuil de résolution
+> compromis sur le matériel récent ». *Dans les trois, « hors NVIDIA » se lit « hors
+> NVIDIA Turing ou plus récent ».*
+> 1. Encodage **logiciel** 4:4:4 là où le matériel ne sait pas le produire — texte net
+>    préservé, mais on troque potentiellement la différenciation « texte net » contre la
+>    différenciation « ne coûte rien à la machine ». **Coût non mesuré au jalon 0**, donc
+>    voie ni retenue ni écartée. *La note de référence citée ci-dessus la classe dernière
+>    sur cinq : elle ne traite que l'émetteur, pas la capacité de décodage du spectateur.*
+> 2. Accepter le 4:2:0 sur ce matériel, en le **disant dans l'interface** plutôt qu'en
+>    laissant l'utilisateur croire à un défaut du logiciel.
+> 3. Hybride : 4:4:4 matériel là où il existe, 4:4:4 logiciel sous un seuil de résolution
 >    ailleurs, 4:2:0 au-delà.
 >
 > **Prérequis commun aux trois :** aucune abstraction d'encodeur n'existe aujourd'hui.
@@ -437,6 +449,13 @@ le 4:2:2 sur certaines configurations, aucune source ne confirme le 4:4:4 en enc
 > La décision 8 du §2 promet une abstraction OS pour la capture ; il n'y a pas
 > d'équivalent pour l'encodage, et brancher un second fabricant demandera de l'extraire
 > d'abord.
+>
+> **Quatre voies supplémentaires sont décrites hors de ce spec**, dans la note de
+> référence citée ci-dessus : empaquetage de la couleur dans une image porteuse 4:2:0
+> (sa candidate n°1), flux auxiliaire, double résolution, 4:2:2 intermédiaire. Elle
+> recommande un spike dédié plutôt qu'une décision sur plan, et **rien ne peut être
+> engagé avant confirmation sur matériel AMD et Intel réel** : tout le constat de
+> l'écart 6 est documentaire.
 
 Réglages communs : pas d'images bidirectionnelles (latence), rafraîchissement
 progressif au lieu d'images-clés complètes (supprime les pics de débit périodiques
@@ -665,7 +684,7 @@ complet, preuves et conditions du passage à un GO ferme :
 |--------|--------|-------------|
 | NAT symétrique / CGNAT chez un pair | Connexion impossible (~5-10 % des paires — **chiffre issu de la littérature, ni vérifié ni infirmé par le jalon 0**) | IPv6 tentée en priorité, diagnostic explicite différencié (le programme distingue désormais « perçage raté » de « perçage réussi, canal en échec »), ajout ultérieur possible d'un relais TURN. **Risque n°1, non levé : aucun test du jalon 0 n'a franchi un NAT** |
 | Contrôle de congestion maison instable | Image qui pulse ou fige sous charge réseau | **Non validé sur réseau réel au jalon 0** : les propriétés du régulateur sont démontrées analytiquement et par tests unitaires, mais le seul signal de congestion qu'il ait reçu est un taux d'échec d'envoi local, jamais une perte de paquets. Repli sur l'algorithme standard conservé en option |
-| **4:4:4 indisponible hors NVIDIA** | La différenciation principale du produit (texte net) disparaît pour les utilisateurs AMD, et probablement Intel — ils retombent au niveau de Discord sur la couleur | Contrainte matérielle, non contournable par du travail. Trois voies décrites au §6.4, **décision D1 à prendre**. Prérequis : extraire un trait `VideoEncoder`, inexistant aujourd'hui |
+| **4:4:4 indisponible hors NVIDIA Turing ou plus récent** | La différenciation principale du produit (texte net) disparaît pour les utilisateurs AMD, probablement Intel, **et tout le parc NVIDIA d'avant septembre 2018** (GTX 10xx comprises) — ils retombent au niveau de Discord sur la couleur. La population concernée est plus large que « les non-NVIDIA » | Contrainte matérielle, non contournable par du travail. Trois voies décrites au §6.4, quatre autres dans la note du 23/08/2026, **décision D1 à prendre**. Prérequis : extraire un trait `VideoEncoder`, inexistant aujourd'hui |
 | Heures de calcul Neon dépassées | Base suspendue, site Erinium affecté | Sync groupé en une requête ; frais explicitement acceptés par le propriétaire |
 | Limite de sessions d'encodage GPU | Blocage au-delà de ~8 flux | Architecture simulcast : le nombre d'encodages est indépendant du nombre de spectateurs |
 | Portage macOS sans matériel de test | Jalon 7 bloqué | Runners macOS GitHub pour la construction ; test réel requis avant publication |

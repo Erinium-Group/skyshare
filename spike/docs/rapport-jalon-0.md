@@ -22,10 +22,20 @@ Trois statuts, jamais mélangés :
 - **Non mesuré** — avec la raison. Une case vide honnête vaut mieux qu'une estimation
   déguisée en résultat, et ce rapport en contient plusieurs.
 
-Tout chiffre cité ici renvoie à un rapport de tâche dans
-`.superpowers/sdd/2026-08-22-jalon-0-faisabilite/`. Deux chiffres qui circulent dans
-ces rapports sont volontairement **écartés** de celui-ci : voir « Deux chiffres que ce
-rapport ne reprend pas », en fin de section latence.
+Chaque chiffre cité ici porte la tâche d'où il vient, sous la forme *(Tâche N)*. Deux
+chiffres qui circulent dans ces rapports de tâche sont volontairement **écartés** de
+celui-ci : voir « Deux chiffres que ce rapport ne reprend pas », en fin de section
+latence.
+
+**Portée exacte de cette traçabilité, à ne pas surestimer.** Les neuf rapports de tâche
+vivent dans `.superpowers/sdd/2026-08-22-jalon-0-faisabilite/`, répertoire exclu du
+dépôt par `.gitignore` — choix délibéré du propriétaire : ce sont des artefacts de
+travail, pas un livrable. Un renvoi *(Tâche N)* **nomme** donc sa source sans la rendre
+rouvrable depuis le dépôt seul. Ce qui reste vérifiable après fusion : le protocole
+complet des mesures qui restent à prendre (`spike/docs/mesures-a-realiser.md`,
+rapatrié pour cette raison), les journaux PSNR/SSIM et les images de `spike/mesures/`,
+le script `spike/mesures.sh` qui les produit, les relevés d'API de
+`spike/docs/api-nvenc.md` et `spike/docs/comparatif-codecs.md`, et le code lui-même.
 
 ---
 
@@ -36,12 +46,12 @@ d'origine sans passer par ce document.
 
 | Q | Question | Seuil | Mesuré | Verdict |
 |---|----------|-------|--------|---------|
-| Q1 | Capture 1440p60 sans copie CPU | ≥ 59 fps | **Débit d'images : non mesuré** (aucun agent ne peut produire un écran en mouvement réel — voir note 1). **Absence de copie processeur : établie par lecture** — aucun `Map`, aucun `CopyResource`, aucune texture intermédiaire ; `IDirect3DDxgiInterfaceAccess::GetInterface` rend directement l'`ID3D11Texture2D` du pool WGC. *(Tâche 2)* Corroborée indirectement par la charge mesurée en Q4. *(Tâche 8)* | **PARTIEL** |
+| Q1 | Capture 1440p60 sans copie CPU | ≥ 59 fps **et** < 1 % d'images perdues | **Débit d'images : non mesuré** (aucun agent ne peut produire un écran en mouvement réel — voir note 1). **Taux de perte : aucun instrument n'existe** — voir note 2. **Absence de copie processeur : établie par lecture** — aucun `Map`, aucun `CopyResource`, aucune texture intermédiaire ; `IDirect3DDxgiInterfaceAccess::GetInterface` rend directement l'`ID3D11Texture2D` du pool WGC. *(Tâche 2)* Corroborée indirectement par la charge mesurée sur **écran réel** en Q4. *(Tâche 8, §1.3)* | **PARTIEL** |
 | Q2 | NVENC accepte une texture D3D11 en 4:4:4 | bitstream valide | `ffprobe` : `codec_name=hevc`, `profile=Rext`, `pix_fmt=yuv444p`, 2560×1440. **1201 images encodées = 1201 images décodées**, `ffmpeg -f null` code de sortie 0, aucune ligne d'erreur. Les trois branches de codec exercées sur matériel réel. Repli FFmpeg du plan **non déclenché**. *(Tâche 3, §A et §F)* | **OUI** |
-| Q3 | Meilleur codec pour le texte | comparatif | À cible commune 10 Mbps, régime établi (images 120-900, 781 images) : HEVC 4:4:4 (9,37 Mbps réels) rend **PSNR U 58,30 dB / V 48,58 dB**, contre H.264 4:2:0 (8,44 Mbps) **18,21 / 19,29 dB** et AV1 4:2:0 (10,04 Mbps) **18,12 / 19,27 dB**. Soit **+40,1 dB sur U et +29,3 dB sur V** à débit comparable. Luminance **bonne dans les trois cas** (50,2 à 74,9 dB) — c'est-à-dire non dégradée par le sous-échantillonnage, contrairement à la chrominance ; les trois valeurs ne sont pas proches entre elles pour autant. *(Tâche 4, §5)* | **HEVC 4:4:4**, sur la chrominance. Lisibilité perçue **non jugée** (note 2) |
+| Q3 | Meilleur codec pour le texte | comparatif | À cible commune 10 Mbps, régime établi (images 120-900, 781 images) : HEVC 4:4:4 (9,37 Mbps réels) rend **PSNR U 58,30 dB / V 48,58 dB**, contre H.264 4:2:0 (8,44 Mbps) **18,21 / 19,29 dB** et AV1 4:2:0 (10,04 Mbps) **18,12 / 19,27 dB**. Soit **+40,1 dB sur U et +29,3 dB sur V** à débit comparable. Luminance **bonne dans les trois cas** (50,2 à 74,9 dB) — c'est-à-dire non dégradée par le sous-échantillonnage, contrairement à la chrominance ; les trois valeurs ne sont pas proches entre elles pour autant. *(Tâche 4, §5)* | **HEVC 4:4:4**, sur la chrominance. Lisibilité perçue **non jugée** (note 3) |
 | Q4 | CPU de la chaîne complète | < 5 % | **0,53 % médian, 1,26 % au pic** (54 échantillons, 1/s sur 59 s, source synthétique, 1440p60 HEVC 4:4:4 à 30 Mbps). Encodeur matériel simultanément à **25 % médian, minimum observé 9 %, jamais nul** (55 échantillons). Seconde mesure indépendante sur écran réel : 0,53 % médian / 1,01 % max, encodeur 24 % médian — concordante. *(Tâche 8, §1 et §1.3)* | **OUI** |
 | Q5 | Connexion entre deux box | établie < 8 s | **Non mesurée.** Aucun test n'a franchi un NAT : les deux processus tournent sur la même machine, la paire de candidats ICE retenue est hôte/hôte, le trafic ne quitte jamais la pile réseau de Windows. Le chemin de code que Q5 existe pour exercer n'a jamais été exécuté. *(Tâche 7, §5)* | **OUVERTE** — risque n°1 |
-| Q6 | Plancher de débit tenu | jamais franchi | 5 tests unitaires verts, **et** propriétés démontrées analytiquement pour *toute* entrée, pas seulement les cas testés : plancher tenu à n'importe quelle sévérité de perte, descente bornée à 15 %/tick par construction de la formule, remontée au plafond en 1 tick (100 ms) après un à-coup. *(Tâche 6)* **Jamais éprouvé sur un signal de congestion réseau réel** — le signal injecté est un taux d'échec d'envoi local, pas une perte de paquets. *(Tâche 8, §6.4)* | **OUI en théorie** — mais voir écart n°5 |
+| Q6 | Plancher de débit tenu | jamais franchi | 7 tests unitaires verts (5 d'origine, plus 2 ajoutés en revue de branche sur la validation des bornes), **et** propriétés démontrées analytiquement pour *toute* entrée, pas seulement les cas testés : plancher tenu à n'importe quelle sévérité de perte, descente bornée à 15 %/tick par construction de la formule, remontée au plafond en 1 tick (100 ms) après un à-coup. *(Tâche 6)* **Jamais éprouvé sur un signal de congestion réseau réel** — le signal injecté est un taux d'échec d'envoi local, pas une perte de paquets. *(Tâche 8, §6.4)* | **OUI en théorie** — mais voir écart n°5 |
 
 **Note 1 — pourquoi Q1 reste partielle.** Windows.Graphics.Capture ne livre une image
 que lorsque le contenu affiché change. Une mesure sans mouvement provoqué ne dit rien
@@ -54,13 +64,33 @@ seuil de 59 fps, et ce rapport ne les porte pas au tableau. Ce que ces exécutio
 bout, sans panique, sans blocage, code de sortie 0 à chaque fois.
 
 **Ce qui rend Q1 néanmoins peu risquée.** Le pari architectural de Q1 n'est pas le
-débit d'images — c'est l'absence de copie processeur. Or Q4 mesure 0,53 % de
-processeur pendant que l'encodeur matériel travaille à 25 %, à 60,0 i/s soutenues en
-2560×1440 sur 60 secondes. Un pipeline qui ferait redescendre chaque image en mémoire
-centrale ne pourrait pas afficher ce profil. C'est une corroboration indirecte, pas la
-mesure M1 ; elle ne dispense pas de la prendre.
+débit d'images — c'est l'absence de copie processeur. La corroboration vient de la
+**seconde** mesure de la Tâche 8, celle prise **sur écran réel** : 0,53 % de processeur
+médian (1,01 % au maximum) pendant que l'encodeur matériel travaille à 24 %, en
+2560×1440, sur les ~19 secondes qu'a duré ce run avant son arrêt de sécurité. Un
+pipeline qui ferait redescendre chaque image en mémoire centrale ne pourrait pas
+afficher ce profil. *(Tâche 8, §1.3)*
 
-**Note 2 — ce que Q3 n'établit pas.** Un PSNR de chrominance à 18-19 dB dit qu'il
+**Pourquoi cette exécution-là et pas celle de 60 secondes.** Le run de 60 s à 60,0 i/s
+porte sur la **source synthétique**, et dans cette branche `WgcCapture::next_frame` n'y
+est jamais appelée : la capture n'y sert qu'à fournir le device D3D11
+(`cmd_host.rs:139-143`). Ce run n'exerce donc pas le chemin de capture, et ne peut rien
+corroborer à son sujet. Seule la mesure sur écran réel le traverse. C'est une
+corroboration indirecte, pas la mesure M1 ; elle ne dispense pas de la prendre.
+
+**Note 2 — la moitié du seuil de Q1 n'a aucun instrument.** Le plan fixe Q1 à « ≥ 59 fps
+**et** < 1 % d'images perdues ». La mesure M1 ne couvre que la première moitié. Le
+compteur `CaptureStats.dropped`, affiché sous le libellé « Délais dépassés », **ne compte
+pas des images perdues** : `sky-capture/src/wgc.rs:134-136` documente lui-même qu'il
+compte les appels à `next_frame` sortis sur expiration du délai d'attente — ce qui
+s'incrémente sur un écran figé, sans qu'aucune image n'ait été perdue. **Rien dans cette
+branche ne mesure le taux réel de perte.** L'instrument reste à écrire, et il n'est pas
+trivial : il faudrait confronter les images livrées par WGC à celles qu'il aurait dû
+livrer sur la période, ce que l'API ne donne pas directement. Conséquence à assumer :
+**même prise et même au seuil, M1 ne clôt que la moitié de Q1.** L'autre moitié est
+reportée au jalon 2, avec la chaîne d'affichage qui en fera un chiffre observable.
+
+**Note 3 — ce que Q3 n'établit pas.** Un PSNR de chrominance à 18-19 dB dit qu'il
 existe une grande distance numérique entre la couleur décodée et l'originale. Il ne dit
 pas si un caractère reste reconnaissable à l'œil, à distance de lecture, avec
 l'antialiasing d'un vrai rendu de police — le motif de test est un pire cas à bords
@@ -342,7 +372,7 @@ sont démontrées, elles ; c'est la grandeur qu'il pilote qui n'est pas celle an
 (`nvEncReconfigureEncoder`), que le matériel sait faire. Tant qu'elle n'est pas exposée,
 le jalon 2 ne peut pas tenir la promesse du §6.1. Le spec est corrigé pour le dire.
 
-### Écart 6 — Le 4:4:4 n'existe pas sur AMD, et probablement pas sur Intel
+### Écart 6 — Le 4:4:4 n'existe ni sur AMD, ni probablement sur Intel, ni sur NVIDIA d'avant 2018
 
 **Statut de cette constatation, à énoncer avant tout le reste : recherche documentaire,
 non testée sur matériel.** Aucune carte AMD ni Intel n'était disponible. Cet écart a été
@@ -362,48 +392,84 @@ dernières années », et **le spec (§6.1)** fait du 4:4:4 le pilier de la nett
   source ne confirme le 4:4:4 en encodage. À considérer comme indisponible jusqu'à
   vérification sur matériel réel.
 - **NVIDIA** — seule plateforme confirmée, et confirmée par mesure : H.264 4:4:4 et
-  HEVC 4:4:4 énumérés par la sonde matérielle et produits réellement.
+  HEVC 4:4:4 énumérés par la sonde matérielle et produits réellement. **Mais sur une
+  RTX 4060, c'est-à-dire sur une carte de 2023.**
+- **NVIDIA d'avant septembre 2018** — le seuil réel n'est pas le fabricant, c'est la
+  génération **Turing** (RTX 20xx). Pascal (GTX 10xx), Maxwell (GTX 900) et Volta
+  savent encoder H.264 4:4:4 mais **pas HEVC 4:4:4 du tout**. Une GTX 1080 est donc
+  exactement dans la même situation qu'une carte AMD vis-à-vis du codec que ce jalon
+  retient. Établi par la note de référence citée plus bas, pas par une mesure de ce
+  jalon — aucune carte antérieure à la RTX 4060 n'était disponible.
 
 **Portée pour le produit : c'est l'écart le plus lourd des six.** Le gain de +40,1 dB sur
 la chrominance est la différenciation la plus visible du produit face à Discord.
-**Un utilisateur AMD ne l'aurait pas.** Il conserverait le débit libre, la résolution et
-la cadence — trois des quatre limites levées — mais retomberait en 4:2:0 pour la couleur,
-donc au niveau de Discord sur le point précis qui motive le projet. Et contrairement aux
-cinq autres écarts, aucune quantité de travail ne l'ajoutera : c'est une contrainte
-matérielle, pas un défaut d'implémentation.
+**Un utilisateur AMD ne l'aurait pas, et un utilisateur NVIDIA d'avant 2018 non plus.**
+Il conserverait le débit libre, la résolution et la cadence — trois des quatre limites
+levées — mais retomberait en 4:2:0 pour la couleur, donc au niveau de Discord sur le
+point précis qui motive le projet. Et contrairement aux cinq autres écarts, aucune
+quantité de travail ne l'ajoutera : c'est une contrainte matérielle, pas un défaut
+d'implémentation.
+
+**La bonne formulation de l'écart, et elle n'est pas celle de ce rapport à sa première
+rédaction.** Ce n'est pas « NVIDIA contre le reste ». C'est
+**« NVIDIA de 2018 ou plus récent contre tout le reste »** — formulation de la note de
+référence citée plus bas, plus exacte que la mienne. La différence n'est pas de style :
+elle élargit la population concernée à tout le parc NVIDIA antérieur à Turing, et elle
+change ce que D1 doit trancher. Un contournement conçu pour AMD et Intel rattraperait du
+même coup ce parc-là.
 
 **Trois voies, aucune indolore. Aucune n'est tranchée ici** — voir la décision D1.
 
-1. Encodage **logiciel** en 4:4:4 pour AMD et Intel. Texte net préservé, mais la charge
-   quitte l'encodeur matériel pour le processeur — donc on troque potentiellement la
-   différenciation « texte net » contre la différenciation « ne coûte rien à la machine ».
+*Dans les trois cas, « ailleurs que sur NVIDIA » doit se lire « ailleurs que sur NVIDIA
+Turing ou plus récent » — le parc NVIDIA d'avant 2018 est du côté AMD de cette
+frontière.*
+
+1. Encodage **logiciel** en 4:4:4 partout où le matériel ne sait pas le produire. Texte
+   net préservé, mais la charge quitte l'encodeur matériel pour le processeur — donc on
+   troque potentiellement la différenciation « texte net » contre la différenciation
+   « ne coûte rien à la machine ».
    **Le coût réel n'est pas connu : aucune mesure de ce jalon ne couvre l'encodage
    logiciel.** Toute valeur avancée serait une estimation, et cette voie ne peut être ni
-   retenue ni écartée avant d'avoir été mesurée.
-2. Accepter le 4:2:0 sur AMD et Intel, en le **disant dans l'interface** plutôt qu'en
+   retenue ni écartée avant d'avoir été mesurée. *La note de référence citée plus bas la
+   classe dernière sur cinq, et pour une raison que ce rapport n'avait pas vue : elle ne
+   traite que l'émetteur.*
+2. Accepter le 4:2:0 sur ce matériel, en le **disant dans l'interface** plutôt qu'en
    laissant l'utilisateur croire à un défaut du logiciel.
-3. Hybride : 4:4:4 matériel sur NVIDIA, 4:4:4 logiciel sous un seuil de résolution
+3. Hybride : 4:4:4 matériel là où il existe, 4:4:4 logiciel sous un seuil de résolution
    ailleurs, 4:2:0 au-delà.
 
 **Travail déjà engagé sur cette question, hors périmètre de ce jalon.** Une note de
 référence du 23 août 2026,
 `docs/superpowers/notes/2026-08-23-compatibilite-toutes-cartes-graphiques.md`, instruit
-déjà le sujet — je ne l'ai ni écrite ni vérifiée. Deux de ses apports méritent d'être
+déjà le sujet — je ne l'ai ni écrite ni vérifiée. Trois de ses apports méritent d'être
 connus avant d'arbitrer D1, en les attribuant à leur source plutôt qu'à une mesure de ce
 jalon :
 
+- **Le seuil est une génération, pas un fabricant** — Turing, septembre 2018. C'est
+  l'apport qui corrige ce rapport lui-même : sa première rédaction opposait « NVIDIA »
+  au reste, ce qui était faux pour tout le parc NVIDIA antérieur à Turing. Repris
+  ci-dessus.
 - **Le décodage 4:4:4 serait aussi rare que l'encodage.** Si c'est exact, la voie 1
   ci-dessus ne résout que la moitié du problème : produire du 4:4:4 depuis une carte
   NVIDIA ne sert à rien si le spectateur ne peut pas le décoder — ce qui exclurait le
   mobile et les navigateurs. Cela déplace le problème de l'émetteur vers la paire.
-- **Deux voies supplémentaires existent**, que ce rapport n'avait pas envisagées :
-  l'empaquetage de la couleur pleine résolution dans une seule image plus grande encodée
-  en 4:2:0 ordinaire, et le 4:2:2 comme palier intermédiaire. La première conserve une
-  seule session d'encodage et n'impose aucune exigence de décodage particulière.
+  *(Asymétrie que la note signale comme favorable et à confirmer : le décodage 4:4:4
+  semblerait fonctionner sur Intel via Vulkan Video, contrairement à l'encodage.)*
+- **La note décrit cinq voies, et classe le repli logiciel en dernier.** Quatre
+  n'étaient pas envisagées par ce rapport : l'empaquetage de la couleur pleine
+  résolution dans une seule image plus grande encodée en 4:2:0 ordinaire (sa candidate
+  n°1 : une seule session d'encodage, un seul flux, aucune exigence de décodage
+  particulière — mais trois pièges à traiter avant toute mesure, qu'elle détaille), un
+  flux auxiliaire séparé, l'encodage à double résolution, et le 4:2:2 comme palier
+  intermédiaire. **La voie que ce rapport cite en premier — l'encodage logiciel — est
+  celle que la note juge la moins bonne**, parce qu'elle ne lève que la moitié du
+  problème et laisse le spectateur devant la même impasse de décodage.
 
-Cette note recommande un spike dédié plutôt qu'une décision sur plan, et liste six
-inconnues à mesurer — dont, en premier, la **confirmation sur matériel réel** des
-constats AMD et Intel, qui restent documentaires. Rien de tout cela ne change le verdict
+Cette note recommande un spike dédié plutôt qu'une décision sur plan, et liste **neuf**
+inconnues à mesurer — dont la **confirmation sur matériel réel** des constats AMD et
+Intel, qui restent documentaires, et les **capacités de décodage**, jamais testées au
+jalon 0. *(Décompte corrigé en revue de branche : ce rapport écrivait « six », valeur
+héritée d'une version antérieure de la note.)* Rien de tout cela ne change le verdict
 du jalon 0 ; cela change ce que D1 doit trancher, et quand.
 
 **État du code, qui conditionne le coût de n'importe laquelle de ces voies.** Aucune
@@ -430,12 +496,18 @@ appauvrissement de la promesse : c'est la différence entre un diagnostic exact 
 diagnostic qui affirmerait une cause qu'il ne peut pas connaître, dans le cas précis que
 Q5 existe pour tester.
 
-### Correction déjà apportée au spec pendant le jalon
+### Une correction du spec que ce jalon n'a pas faite, contrairement à ce qu'il affirmait
 
-**§8.1, signature de code macOS.** La signature ad-hoc est *obligatoire* sur Apple
-Silicon — un binaire arm64 dépourvu de toute signature y est tué au démarrage — mais elle
-est **gratuite**. Les 99 $/an ne suppriment que l'avertissement du premier lancement.
-macOS reste à 0 €. Déjà intégré au document.
+**§8.1, signature de code macOS.** Le §8.1 dit aujourd'hui ce qu'il faut : la signature
+ad-hoc est *obligatoire* sur Apple Silicon — un binaire arm64 dépourvu de toute signature
+y est tué au démarrage — mais elle est **gratuite** ; les 99 $/an ne suppriment que
+l'avertissement du premier lancement, et macOS reste à 0 €.
+
+**Mais cette correction n'appartient pas à ce jalon.** Une première rédaction de ce
+rapport se l'attribuait ; le diff de la branche `jalon-0-faisabilite` ne la contient pas.
+Elle était déjà dans le document avant l'ouverture du jalon 0. L'attribution est retirée
+plutôt que corrigée à la marge : un rapport qui s'attribue une correction qu'il n'a pas
+faite affaiblit celles qu'il a réellement faites.
 
 ---
 
@@ -490,12 +562,36 @@ Deux mesures, et rien d'autre. Aucune ne dépend d'un travail de développement
 supplémentaire : le code qui les produit est écrit, compilé et testé.
 
 1. **M4 — test pair-à-pair avec un correspondant distant** (`spike/README-AMI.md`,
-   binaire autonome déjà produit). Critère : connexion établie en moins de 8 secondes
-   **après le collage du second bloc**. Relever le texte exact affiché **des deux côtés**,
-   sans le résumer — le diagnostic distingue trois situations, dont une explicitement
-   ambiguë, et c'est la confrontation des deux écrans qui porte la réponse à Q5.
-2. **M1 — débit de capture sur écran en mouvement réel.** Critère : ≥ 59 fps, avec
-   déplacement de fenêtres et défilement de page pendant les 30 secondes.
+   binaire autonome déjà produit). Commande, côté opérateur :
+
+   ```bash
+   cargo run --release -p sky-probe -- host --source synthetique --seconds 5
+   ```
+
+   > **⚠ Ne pas lancer `sky-probe host` sans options.** Ses valeurs par défaut sont
+   > `--source ecran --seconds 30 --codec hevc444 --bitrate-mbps 30` : elle capturerait
+   > l'écran réel de l'opérateur pendant 30 secondes, l'encoderait et l'enverrait — et
+   > le programme du correspondant l'écrirait sur **son** disque, dans un `recu.h265`
+   > pouvant atteindre ~112 Mo déposé dans son répertoire courant. **Q5 ne demande
+   > aucune vidéo** : la connexion s'établit ou elle ne s'établit pas. La source
+   > synthétique répond exactement à la même question sans exposer le bureau de
+   > l'opérateur ni encombrer le disque du correspondant.
+
+   Critère : connexion établie en moins de 8 secondes **après le collage du second
+   bloc**. Relever le texte exact affiché **des deux côtés**, sans le résumer — le
+   diagnostic distingue trois situations, dont une explicitement ambiguë, et c'est la
+   confrontation des deux écrans qui porte la réponse à Q5.
+
+2. **M1 — débit de capture sur écran en mouvement réel :**
+
+   ```bash
+   cargo run --release -p sky-probe -- capture --seconds 30
+   ```
+
+   Critère : ≥ 59 fps, avec déplacement de fenêtres et défilement de page pendant les
+   30 secondes. **Cette mesure ne clôt que la moitié de Q1** : l'autre moitié du seuil
+   du plan — « < 1 % d'images perdues » — n'a aucun instrument dans cette branche (note
+   2). Un M1 au seuil ferme la question du débit, pas celle de la perte.
 
 **Ce que chaque issue implique.** Les quatre premières lignes portent sur M4 et sont
 mutuellement exclusives ; la cinquième porte sur M1 et se lit indépendamment. **GO ferme
@@ -534,8 +630,10 @@ sans bloquer la décision.
 
 ### Les mesures
 
-Détail complet et commandes dans
-`.superpowers/sdd/2026-08-22-jalon-0-faisabilite/mesures-humaines.md`.
+Détail complet, commandes exactes et avertissements dans
+**`spike/docs/mesures-a-realiser.md`** — dans le dépôt, et volontairement : la version
+d'origine de cette checklist vivait dans `.superpowers/`, exclu du dépôt, ce qui aurait
+fait disparaître à la fusion les commandes des deux mesures qui décident du jalon.
 
 | # | Mesure | Question | Bloquante ? |
 |---|--------|----------|-------------|
@@ -546,8 +644,13 @@ Détail complet et commandes dans
 | M5 | Charge processeur relevée sur écran réel | Q4 | Non — deux mesures instrumentées concordent déjà |
 | M6 | Latence de bout en bout par photographie | latence | Non |
 
-**Un avertissement à ne pas perdre, repris de cette checklist.** N'activer **aucun**
-journal réseau détaillé pendant M4. Le filtrage de données personnelles de la
+**Deux avertissements à ne pas perdre, repris de cette checklist.**
+
+**Le premier : lancer M4 avec `--source synthetique --seconds 5`**, jamais
+`sky-probe host` seul. Voir l'encadré de la section précédente : sans options, la
+commande envoie l'écran réel de l'opérateur et le dépose sur le disque du correspondant.
+
+**Le second :** n'activer **aucun** journal réseau détaillé pendant M4. Le filtrage de données personnelles de la
 bibliothèque réseau ne couvre pas son point de trace le plus volumineux : les adresses
 des deux machines sortiraient en clair dans la console, et donc dans toute capture
 d'écran partagée ensuite.
@@ -570,9 +673,16 @@ de porter un jugement.
 
 Elles sont inscrites dans le spec comme décisions à prendre, sans orientation imposée.
 
-**D1 — Que promet-on aux utilisateurs non-NVIDIA ?** (écarts 2 et 6)
-L'arbitrage est entre « sans compromis partout » et « sans compromis sur NVIDIA ». Les
-voies et leur coût respectif sont décrites à l'écart 6. Le choix détermine si le jalon 2
+**D1 — Que promet-on aux utilisateurs dont la carte ne fait pas de 4:4:4 ?**
+(écarts 2 et 6)
+**Formulation corrigée en revue de branche :** la question n'est pas « les non-NVIDIA »
+mais « **tout ce qui n'est pas une NVIDIA de septembre 2018 ou plus récente** » — AMD,
+Intel, le mobile, *et* le parc NVIDIA antérieur à Turing, GTX 10xx comprises. La
+population concernée est nettement plus large que ce que la première rédaction de ce
+rapport laissait entendre, et cela pèse sur l'arbitrage.
+L'arbitrage est entre « sans compromis partout » et « sans compromis sur le matériel
+récent ». Les voies et leur coût respectif sont décrites à l'écart 6. Le choix détermine
+si le jalon 2
 doit extraire un trait `VideoEncoder` et intégrer un second chemin d'encodage, ou s'il
 peut rester sur l'implémentation NVENC en dur en signalant la limite dans l'interface.
 Il détermine aussi si le §6.4 continue de promettre un socle universel en 4:4:4 — ce que
@@ -602,6 +712,47 @@ d'une mesure de ce projet. M4 en donnera un premier point de donnée, un seul.
 
 ---
 
+## Un défaut de méthode, pas une anecdote : ce qu'aucune revue de tâche ne pouvait voir
+
+Les neuf tâches de ce jalon ont chacune été relues. Aucune de ces relectures n'a pu voir
+le défaut le plus grave de la branche, parce qu'il n'appartenait à aucune des tâches
+relues — il est né **entre** deux d'entre elles.
+
+**Les faits.** `spike/README-AMI.md` est le mode d'emploi remis à un tiers pour la
+mesure M4, et il tient lieu de consentement : on demande à quelqu'un qui n'est pas
+développeur de lancer un exécutable non signé. Écrit en **Tâche 7**, il affirmait — de
+bonne foi, et c'était vrai à ce moment-là — « il ne s'écrit nulle part sur ton disque,
+quand il se ferme il n'en reste rien » et « aucune image de ton écran n'est capturée ni
+transmise ». Le programme n'envoyait alors que des octets de remplissage.
+
+La **Tâche 8** a branché la vraie chaîne vidéo. `README-AMI.md` ne figurait pas dans sa
+liste de fichiers à toucher, et personne ne l'a rouvert. Or avec le protocole tel qu'il
+était écrit — `sky-probe host` sans options, donc `--source ecran --seconds 30` — le
+programme capture l'écran réel de l'opérateur pendant 30 secondes, l'encode, l'envoie,
+et le programme du correspondant l'écrit sur son disque dans un fichier pouvant
+atteindre ~112 Mo. **Le bureau de l'opérateur partait chez un tiers et restait sur son
+disque, sous un document qui promettait le contraire.**
+
+**Pourquoi aucune revue de tâche ne pouvait le trouver.** La revue de la Tâche 7 a lu un
+document exact. La revue de la Tâche 8 a lu un diff qui ne contenait pas ce document. Le
+défaut n'est visible que pour quelqu'un qui tient les deux tâches à la fois — c'est-à-dire
+au périmètre de la branche, pas de la tâche. Ce n'est pas un oubli de relecteur, c'est
+une limite structurelle du découpage.
+
+**Ce qui a été corrigé.** Le protocole de M4 utilise désormais la source synthétique
+(`--source synthetique --seconds 5`), qui répond exactement à la même question — Q5 ne
+demande aucune vidéo. `README-AMI.md` a été réécrit pour décrire ce que le programme fait
+réellement, y compris le fichier qu'il crée et le cas où quelqu'un lancerait la commande
+sans options.
+
+**La règle à retenir, et elle vaut au-delà de ce jalon :** un document destiné à un tiers
+n'appartient pas à la tâche qui l'a écrit — il appartient à la dernière tâche qui a changé
+le comportement qu'il décrit. Tout fichier promettant quelque chose sur le comportement
+d'un programme doit rentrer dans la liste de fichiers de toute tâche qui touche à ce
+comportement, même quand il ne s'agit pas de code.
+
+---
+
 ## Code à promouvoir
 
 Le code du spike est jetable **par défaut**. Les éléments ci-dessous sont l'exception :
@@ -614,7 +765,7 @@ mise au point complet.
 |---|---|
 | `sky-encode/src/nvenc_sys.rs` — `NvencApi` | Charge `nvEncodeAPI64.dll` dynamiquement et résout la table de fonctions NVENC. Supprime la dépendance au NVIDIA Video Codec SDK, qui avait été rapporté à tort comme un blocage. Durci contre le détournement de recherche de DLL. Le constructeur ne prend aucun device : le point de variation reste chez l'appelant. |
 | `sky-crypto` (`Identity`, `seal`, `open`) | Une centaine de lignes avec ses tests, dont 5 couvrant chacun une garantie distincte (confidentialité vis-à-vis d'un tiers, intégrité, non-liabilité de deux scellages, borne de taille). Surcoût constant de 48 octets, vérifié. Directement réutilisable ; seul son **usage** change (voir D2). |
-| `sky-net/src/stun.rs` | N'était pas au plan et sans lui aucune traversée de NAT n'est possible. Trente lignes de décodage manuel, parce que le parseur de la bibliothèque refuse les réponses des serveurs publics. Identifiant de transaction tiré du générateur du système, réponse rejetée si elle ne vient pas du serveur interrogé — les deux garde-fous sont testés. |
+| `sky-net/src/stun.rs` | N'était pas au plan et sans lui aucune traversée de NAT n'est possible. Trente lignes de décodage manuel, parce que le parseur de la bibliothèque refuse les réponses des serveurs publics. Identifiant de transaction tiré du générateur du système, réponse rejetée si elle ne vient pas du serveur interrogé — **les deux garde-fous sont testés**, le second depuis la revue de branche seulement : il vit dans `interroger` et non dans `lire_reponse`, donc son test demande de vrais sockets (un imposteur répond avant le serveur avec le bon identifiant de transaction ; le test échoue si sa réponse est retenue). **Voir la réserve sur les onze constats non transcrits, plus bas.** |
 | `spike/.cargo/config.toml` (liaison statique de la bibliothèque d'exécution C) | Trois lignes qui font la différence entre un binaire qui démarre chez un tiers et un binaire qui affiche une erreur incompréhensible. Table d'importation vérifiée avant/après : 23 DLL dont une appartenant au redistribuable Visual C++ et non à Windows, puis 13 toutes livrées avec le système. **Réserve : le binaire n'a jamais été *exécuté* sur une machine sans Rust** — seule sa table d'importation a été vérifiée. |
 | `spike/docs/api-nvenc.md` | Relevé des noms réellement générés par les bindings, avec les pièges de nommage. Fait gagner une demi-journée à qui reprendra le FFI. |
 
@@ -624,8 +775,29 @@ mise au point complet.
 |---|---|---|
 | `sky-encode/src/nvenc.rs` — `NvencEncoder` | La séquence d'appels complète, la configuration issue du préréglage plutôt que d'un remplissage à zéro, la signalisation couleur vérifiée par aller-retour, la désactivation du double passage, la libération sur tous les chemins d'erreur (vérifiée : aucune session orpheline). | Doit passer derrière un trait `VideoEncoder` (D1) et exposer la reconfiguration de débit à chaud (écart 5). Les deux stubs de symboles fournis pour satisfaire le linker sont fragiles et à réévaluer. |
 | `sky-capture/src/wgc.rs` — `WgcCapture` | Le chemin sans copie de bout en bout, les trois écarts d'API corrigés, la fermeture ordonnée de la session et du pool. | Un point identifié et non corrigé : l'objet image est relâché avant que la texture ne soit rendue, donc elle peut retourner au pool et être réécrite. Sûr dans le flux synchrone actuel, faux dès qu'un pipeline asynchrone apparaît. |
-| `sky-net/src/pacer.rs` — `Pacer` | La formule et ses trois propriétés démontrées analytiquement, pas seulement testées. | Le levier qu'il pilote (écart 5), et un vrai signal de congestion à la place du taux d'échec d'envoi local. |
+| `sky-net/src/pacer.rs` — `Pacer` | La formule et ses trois propriétés démontrées analytiquement, pas seulement testées. Depuis la revue de branche, l'invariant `plancher ≤ plafond` est vérifié à la construction : `Pacer::new` rend un `Result`, avec son test. Auparavant, un plancher supérieur au plafond faisait **paniquer** `clamp` au premier retour d'information — soit ~100 ms après le début de l'envoi, donc après tout l'aller-retour humain de copier-coller. | Le levier qu'il pilote (écart 5), et un vrai signal de congestion à la place du taux d'échec d'envoi local. **Réserve supplémentaire, signalée et non corrigée :** `on_feedback` reçoit une durée écoulée et la **jette**. Les garanties « au plus 15 % retirés par tick » et « remontée au plafond en 1 tick » sont donc des propriétés *par appel*, pas par unité de temps ; elles ne deviennent des garanties temporelles que parce que l'appelant actuel sert le régulateur toutes les 100 ms. Un jalon 2 qui le servirait à 10 ms hériterait d'une descente **dix fois plus brutale sans qu'une ligne change**. Avant promotion : normaliser la formule par la durée écoulée, ou inscrire la cadence dans le type. |
 | `sky-net/src/link.rs` — `PeerLink` | **Le savoir vaut plus que le code.** Quatre pièges de la bibliothèque réseau, tous invisibles en boucle locale : la destination doit être l'adresse du candidat hôte ; l'offre en attente doit être conservée et non recréée ; un fournisseur cryptographique doit être installé avant toute session ; l'horloge présentée à la bibliothèque ne doit démarrer qu'au premier paquet reçu. | La structure elle-même est un banc de test, à réécrire pour le produit. |
+
+### Une réserve qui porte sur `link.rs` et `stun.rs`, et qu'on ne peut pas lever
+
+Le journal de bord du jalon porte, pour la Tâche 7, la mention **« 11 constats mineurs
+mis de côté »** — sans en énumérer un seul. Les dix autres tâches ont vu leurs constats
+mineurs transcrits un par un ; ceux-là ne l'ont jamais été, et ils sont **perdus** : ils
+ne sont reconstituables ni depuis le code, ni depuis le rapport de la tâche.
+
+C'est le plus gros lot de constats mineurs de tout le jalon, et il porte sur les deux
+fichiers de la Tâche 7 : `sky-net/src/link.rs` et `sky-net/src/stun.rs` — c'est-à-dire
+sur deux des cinq éléments que cette section désigne pour promotion, dont un est classé
+« à reprendre tel quel ».
+
+**Ce que cela implique concrètement.** Une revue a regardé ces deux fichiers et y a
+trouvé onze choses à redire. Personne ne sait lesquelles. Ils doivent donc être repris
+comme du code **non relu**, avec une relecture complète avant promotion — pas comme du
+code déjà passé en revue, ce que la mention « revue propre » du journal laisserait
+croire. Le coût de cette relecture est à inscrire au jalon qui les promeut.
+
+*Consigné plutôt que passé sous silence : une réserve connue et non transcrite reste une
+réserve. La leçon de méthode correspondante est dans `tasks/lessons.md`.*
 
 ### À ne pas promouvoir
 
@@ -633,7 +805,11 @@ Les sous-commandes `cmd_*.rs` de `sky-probe` sont des bancs de mesure, pas du co
 produit : elles portent des choix propres au spike (format de morceau à 9 octets, arrêt
 du run sur congestion soutenue, affichage des blocs à l'écran). Le motif de test
 synthétique et le script de mesure PSNR/SSIM méritent en revanche d'être conservés comme
-outillage de non-régression pour le jalon 3.
+outillage de non-régression pour le jalon 3. `spike/mesures.sh` vérifie désormais, avant
+chaque moyenne, que chaque journal `ffmpeg` porte bien ses 781 lignes : sans ce contrôle,
+une réexécution partielle produisait un tableau plausible et faux — `awk` divise par le
+nombre de lignes qu'il a lues, jamais par celui qu'il aurait dû lire. Ajouté parce que ce
+script **sera** réexécuté, peut-être par quelqu'un qui ignore ce piège.
 
 ---
 

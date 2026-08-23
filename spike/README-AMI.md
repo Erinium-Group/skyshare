@@ -22,12 +22,41 @@ Le programme envoie **deux choses seulement** :
    lire, parce qu'elle est verrouillée avec une clé que seul mon programme
    possède.
 
-Ce que le programme ne fait **pas** : il ne lit aucun fichier, ne capture aucun
-écran, n'ouvre aucune fenêtre, n'installe rien, ne démarre avec Windows, ne
-touche à aucun réglage. Il ne s'écrit nulle part sur ton disque. Quand il se
-ferme, il n'en reste rien. Tu peux supprimer le fichier après le test.
+Ce que le programme ne fait **pas** : il ne lit aucun fichier existant, ne capture
+rien de ton écran, n'ouvre aucune fenêtre, n'installe rien, ne démarre pas avec
+Windows, ne touche à aucun réglage. Ton côté du test ne fait que **recevoir**.
 
-Pendant ce test, aucune image de ton écran n'est capturée ni transmise.
+## Ce qu'il écrit sur ton disque, et ce que tu recevras
+
+**Il écrit un fichier**, et je préfère te le dire précisément plutôt que te faire
+la surprise.
+
+Dans le dossier où tu ouvres le terminal, le programme crée un fichier appelé
+**`recu.h265`**. Il y écrit, au fur et à mesure, tout ce que je lui envoie. C'est
+une vidéo brute : ce n'est pas un fichier système, il ne se lance pas tout seul,
+il ne fait rien. Tu peux le supprimer d'un clic droit → Supprimer, comme
+n'importe quel fichier — avant, pendant ou après le test.
+
+**Ce que ce fichier contiendra.** Ce programme sait envoyer mon écran réel, et
+c'est ce à quoi il servira plus tard. Mais **le test d'aujourd'hui ne porte pas
+là-dessus** : la seule question est de savoir si nos deux ordinateurs arrivent à
+se parler. Je lancerai donc mon côté sur une **image de test générée par le
+programme** — des couleurs et des motifs, pas mon bureau — pendant **5 secondes**.
+Tu recevras quelques mégaoctets de cette image de test, et rien d'autre.
+
+Je te dis ça pour une raison simple : **c'est moi qui choisis ce qui part de mon
+côté, et tu n'as aucun moyen de le vérifier depuis le tien.** Tu me fais
+confiance sur ce point-là, et tu as le droit de le savoir plutôt que de le
+supposer. Si je m'étais trompé de commande, ce fichier pourrait contenir mon
+écran et peser une centaine de mégaoctets. Regarde sa taille à la fin : elle te
+dira laquelle des deux choses s'est passée.
+
+**Ce que le programme ne t'enverra jamais** : rien qui vienne de mon disque
+autrement que par ce flux, et rien qui reparte du tien. Ton ordinateur n'envoie
+que le bloc de texte du point 2 ci-dessus.
+
+À la fin du test, tu peux supprimer les deux fichiers : `sky-probe.exe` et
+`recu.h265`. Il ne reste alors plus rien.
 
 ## Marche à suivre
 
@@ -47,7 +76,9 @@ Pendant ce test, aucune image de ton écran n'est capturée ni transmise.
    colle ton bloc de mon côté. Ça peut prendre une ou deux minutes, le temps que
    je voie ton message.
 7. Quand j'ai collé ton bloc, tout se joue en quelques secondes : l'écran
-   affiche `CONNECTÉ`, puis des chiffres de débit — ou bien `ÉCHEC`.
+   affiche `CONNECTÉ`, puis des chiffres de débit — ou bien `ÉCHEC`. En cas de
+   succès, le fichier `recu.h265` apparaît dans le dossier et grossit pendant
+   quelques secondes : c'est l'image de test qui arrive.
 
 Si tu fermes la fenêtre avant que j'aie collé ton bloc, le test est annulé et il
 faut tout recommencer. C'est sans gravité, mais autant l'éviter.
