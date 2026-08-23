@@ -622,6 +622,9 @@ fn diagnostiquer(link: &PeerLink) {
         println!("  Datagrammes émis   : {emis}");
         println!("  Datagrammes reçus  : {recus}");
         println!("  Erreurs de socket  : {erreurs}");
+        let (prive, public) = link.destinations();
+        println!("  dont vers reseau local : {prive}");
+        println!("  dont vers internet     : {public}");
         println!();
 
         // Ces trois nombres distinguent des causes que « NAT strict » confondait.

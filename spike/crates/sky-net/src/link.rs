@@ -90,6 +90,14 @@ pub struct PeerLink {
     /// sait pas si l'on émet dans le vide, si l'on reçoit sans pouvoir répondre,
     /// ou si rien ne circule du tout. Chacun de ces cas a une cause différente.
     paquets_emis: u64,
+    /// Repartition des emissions selon la nature de la destination.
+    ///
+    /// Un SDP annonce deux adresses : celle du reseau local et celle vue depuis
+    /// internet. Emettre vers la premiere revient a chercher le correspondant
+    /// dans son propre reseau — les paquets n'en sortent jamais. Sans cette
+    /// distinction, « 12 emis / 0 recu » ne dit pas si l'on vise le bon endroit.
+    emis_vers_prive: u64,
+    emis_vers_public: u64,
     paquets_recus: u64,
     /// Origine du temps tel que `str0m` le voit.
     horloge: Instant,
@@ -142,6 +150,8 @@ impl PeerLink {
                 serveurs_stun: stun::serveurs_autorises(),
                 session,
                 paquets_emis: 0,
+                emis_vers_prive: 0,
+                emis_vers_public: 0,
                 paquets_recus: 0,
                 horloge,
                 depart: None,
@@ -195,6 +205,8 @@ impl PeerLink {
                 serveurs_stun: stun::serveurs_autorises(),
                 session: blob.session,
                 paquets_emis: 0,
+                emis_vers_prive: 0,
+                emis_vers_public: 0,
                 paquets_recus: 0,
                 horloge,
                 depart: None,
@@ -242,6 +254,11 @@ impl PeerLink {
     /// s'est produit, là où « NAT strict » n'était qu'une conjecture.
     pub fn trafic(&self) -> (u64, u64, u64) {
         (self.paquets_emis, self.paquets_recus, self.erreurs_socket)
+    }
+
+    /// Emissions vers une adresse de reseau local, puis vers internet.
+    pub fn destinations(&self) -> (u64, u64) {
+        (self.emis_vers_prive, self.emis_vers_public)
     }
 
     /// Côté émetteur : intègre la réponse du spectateur.
@@ -357,6 +374,11 @@ impl PeerLink {
                         self.erreurs_socket += 1;
                     } else {
                         self.paquets_emis += 1;
+                        if adresse_privee(&t.destination) {
+                            self.emis_vers_prive += 1;
+                        } else {
+                            self.emis_vers_public += 1;
+                        }
                     }
                 }
                 Output::Event(e) => match e {
@@ -601,5 +623,18 @@ impl Drop for GardeMapping {
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
+    }
+}
+
+/// Vrai pour une adresse de reseau local (RFC 1918 et lien-local).
+///
+/// Emettre vers une telle adresse depuis un autre reseau ne mene nulle part :
+/// le paquet reste dans le reseau de l'emetteur.
+fn adresse_privee(a: &SocketAddr) -> bool {
+    match a.ip() {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private() || v4.is_link_local() || v4.is_loopback()
+        }
+        std::net::IpAddr::V6(v6) => v6.is_loopback(),
     }
 }

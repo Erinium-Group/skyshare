@@ -94,6 +94,9 @@ pub fn run(secondes: u64, sortie: &str) -> anyhow::Result<()> {
         println!("  Datagrammes émis   : {emis}");
         println!("  Datagrammes reçus  : {recus}");
         println!("  Erreurs de socket  : {erreurs}");
+        let (prive, public) = link.destinations();
+        println!("  dont vers reseau local : {prive}");
+        println!("  dont vers internet     : {public}");
         println!();
         println!("Deux causes possibles, et rien de ce qu'on voit d'ici ne permet");
         println!("de choisir entre elles :");
@@ -291,6 +294,8 @@ fn attendre_contact(link: &mut PeerLink) -> anyhow::Result<bool> {
                 reste.as_secs() % 60
             );
             println!("    (émis {emis}, reçus {recus} — reçus > 0 signifie qu'il nous a trouvés)");
+            let (prive, public) = link.destinations();
+            println!("     vers reseau local : {prive}  |  vers internet : {public}");
             std::io::stdout().flush().ok();
             dernier_rappel = Instant::now();
         }
