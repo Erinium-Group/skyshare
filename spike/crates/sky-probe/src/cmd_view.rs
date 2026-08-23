@@ -55,17 +55,32 @@ pub fn run(secondes: u64, sortie: &str) -> anyhow::Result<()> {
     println!("\n=== ÉTAPE 2 : renvoie ce bloc à ton correspondant ===\n");
     println!("{reponse}\n");
     println!("Renvoie ce bloc en entier, puis laisse cette fenêtre ouverte.");
+    // Le port doit rester ouvert pendant que deux humains s'echangent le bloc,
+    // sans que l'horloge de str0m ne coure : le battement n'utilise que le
+    // socket, jamais l'agent.
+    let garde = link.maintenir_mapping()?;
+
+    println!();
+    println!("  >>>  NE FAIS RIEN D'AUTRE POUR L'INSTANT.");
+    println!("       Renvoie-lui le bloc ci-dessus, puis attends qu'il te dise");
+    println!("       qu'il est sur le point de le coller.");
+    println!();
+    println!("       Appuie sur Entree ICI au moment ou il colle — pas avant.");
+    println!("       Le compte a rebours de 30 s demarre a cet instant, et vous");
+    println!("       devez etre actifs tous les deux en meme temps : c'est");
+    println!("       exactement ce qui manquait jusqu'ici.");
+    println!();
+    std::io::stdout().flush().ok();
+    let mut _top = String::new();
+    std::io::stdin().read_line(&mut _top)?;
+    println!("  Negociation demarree de ce cote.");
+    std::io::stdout().flush().ok();
     println!(
         "J'attends son signal pendant {} minutes au maximum.\n",
         ATTENTE_CORRESPONDANT.as_secs() / 60
     );
     std::io::stdout().flush().ok();
 
-    // Même bug que côté émetteur, et il est ici encore plus dommageable :
-    // l'attente y dure plus longtemps. Tant que rien n'est reçu, l'agent ICE
-    // n'a aucune raison d'émettre, donc le port annoncé dans notre réponse
-    // n'est plus ouvert quand le correspondant s'en sert enfin.
-    let garde = link.maintenir_mapping()?;
 
     let debut_attente = Instant::now();
     if !attendre_contact(&mut link)? {
