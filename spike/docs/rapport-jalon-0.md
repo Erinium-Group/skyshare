@@ -447,16 +447,18 @@ sous une réserve nommée : ses propriétés sont démontrées, c'est la **grand
 pilote qui n'est pas celle annoncée (écart 5), et elle n'a jamais vu de congestion
 réseau réelle.
 
-**Aucun des six écarts n'invalide le projet.** Trois sont des corrections de choix
-techniques dans un espace où d'autres choix existent (écarts 1, 2, 3). Un est une dette
-de conception identifiée avec sa direction de résolution (écart 4). Un est une API à
+**Aucun des six écarts n'invalide le projet.** Deux sont des corrections de choix de
+codec dans un espace où d'autres choix existent (écarts 1 et 2). Un est une
+fonctionnalité manquante dont la correction est identifiée et chiffrable (écart 3). Un
+est une dette de conception avec sa direction de résolution (écart 4). Un est une API à
 étendre sur du matériel qui sait déjà le faire (écart 5). Le sixième, le plus lourd,
 restreint la différenciation du produit à une famille de matériel sans remettre en cause
 sa faisabilité (écart 6).
 
 **Mais deux questions restent ouvertes, et l'une porte le risque n°1.** Q5 n'a pas été
 approchée : aucun paquet n'a franchi un NAT. Le spike a rendu le test réel capable de
-dire la vérité — c'est réel et c'était nécessaire — mais il ne l'a pas remplacé. Si ce
+dire la vérité — c'est un acquis réel, et c'était nécessaire — mais il ne l'a pas
+remplacé. Si ce
 test échoue de façon répétée, la cause probable est un NAT symétrique ou un CGNAT chez
 l'un des pairs, situation où aucune quantité de STUN ne suffit et où seul un relais
 débloquerait — ce que le spec écarte par principe (§10). Ce ne serait pas un NO-GO du
@@ -480,6 +482,8 @@ supplémentaire : le code qui les produit est écrit, compilé et testé.
    distinction qui porte la réponse à Q5.
 2. **M1 — débit de capture sur écran en mouvement réel.** Critère : ≥ 59 fps, avec
    déplacement de fenêtres et défilement de page pendant les 30 secondes.
+
+Les quatre issues possibles, et ce que chacune implique :
 
 - **M4 réussit et M1 atteint le seuil** → **GO ferme**, le jalon 1 s'ouvre sans réserve
   technique.
