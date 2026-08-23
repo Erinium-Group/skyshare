@@ -739,6 +739,40 @@ complet, preuves et conditions du passage à un GO ferme :
 
 ---
 
+### Manque identifié au jalon 0 — diagnostic et journalisation
+
+**Rien n'est conçu aujourd'hui, et rien n'existe dans le spike.** Aucun collecteur de
+traces n'est installé, aucun fichier de journal n'est écrit. C'était délibéré pour le
+spike — c'est précisément ce qui garantit qu'aucune adresse ne fuit — mais c'est un
+manque pour un logiciel que des tiers installent : quand un utilisateur signale « ça ne
+marche pas », il n'existe aucun moyen de comprendre.
+
+**La tension à résoudre, illustrée par le jalon.** Le principe directeur n°2 et le §5.2
+promettent qu'aucune adresse n'est *jamais* journalisée. Or le jalon 0 a établi que le
+filtrage de données personnelles de `str0m` **ne couvre pas** son point de trace le plus
+volumineux : au niveau le plus détaillé, avec un collecteur branché, les adresses des deux
+machines sortent en clair. Un système de journalisation naïf trahirait donc la promesse
+centrale du produit, sans que personne s'en aperçoive.
+
+**Contraintes de conception, à instruire avant le jalon 2 :**
+
+- **Journaux strictement locaux**, jamais transmis automatiquement. Une télémétrie
+  silencieuse serait contraire à l'ensemble de ce document.
+- **Expurgation active** des adresses au moment de l'écriture, et non confiance dans le
+  filtrage d'une bibliothèque tierce — le jalon a montré que cette confiance est mal
+  placée.
+- **Export manuel** : un bouton « exporter un rapport de diagnostic » produisant un
+  fichier que l'utilisateur relit et transmet s'il le décide.
+- **Rotation et plafond de taille**, pour ne pas remplir le disque d'un tiers.
+- **Niveau de détail réglable**, le niveau élevé restant inaccessible tant que
+  l'expurgation n'est pas prouvée.
+
+Le §5.5 décrit un diagnostic d'échec de connexion affiché à l'écran ; il ne couvre ni la
+persistance, ni les incidents survenant en cours de partage, ni ce qu'un utilisateur peut
+transmettre pour être aidé.
+
+---
+
 ## 11. Risques
 
 | Risque | Impact | Atténuation |

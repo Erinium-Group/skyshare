@@ -111,6 +111,14 @@ jalon ; le sixième sur une recherche documentaire, sans matériel de test.
 - **D2 — comment restructurer le signaling pour que l'offre soit scellée ?** La direction
   est identifiée ; la conception appartient au jalon 1, qui construit la boîte aux lettres.
 
+## Manque identifié au jalon 0, à instruire avant le jalon 2
+
+- **Diagnostic et journalisation** — rien n'est conçu, rien n'existe. Aucun moyen de
+  comprendre un incident signalé par un utilisateur. Tension à résoudre : le spec promet
+  qu'aucune adresse n'est jamais journalisée, et le jalon 0 a établi que le filtrage de
+  `str0m` ne couvre pas son point de trace le plus volumineux. Contraintes détaillées
+  dans le spec, §10, sous-section « Manque identifié au jalon 0 ».
+
 ## Jalons
 | # | Jalon | État |
 |---|-------|------|
