@@ -61,19 +61,10 @@ pub fn run(secondes: u64, sortie: &str) -> anyhow::Result<()> {
     let garde = link.maintenir_mapping()?;
 
     println!();
-    println!("  >>>  NE FAIS RIEN D'AUTRE POUR L'INSTANT.");
-    println!("       Renvoie-lui le bloc ci-dessus, puis attends qu'il te dise");
-    println!("       qu'il est sur le point de le coller.");
+    println!("  Laisse simplement cette fenetre ouverte. Rien d'autre a faire :");
+    println!("  la negociation demarre toute seule des que ton correspondant");
+    println!("  colle ton bloc, meme dans dix minutes.");
     println!();
-    println!("       Appuie sur Entree ICI au moment ou il colle — pas avant.");
-    println!("       Le compte a rebours de 30 s demarre a cet instant, et vous");
-    println!("       devez etre actifs tous les deux en meme temps : c'est");
-    println!("       exactement ce qui manquait jusqu'ici.");
-    println!();
-    std::io::stdout().flush().ok();
-    let mut _top = String::new();
-    std::io::stdin().read_line(&mut _top)?;
-    println!("  Negociation demarree de ce cote.");
     std::io::stdout().flush().ok();
     println!(
         "J'attends son signal pendant {} minutes au maximum.\n",
@@ -273,34 +264,29 @@ fn attendre_contact(link: &mut PeerLink) -> anyhow::Result<bool> {
     let debut = Instant::now();
     let mut dernier_rappel = Instant::now();
 
+    // On guette le socket sans reveiller l'agent : tant que rien n'arrive du
+    // correspondant, aucune minuterie ne court et l'attente peut durer. Le
+    // battement de maintien, lui, garde le port ouvert.
     while debut.elapsed() < ATTENTE_CORRESPONDANT {
-        // Sonder activement : sans `poll`, l'agent ICE n'émet rien et cette
-        // attente reste purement passive — le correspondant ne nous trouve
-        // jamais, et notre port se referme.
-        if let LinkEvent::Failed(e) = link.poll()? {
-            println!("  interruption pendant l'attente : {e}");
-            return Ok(false);
-        }
-        if link.contact_etabli() {
+        let reste = ATTENTE_CORRESPONDANT.saturating_sub(debut.elapsed());
+        let tranche = reste.min(PERIODE_RAPPEL.saturating_sub(dernier_rappel.elapsed()));
+
+        if link.guetter_le_pair(tranche.max(Duration::from_millis(50))) {
+            println!("  Contact ! Negociation demarree.");
+            std::io::stdout().flush().ok();
             return Ok(true);
         }
 
         if dernier_rappel.elapsed() >= PERIODE_RAPPEL {
             let reste = ATTENTE_CORRESPONDANT.saturating_sub(debut.elapsed());
-            let (emis, recus, _) = link.trafic();
             println!(
-                "  toujours en attente — encore {} min {:02} s. Ne ferme pas cette fenêtre.",
+                "  toujours en attente — encore {} min {:02} s. Ne ferme pas cette fenetre.",
                 reste.as_secs() / 60,
                 reste.as_secs() % 60
             );
-            println!("    (émis {emis}, reçus {recus} — reçus > 0 signifie qu'il nous a trouvés)");
-            let (prive, public) = link.destinations();
-            println!("     vers reseau local : {prive}  |  vers internet : {public}");
             std::io::stdout().flush().ok();
             dernier_rappel = Instant::now();
         }
-
-        std::thread::sleep(Duration::from_millis(1));
     }
     Ok(false)
 }
