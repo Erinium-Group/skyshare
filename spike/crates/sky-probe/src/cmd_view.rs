@@ -68,11 +68,20 @@ pub fn run(secondes: u64, sortie: &str) -> anyhow::Result<()> {
             "\nÉCHEC : aucun paquet ne nous est parvenu en {} s.",
             debut_attente.elapsed().as_secs()
         );
+        let (emis, recus, erreurs) = link.trafic();
+        println!();
+        println!("  Datagrammes émis   : {emis}");
+        println!("  Datagrammes reçus  : {recus}");
+        println!("  Erreurs de socket  : {erreurs}");
+        println!();
         println!("Deux causes possibles, et rien de ce qu'on voit d'ici ne permet");
         println!("de choisir entre elles :");
         println!("  - le correspondant n'a pas encore collé notre bloc de son côté ;");
         println!("  - il l'a fait, mais ses paquets n'ont pas franchi le réseau.");
-        println!("Redemande-lui un bloc et recommence, c'est sans risque.");
+        println!();
+        println!("Envoie ces trois nombres à ton correspondant : confrontés aux siens,");
+        println!("ils désignent la cause. Redemande-lui un bloc et recommence, c'est");
+        println!("sans risque.");
         return Ok(());
     }
 
