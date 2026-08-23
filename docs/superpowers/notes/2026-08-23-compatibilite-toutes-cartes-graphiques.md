@@ -104,6 +104,51 @@ strictement côté émetteur pour cette marque.
   banale. La recomposition a lieu après décodage, sur son processeur graphique.
 - **Aucune perte d'information** : c'est un réarrangement, pas une approximation.
 
+### La bonne façon de formuler l'idée
+
+Formulation reprise d'un avis extérieur sollicite par le proprietaire, plus claire que
+la mienne :
+
+> On transforme la question « ce GPU sait-il encoder du 4:4:4 ? » en
+> « ce GPU sait-il encoder une video ordinaire et executer un shader ? »
+
+La seconde question a une reponse positive sur pratiquement tout le materiel des
+quinze dernieres annees. Le moteur video ne sert plus qu'a compresser ; c'est le
+compute shader qui porte la representation.
+
+### Trois pieges de la voie A, a traiter avant toute mesure
+
+Ils ne sont evoques nulle part ailleurs et conditionnent la faisabilite reelle.
+
+**a) On ne peut pas simplement empiler Y, U et V.** L'image porteuse est elle-meme en
+4:2:0 : ses propres plans de couleur sont a quart de resolution. Des donnees rangees
+la seraient sous-echantillonnees — on detruirait exactement ce qu'on cherche a
+preserver. Le calcul tombe juste, mais seulement avec un rangement qui respecte la
+nature de chaque plan :
+
+```
+Source 4:4:4 en W x H     -> 3 x W x H echantillons
+Porteuse 4:2:0 en W x 2H  -> Y = 2WH, U = V = WH/2  -> total 3WH
+```
+
+L'essentiel doit aller dans le plan de luminance, seul plan a pleine resolution.
+Ce n'est pas un empilement, c'est un decoupage reflechi.
+
+**b) Les frontieres entre zones creeront des artefacts.** L'encodeur travaille par
+blocs et predit chaque bloc a partir de ses voisins. Aux jointures entre la zone de
+luminance et les zones de couleur, il rencontrera des discontinuites brutales qui
+n'existent dans aucune image naturelle, et y repondra par des artefacts de blocs —
+lesquels reapparaitront apres recomposition sous forme de bandes de couleur fausse.
+Il faudra des marges tampons, ou un arrangement preservant la continuite spatiale.
+C'est le vrai travail delicat de cette technique.
+
+**c) Le modele perceptuel de l'encodeur joue contre nous.** Un encodeur repartit son
+debit selon ce qu'il estime important pour l'oeil. Il croira regarder une image et
+ignorera que la moitie basse porte des donnees de couleur : il pourrait donc
+sacrifier la precision chromatique en pensant compresser une zone peu detaillee —
+l'inverse exact du but recherche. C'est ce qui rend la mesure de qualite apres
+recomposition (inconnue n2 de la section 4) non negociable avant tout engagement.
+
 ### Pourquoi la voie D est la moins bonne, contrairement à ce qu'on pourrait croire
 
 Le repli logiciel semble la solution évidente — il produit du vrai 4:4:4. Mais il ne
