@@ -149,3 +149,31 @@ Capture à **164,3 im/s** (rapport 0,99 au taux d'écran), CPU de la chaîne à 
   bibliothèque, `str0m` contre `webrtc-rs` (spec §2, décision 3).
 - **Repli logiciel x264** — le spike n'implémente que NVENC. Une machine sans carte
   NVIDIA ne peut pas émettre, seulement recevoir. Constaté en conditions réelles.
+
+---
+
+## Jalon C1 — l'API de signaling — CLOS le 04/09/2026
+
+Fusionné dans `main` (`89161ff`) et déployé en production. 33 commits, **338 tests**
+contre 45 au début du jalon. Six tables, douze routes `/api/sky/*`. Vérifié en
+production : les routes répondent 401 sans session — un 404 aurait signifié qu'elles
+n'étaient pas parties, un 500 qu'elles étaient cassées.
+
+Livré : amitiés avec acceptation, blocage ineffaçable par la personne bloquée, code ami
+à 8 caractères, listes d'amis, boîte aux lettres à enveloppes scellées. L'échange
+d'enveloppe est prouvé de bout en bout avec de vraies clés X25519 — le test **déchiffre**
+réellement, une clé fausse ferait échouer le GCM.
+
+### Reporté au jalon C2
+
+- **Les comptes protégés par double authentification ne peuvent pas se connecter depuis
+  l'application native.** Le point le plus visible pour un utilisateur réel.
+- **`sontAmis` et `proprietaireDe` n'ont aucun appelant en production** — les routes
+  réécrivent le prédicat sur place. Quatrième occurrence dans ce projet d'une protection
+  construite sans être branchée (voir tasks/lessons.md, 04/09). Le C2 doit la câbler.
+- **Le versionnage de la synchronisation ignore les suppressions non maximales** : un
+  client peut manquer une suppression si une autre, plus récente, a déjà relevé la version.
+- **Ne pas toucher à l'alphabet du code ami** (31 caractères, S/5 et B/8 exclus) : le
+  changer modifierait l'entropie et invaliderait les codes déjà émis.
+- **Poids de la synchronisation : 2 929 octets** dans le cas réaliste, soit ~55 Mo/mois.
+  Réglable par la cadence de sondage si nécessaire ; le budget de requêtes n'en dépend pas.
