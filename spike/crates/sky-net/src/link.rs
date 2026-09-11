@@ -107,8 +107,16 @@ pub struct PeerLink {
     ///
     /// Servent a percer le NAT *local* pendant l'attente : chaque paquet emis
     /// vers ces adresses ouvre un passage entrant pour elles dans notre box.
-    /// Sans cela, un spectateur qui attend passivement garde sa box fermee et
-    /// les paquets de l'emetteur sont jetes a l'entree.
+    /// Sans cela, le cote qui attend passivement garde sa box fermee et les
+    /// paquets de l'autre sont jetes a l'entree.
+    ///
+    /// Depuis l'inversion (D2), ce cote qui attend est le **repondant** — donc
+    /// l'hote : il rend sa reponse, puis il patiente jusqu'au premier paquet de
+    /// l'offrant. C'est pourquoi `repondant` remplit ce champ des sa
+    /// construction, a partir du SDP de l'offre recue. L'offrant, lui, ne
+    /// connait les adresses du pair qu'a `accepter_reponse` — mais il n'en a pas
+    /// besoin avant, puisque c'est lui qui prend l'initiative d'emettre.
+    /// Verrouille par `le_repondant_connait_les_cibles_des_sa_construction`.
     cibles_pair: Vec<SocketAddr>,
     paquets_recus: u64,
     /// Origine du temps tel que `str0m` le voit.
@@ -128,11 +136,25 @@ impl PeerLink {
     /// Le `Pacer` n'intervient pas ici : le pilotage du débit appartient à la
     /// commande, pas au lien.
     ///
-    /// Note de confidentialité : dans le spike, l'offre voyage **en clair**
-    /// (base64 lisible par quiconque reçoit le bloc), car le destinataire n'est
-    /// pas encore connu et il n'existe donc aucune clé pour la sceller. Seule la
-    /// réponse est scellée. Au jalon 1, la clé du destinataire viendra de la
-    /// boîte aux lettres et l'offre sera scellée elle aussi.
+    /// # Confidentialité — ce que cette fonction expose, et de qui
+    ///
+    /// L'offre voyage **en clair** : `offrant` ne reçoit aucune clé de
+    /// destinataire, donc il n'a rien avec quoi sceller. Seule la réponse l'est.
+    /// Quiconque tient le bloc lit les adresses annoncées dedans.
+    ///
+    /// Ce que l'inversion change, c'est **de qui** ces adresses sont. Avant, le
+    /// bloc en clair était produit par l'hôte : il publiait ses adresses avant
+    /// de savoir à qui il parlait — deux adresses lisibles, mesuré sur le spike.
+    /// Depuis la décision D2, c'est le spectateur qui offre : le bloc en clair
+    /// porte désormais les adresses de **celui qui demande à regarder**, et
+    /// l'hôte n'en publie aucune tant qu'il n'a pas ouvert l'offre.
+    ///
+    /// L'exposition n'est donc pas supprimée, elle est déplacée — et elle le
+    /// reste après cette tâche. Sceller l'offre devient possible à ce jalon,
+    /// parce que l'offrant peut y obtenir la clé du destinataire depuis la boîte
+    /// aux lettres ; mais cela demande une clé de plus en paramètre, et ce n'est
+    /// pas cette tâche-ci qui l'ajoute. Ne pas lire ce commentaire comme une
+    /// promesse tenue.
     pub fn offrant(identity: Identity) -> anyhow::Result<(Self, String)> {
         let (mut rtc, horloge) = nouveau_rtc();
         let (socket, locale) = Self::socket_et_candidats(&mut rtc)?;
@@ -267,10 +289,15 @@ impl PeerLink {
             .context("duplication du port UDP impossible")?;
         // On vise les serveurs STUN (pour garder notre adresse publique stable)
         // ET le pair lui-meme (pour ouvrir notre box a ses paquets). Ce second
-        // point est ce qui manquait : un spectateur qui attend sans jamais
-        // emettre garde sa box fermee, et les paquets de l'emetteur sont jetes
-        // a l'entree. Ces envois ne passent pas par l'agent, donc son horloge
-        // ne demarre pas.
+        // point est ce qui manquait : un cote qui attend sans jamais emettre
+        // garde sa box fermee, et les paquets de l'autre sont jetes a l'entree.
+        // Ces envois ne passent pas par l'agent, donc son horloge ne demarre
+        // pas.
+        //
+        // `cibles_pair` est lu ici, a l'appel : il est vide tant qu'on ne
+        // connait pas les adresses du pair. Chez l'offrant c'est le cas jusqu'a
+        // `accepter_reponse`, et ce n'est pas genant — c'est le repondant qui
+        // attend, et lui les connait des sa construction.
         let serveurs = stun::serveurs_autorises();
         let cibles = self.cibles_pair.clone();
         let stop = Arc::new(AtomicBool::new(false));
@@ -393,10 +420,10 @@ impl PeerLink {
     /// de 3 800 caractères par une messagerie. Si l'horloge partait de la
     /// construction, deux choses casseraient :
     ///
-    /// - le spectateur, qui doit scruter pendant cette attente, verrait sa
-    ///   poignée de main DTLS expirer avant que l'émetteur n'ait commencé
+    /// - le répondant, qui doit scruter pendant cette attente, verrait sa
+    ///   poignée de main DTLS expirer avant que l'offrant n'ait commencé
     ///   (mesuré : abandon à 30 s, quoi qu'on règle côté ICE) ;
-    /// - l'émetteur, resté bloqué sur son invite de saisie, présenterait d'un
+    /// - l'offrant, resté bloqué sur son invite de saisie, présenterait d'un
     ///   coup à `str0m` un bond de plusieurs minutes au premier `poll`.
     ///
     /// En faisant démarrer l'horloge au premier `poll`, les deux disparaissent.
@@ -409,7 +436,7 @@ impl PeerLink {
 
     /// Y a-t-il un datagramme en attente, sans faire avancer l'horloge ?
     ///
-    /// C'est ce que le spectateur appelle pendant qu'il attend son
+    /// C'est ce que le côté qui attend appelle pendant qu'il guette son
     /// correspondant : le paquet est seulement observé, pas consommé — le
     /// `poll` suivant le lira normalement — et `str0m` n'est pas touché, donc
     /// aucune de ses minuteries ne court.
@@ -417,9 +444,9 @@ impl PeerLink {
     ///
     /// L'ancienne version regardait simplement si un datagramme quelconque
     /// attendait sur le port. Depuis l'ajout du battement de maintien, les
-    /// serveurs STUN répondent en permanence : le spectateur prenait ces
+    /// serveurs STUN répondent en permanence : le côté qui attend prenait ces
     /// réponses pour un contact du correspondant, sautait son attente et
-    /// abandonnait avant même que l'autre ait collé sa réponse.
+    /// abandonnait avant même que l'autre ait collé son bloc.
     ///
     /// On s'appuie donc sur le compteur alimenté par `poll`, qui filtre déjà
     /// les réponses des serveurs. L'appelant doit appeler `poll` en boucle —
@@ -622,6 +649,24 @@ impl PeerLink {
     /// Clé publique du correspondant, connue dès la lecture de son bloc.
     pub fn peer_key(&self) -> Option<[u8; 32]> {
         self.peer_key
+    }
+
+    /// Adresses vers lesquelles le battement de maintien perce le NAT local.
+    ///
+    /// Réservé aux tests : le percage lui-même n'est observable que sur deux
+    /// réseaux réels, mais le fait que le côté **qui attend** connaisse ces
+    /// adresses dès sa construction, lui, est vérifiable ici. L'API publique de
+    /// `PeerLink` reste inchangée.
+    #[cfg(test)]
+    fn cibles_pair(&self) -> &[SocketAddr] {
+        &self.cibles_pair
+    }
+
+    /// Port UDP local, seul identifiant qui distingue deux liens d'un même
+    /// processus. Réservé aux tests — il ne doit jamais atteindre une sortie.
+    #[cfg(test)]
+    fn port_local(&self) -> u16 {
+        self.locale.port()
     }
 
     /// Ouvre le socket et déclare nos candidats ICE.
@@ -832,5 +877,142 @@ a=candidate:bbb 1 udp 1686109951 82.67.25.85 23022 typ srflx raddr 0.0.0.0 rport
         assert!(cibles_depuis_sdp("v=0
 s=-
 ").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn le_spectateur_offre_et_l_hote_repond() {
+        // Le sens exige par la spec d'architecture (D2, 23/08) : c'est celui qui
+        // veut REGARDER qui produit l'offre. L'hote ne publie jamais d'adresse
+        // avant d'avoir ouvert l'offre et su a qui il parle.
+        //
+        // CE QUE CE TEST NE PROUVE PAS — mesure, pas supposition : remis dans
+        // l'ancien sens (l'hote offre), il passe tout autant. La mecanique du
+        // canal est symetrique, donc ce test ne peut pas distinguer les deux
+        // sens. Ce qu'il garde vraiment : que le canal s'ouvre des DEUX cotes,
+        // alors qu'un seul le cree et que l'autre ne fait que l'apprendre par
+        // `Event::ChannelOpen` — le chemin d'emission est indifferent au role.
+        // Le sens, lui, est verrouille par
+        // `le_bloc_en_clair_ne_porte_que_les_adresses_du_spectateur`.
+        let spectateur_id = Identity::generate();
+        let hote_id = Identity::generate();
+
+        let (mut spectateur, offre) = PeerLink::offrant(spectateur_id).unwrap();
+        let (mut hote, reponse) = PeerLink::repondant(hote_id, &offre).unwrap();
+        spectateur.accepter_reponse(&reponse).unwrap();
+
+        // Le canal doit s'ouvrir meme si c'est desormais l'offrant qui le cree
+        // et le repondant qui le recoit par Event::ChannelOpen.
+        let limite = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < limite {
+            let _ = spectateur.poll();
+            let _ = hote.poll();
+            if spectateur.canal_ouvert() && hote.canal_ouvert() {
+                return;
+            }
+        }
+        panic!("le canal ne s'est pas ouvert dans les 10 s");
+    }
+
+    /// Adresse publique fictive injectee dans l'offre. Choisie dans TEST-NET-3
+    /// (RFC 5737), reservee a la documentation : aucune machine ne la porte.
+    const CANDIDAT_FICTIF: &str =
+        "a=candidate:ffff 1 udp 1686109951 203.0.113.7 40404 typ srflx raddr 0.0.0.0 rport 0";
+
+    /// Reecrit une offre en y ajoutant un candidat joignable depuis internet.
+    ///
+    /// Necessaire parce qu'un lien construit sur cette machine n'annonce une
+    /// adresse publique que si STUN repond — une condition d'environnement, pas
+    /// une propriete du code. Sans ce trucage, le test passerait au vert en
+    /// n'ayant rien a trouver, ce qui ne prouverait rien.
+    fn offre_avec_candidat_public(offre: &str) -> String {
+        let blob = Blob::from_text(offre).unwrap();
+        let sdp = crate::handshake::decomprimer(&blob.sealed_sdp).unwrap();
+        let truque = format!("{}{CANDIDAT_FICTIF}\r\n", sdp);
+        Blob {
+            session: blob.session,
+            public_key: blob.public_key,
+            sealed_sdp: crate::handshake::comprimer(&truque),
+        }
+        .to_text()
+    }
+
+    #[test]
+    fn le_repondant_connait_les_cibles_des_sa_construction() {
+        // Apres l'inversion, c'est l'HOTE qui attend passivement le premier
+        // paquet — et une box ne laisse entrer que ce a quoi elle a d'abord
+        // emis. Le repondant doit donc tenir les adresses du pair des sa
+        // construction, sans quoi son battement de maintien ne perce rien et
+        // les sondages de l'offrant sont jetes a l'entree de sa box.
+        let (_, offre) = PeerLink::offrant(Identity::generate()).unwrap();
+        let offre = offre_avec_candidat_public(&offre);
+
+        let (hote, _) = PeerLink::repondant(Identity::generate(), &offre).unwrap();
+
+        let attendue: SocketAddr = "203.0.113.7:40404".parse().unwrap();
+        assert!(
+            hote.cibles_pair().contains(&attendue),
+            "le repondant n'a pas retenu l'adresse publique de l'offre : sa box \
+             restera fermee pendant qu'il attend. Cibles retenues : {}",
+            hote.cibles_pair().len()
+        );
+    }
+
+    /// Ports de TOUS les candidats d'un SDP, sans le filtre de confidentialite
+    /// de `cibles_depuis_sdp` : ici on veut savoir a qui appartient le bloc, pas
+    /// vers qui emettre.
+    fn ports_des_candidats(sdp: &str) -> Vec<u16> {
+        sdp.lines()
+            .filter_map(|l| l.strip_prefix("a=candidate:"))
+            .filter_map(|reste| {
+                let champs: Vec<&str> = reste.split_whitespace().collect();
+                champs.get(5)?.parse::<u16>().ok()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn le_bloc_en_clair_ne_porte_que_les_adresses_du_spectateur() {
+        // LE test de sens, celui que `le_spectateur_offre_et_l_hote_repond` ne
+        // fait pas : ce dernier passe aussi bien dans l'ancien sens, parce que
+        // la mecanique du canal est symetrique. Ici non.
+        //
+        // Toute la raison d'etre de la decision D2 tient dans cette assertion :
+        // l'offre est le SEUL bloc qui voyage en clair, et depuis l'inversion
+        // ce sont les adresses de celui qui DEMANDE A REGARDER qu'elle expose.
+        // Remettre l'ancien sens fait rougir ce test, parce que l'offre porte
+        // alors le port de l'hote.
+        let (spectateur, offre) = PeerLink::offrant(Identity::generate()).unwrap();
+        let (hote, _reponse) = PeerLink::repondant(Identity::generate(), &offre).unwrap();
+        assert_ne!(spectateur.port_local(), hote.port_local());
+
+        // Aucune cle n'est necessaire : c'est bien cela, « en clair ».
+        let blob = Blob::from_text(&offre).unwrap();
+        let sdp = crate::handshake::decomprimer(&blob.sealed_sdp).unwrap();
+        let ports = ports_des_candidats(&sdp);
+
+        assert!(
+            ports.contains(&spectateur.port_local()),
+            "l'offre en clair ne porte pas les adresses du spectateur : ce n'est \
+             pas lui qui offre, et le sens de la negociation a ete remis a l'envers"
+        );
+        assert!(
+            !ports.contains(&hote.port_local()),
+            "l'offre en clair porte une adresse de l'hote"
+        );
+    }
+
+    #[test]
+    fn l_offrant_n_a_aucune_cible_avant_la_reponse() {
+        // Le pendant du test precedent : il montre que le premier ne passe pas
+        // pour une raison qui vaudrait aussi bien des deux cotes. L'offrant ne
+        // peut rien connaitre du pair tant qu'il n'a pas sa reponse — et il n'en
+        // a pas besoin, puisque c'est lui qui prend l'initiative d'emettre.
+        let (offrant, _) = PeerLink::offrant(Identity::generate()).unwrap();
+        assert!(offrant.cibles_pair().is_empty());
     }
 }

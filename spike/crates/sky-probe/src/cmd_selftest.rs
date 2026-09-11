@@ -16,14 +16,17 @@ pub fn run() -> anyhow::Result<()> {
     println!("Négociation locale entre deux liens du même processus.");
     println!("La traversée de NAT n'est pas testée ici ; tout le reste l'est.\n");
 
-    let (mut hote, offre) = PeerLink::offrant(Identity::generate())?;
-    println!("Offre produite      : {} caractères", offre.len());
+    // Le sens exigé par la décision D2 : c'est celui qui veut REGARDER qui
+    // produit l'offre. L'hôte ne publie aucune adresse avant d'avoir ouvert
+    // l'offre et su à qui il parle.
+    let (mut spectateur, offre) = PeerLink::offrant(Identity::generate())?;
+    println!("Offre du spectateur : {} caractères", offre.len());
 
-    let (mut spectateur, reponse) = PeerLink::repondant(Identity::generate(), &offre)?;
-    println!("Réponse produite    : {} caractères", reponse.len());
+    let (mut hote, reponse) = PeerLink::repondant(Identity::generate(), &offre)?;
+    println!("Réponse de l'hôte   : {} caractères", reponse.len());
 
-    hote.accepter_reponse(&reponse)?;
-    println!("Réponse acceptée par l'hôte.\n");
+    spectateur.accepter_reponse(&reponse)?;
+    println!("Réponse acceptée par le spectateur.\n");
 
     println!("Négociation...");
     let debut = Instant::now();
@@ -83,9 +86,9 @@ pub fn run() -> anyhow::Result<()> {
     // « mauvaise clé ou message altéré » qui envoie chercher un problème de
     // chiffrement inexistant.
     {
-        let (mut autre_hote, autre_offre) = PeerLink::offrant(Identity::generate())?;
+        let (mut autre_spectateur, autre_offre) = PeerLink::offrant(Identity::generate())?;
         let (_, reponse_etrangere) = PeerLink::repondant(Identity::generate(), &autre_offre)?;
-        match autre_hote.accepter_reponse(&reponse) {
+        match autre_spectateur.accepter_reponse(&reponse) {
             Err(e) if e.to_string().contains("autre négociation") => {
                 println!("Garde-fou    : un bloc d'un autre essai est bien refusé.")
             }
