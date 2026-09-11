@@ -78,7 +78,11 @@ impl Blob {
     }
 
     pub fn from_text(s: &str) -> anyhow::Result<Self> {
-        let nettoye: String = s.trim().split_whitespace().collect();
+        // `split_whitespace` ignore déjà les blancs de tête et de queue : le
+        // `trim()` qui le précédait était redondant (clippy le refuse depuis
+        // rust 1.94). Le résultat est identique — tout blanc, où qu'il soit,
+        // est retiré du bloc recollé.
+        let nettoye: String = s.split_whitespace().collect();
         if nettoye.starts_with("SKY1:") {
             return Err(anyhow!(
                 "bloc à l'ancien format : les deux machines doivent utiliser la même version du programme"
