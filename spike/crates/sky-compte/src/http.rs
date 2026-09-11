@@ -10,9 +10,9 @@ use crate::erreur::ErreurCompte;
 /// Serveur de production, utilisé quand `SKY_API_URL` est absente.
 const BASE_URL_PAR_DEFAUT: &str = "https://eriniumgroup.vercel.app";
 
-/// Neon se suspend apres 5 minutes d'inactivite. Le reveil a ete mesure a
-/// 748,8 ms contre ~35 ms a chaud. Un delai de 500 ms transformerait un
-/// reveil NORMAL en panne. Ne pas « optimiser » cette valeur.
+/// Neon se suspend après 5 minutes d'inactivité. Le réveil a été mesuré à
+/// 748,8 ms contre ~35 ms à chaud. Un délai de 500 ms transformerait un
+/// réveil NORMAL en panne. Ne pas « optimiser » cette valeur.
 const DELAI: Duration = Duration::from_secs(5);
 
 /// Configuration du client : seulement l'URL de base de l'API.
@@ -98,5 +98,23 @@ impl ClientHttp {
             }
             Err(ureq::Error::Transport(transport)) => Err(ErreurCompte::Reseau(transport.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[test]
+    fn aucun_jeton_dans_lechec_reseau_reel() {
+        // Passe par le vrai chemin ClientHttp -> traiter_reponse, contrairement au
+        // test manuel d'erreur.rs. Le port 1 en local refuse la connexion tout de
+        // suite (échec de transport réel, pas de délai de 5 s à attendre) : ce test
+        // rougirait si get_json se mettait un jour à glisser `jeton` dans le message
+        // d'erreur — voir ronde de correction 1.
+        let client = ClientHttp::new(&Config::vers("http://127.0.0.1:1"));
+        let r: Result<Value, ErreurCompte> = client.get_json("/x", Some("SENTINEL-JETON"));
+        assert!(!r.unwrap_err().to_string().contains("SENTINEL-JETON"));
     }
 }

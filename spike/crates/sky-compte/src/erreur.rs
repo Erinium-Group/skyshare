@@ -41,7 +41,32 @@ impl ErreurCompte {
         if statut == 401 {
             return ErreurCompte::Refuse;
         }
-        ErreurCompte::Protocole(format!("statut {statut} inattendu : {corps}"))
+        ErreurCompte::Protocole(format!("statut {statut} inattendu : {}", corps_sans_en_tete(corps)))
+    }
+}
+
+/// Retire toute valeur qui suit `Bearer` dans `corps` avant de l'inclure dans un
+/// message d'erreur.
+///
+/// Rien ne prouve aujourd'hui qu'un en-tête `Authorization` puisse se retrouver
+/// échoté dans un corps de réponse — mais si un intermédiaire (proxy, page
+/// d'erreur générique, etc.) le faisait un jour, ce filtre l'empêche d'atterrir
+/// tel quel dans nos messages d'erreur et donc dans un rapport de bug.
+fn corps_sans_en_tete(corps: &str) -> std::borrow::Cow<'_, str> {
+    match corps.find("Bearer ") {
+        None => std::borrow::Cow::Borrowed(corps),
+        Some(debut) => {
+            let apres_prefixe = debut + "Bearer ".len();
+            let fin_valeur = corps[apres_prefixe..]
+                .find(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+                .map(|i| apres_prefixe + i)
+                .unwrap_or(corps.len());
+            std::borrow::Cow::Owned(format!(
+                "{}[reduit]{}",
+                &corps[..apres_prefixe],
+                &corps[fin_valeur..]
+            ))
+        }
     }
 }
 
@@ -49,7 +74,7 @@ impl fmt::Display for ErreurCompte {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ErreurCompte::Reseau(detail) => write!(f, "erreur réseau : {detail}"),
-            ErreurCompte::Refuse => write!(f, "identifiants refuses"),
+            ErreurCompte::Refuse => write!(f, "identifiants refusés"),
             ErreurCompte::Protocole(detail) => write!(f, "réponse inattendue du serveur : {detail}"),
             ErreurCompte::Coffre(detail) => write!(f, "échec du coffre local : {detail}"),
         }
@@ -64,18 +89,28 @@ mod tests {
 
     #[test]
     fn un_401_devient_refuse_sans_detail() {
-        // Le serveur repond « Code refuse » pour quatre causes differentes,
-        // volontairement indistinctes. Le client ne doit pas reintroduire la
-        // distinction que le serveur a refuse de faire.
-        let erreur = ErreurCompte::depuis_statut(401, "{\"error\":\"Code refuse\"}");
+        // Le serveur répond « Code refusé » pour quatre causes différentes,
+        // volontairement indistinctes. Le client ne doit pas réintroduire la
+        // distinction que le serveur a refusé de faire.
+        let erreur = ErreurCompte::depuis_statut(401, "{\"error\":\"Code refusé\"}");
         assert!(matches!(erreur, ErreurCompte::Refuse));
-        assert_eq!(erreur.to_string(), "identifiants refuses");
+        assert_eq!(erreur.to_string(), "identifiants refusés");
     }
 
     #[test]
     fn aucun_jeton_dans_le_message_d_erreur() {
         // Un jeton dans un message d'erreur finit dans un rapport de bug.
-        let erreur = ErreurCompte::Reseau("echec vers /api/sky/sync".into());
+        let erreur = ErreurCompte::Reseau("échec vers /api/sky/sync".into());
         assert!(!erreur.to_string().contains("Bearer"));
+    }
+
+    #[test]
+    fn un_en_tete_autorisation_echote_dans_le_corps_est_reduit() {
+        // Si un intermediaire echote un jour l'en-tete Authorization dans un
+        // corps de reponse d'erreur, corps_sans_en_tete doit en retirer la
+        // valeur avant qu'elle n'atteigne ErreurCompte::Protocole.
+        let erreur = ErreurCompte::depuis_statut(500, "trace amont: Authorization: Bearer SECRET-XYZ, requete rejetee");
+        assert!(!erreur.to_string().contains("SECRET-XYZ"));
+        assert!(erreur.to_string().contains("[reduit]"));
     }
 }
