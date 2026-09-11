@@ -15,9 +15,9 @@ anyhow.workspace = true
 # alors inertes. Ne branchez pas de collecteur en vous croyant couvert par `pii`.
 str0m = { version = "0.23", features = ["pii"] }
 sky-crypto = { path = "../sky-crypto" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-base64 = "0.22"
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
 flate2 = "1"
 # Même source d'aléa que sky-crypto : identifiants de transaction STUN.
 rand_core = { version = "0.6", features = ["getrandom"] }
