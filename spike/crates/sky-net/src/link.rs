@@ -66,7 +66,7 @@ pub struct PeerLink {
     /// Jamais affichée.
     locale: SocketAddr,
     identity: Identity,
-    /// L'offre en attente de réponse, côté hôte uniquement.
+    /// L'offre en attente de réponse, côté offrant uniquement.
     pending: Option<SdpPendingOffer>,
     canal: Option<ChannelId>,
     peer_key: Option<[u8; 32]>,
@@ -118,7 +118,12 @@ pub struct PeerLink {
 }
 
 impl PeerLink {
-    /// Côté émetteur : produit l'offre à envoyer au spectateur.
+    /// Côté offrant : produit l'offre à envoyer au correspondant.
+    ///
+    /// C'est un rôle de **signaling**, pas un rôle média : celui qui offre n'est
+    /// pas forcément celui qui envoie la vidéo. Les deux étaient confondus dans
+    /// les noms `host`/`viewer`, ce qui est devenu faux dès que le sens de la
+    /// négociation s'est inversé.
     ///
     /// Le `Pacer` n'intervient pas ici : le pilotage du débit appartient à la
     /// commande, pas au lien.
@@ -128,7 +133,7 @@ impl PeerLink {
     /// pas encore connu et il n'existe donc aucune clé pour la sceller. Seule la
     /// réponse est scellée. Au jalon 1, la clé du destinataire viendra de la
     /// boîte aux lettres et l'offre sera scellée elle aussi.
-    pub fn host(identity: Identity) -> anyhow::Result<(Self, String)> {
+    pub fn offrant(identity: Identity) -> anyhow::Result<(Self, String)> {
         let (mut rtc, horloge) = nouveau_rtc();
         let (socket, locale) = Self::socket_et_candidats(&mut rtc)?;
 
@@ -189,8 +194,11 @@ impl PeerLink {
         ))
     }
 
-    /// Côté spectateur : consomme l'offre, produit la réponse scellée.
-    pub fn viewer(identity: Identity, offre_texte: &str) -> anyhow::Result<(Self, String)> {
+    /// Côté répondant : consomme l'offre, produit la réponse scellée.
+    ///
+    /// Rôle de signaling lui aussi : le répondant peut parfaitement être celui
+    /// qui émettra ensuite la vidéo.
+    pub fn repondant(identity: Identity, offre_texte: &str) -> anyhow::Result<(Self, String)> {
         let blob = Blob::from_text(offre_texte)?;
         let sdp = crate::handshake::decomprimer(&blob.sealed_sdp)?;
         // L'erreur de `str0m` cite le SDP fautif : on ne la propage pas.
@@ -336,8 +344,8 @@ impl PeerLink {
         (self.emis_vers_prive, self.emis_vers_public)
     }
 
-    /// Côté émetteur : intègre la réponse du spectateur.
-    pub fn accept_answer(&mut self, texte: &str) -> anyhow::Result<()> {
+    /// Côté offrant : intègre la réponse du répondant.
+    pub fn accepter_reponse(&mut self, texte: &str) -> anyhow::Result<()> {
         let blob = Blob::from_text(texte)?;
         if blob.session != self.session {
             return Err(anyhow!(

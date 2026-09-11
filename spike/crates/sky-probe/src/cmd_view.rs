@@ -50,7 +50,7 @@ pub fn run(secondes: u64, sortie: &str) -> anyhow::Result<()> {
     let mut offre = String::new();
     std::io::stdin().read_line(&mut offre)?;
 
-    let (mut link, reponse) = PeerLink::viewer(Identity::generate(), &offre)?;
+    let (mut link, reponse) = PeerLink::repondant(Identity::generate(), &offre)?;
 
     println!("\n=== ÉTAPE 2 : renvoie ce bloc à ton correspondant ===\n");
     println!("{reponse}\n");

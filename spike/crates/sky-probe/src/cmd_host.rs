@@ -103,7 +103,7 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
     // quelques secondes — visible dans l'affichage périodique plus bas.
     let mut pacer = Pacer::new(p.floor_mbps * 1_000_000, p.bitrate_mbps * 1_000_000)?;
 
-    let (mut link, offre) = PeerLink::host(Identity::generate())?;
+    let (mut link, offre) = PeerLink::offrant(Identity::generate())?;
 
     println!("\n=== ÉTAPE 1 : envoie ce bloc à ton correspondant ===\n");
     // L'exposé, ici, c'est l'opérateur — pas le correspondant, dont la réponse
@@ -136,7 +136,7 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
     // La negociation produit son propre trafic : le battement n'a plus lieu d'etre.
     drop(garde);
 
-    link.accept_answer(&reponse)?;
+    link.accepter_reponse(&reponse)?;
 
     println!("\nNégociation en cours...");
     std::io::stdout().flush().ok();
