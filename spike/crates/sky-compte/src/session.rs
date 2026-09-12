@@ -13,6 +13,8 @@
 //!   intercepté seul ne sert donc à rien. C'est pourquoi le secret ne part jamais dans
 //!   `url_de_depart` : seule son empreinte SHA-256 y figure.
 
+use std::time::Duration;
+
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -20,6 +22,19 @@ use sha2::{Digest, Sha256};
 use crate::coffre::{Coffre, Jetons};
 use crate::erreur::ErreurCompte;
 use crate::http::{ClientHttp, Config};
+
+/// Délai maximal d'attente de la redirection sur le serveur de boucle locale.
+///
+/// Point de départ ARGUMENTÉ, pas une mesure — contrairement au délai de `ClientHttp`
+/// (5 s, celui-là mesuré sur le réveil de Neon). Une authentification Discord réelle
+/// suppose : basculer vers le navigateur, retrouver ou taper un mot de passe (gestionnaire
+/// de mots de passe compris), puis éventuellement un second facteur — application
+/// d'authentification à rouvrir, ou SMS à attendre. Quelques dizaines de secondes pour
+/// un utilisateur entraîné qui ne se trompe pas ; largement plus pour un premier essai,
+/// une faute de frappe à corriger, ou un second facteur qui traîne. 5 minutes laisse
+/// cette marge sans faire attendre indéfiniment quelqu'un qui a fermé l'onglet ou
+/// renoncé.
+const DELAI_ATTENTE_REDIRECTION: Duration = Duration::from_secs(5 * 60);
 
 /// Page rendue au navigateur une fois la redirection reçue — le résultat réel
 /// (succès ou échec) est rapporté dans le terminal par l'appelant, pas ici : cette
@@ -131,9 +146,25 @@ pub fn connecter(config: &Config, coffre: &Coffre) -> Result<Jetons, ErreurCompt
 
     ouvrir_navigateur(&url_de_depart(port, &empreinte))?;
 
-    // Une seule requête : celle de la redirection. Le serveur ferme aussitôt après,
-    // qu'elle porte un code ou une erreur.
-    let requete = serveur.recv().map_err(|e| ErreurCompte::Reseau(e.to_string()))?;
+    // Attente BORNÉE (voir DELAI_ATTENTE_REDIRECTION) : sans délai, un utilisateur qui
+    // ferme l'onglet ou renonce laisserait ce thread bloqué pour toujours dans un
+    // `recv()` sans délai — sans message, sans moyen d'en sortir. `recv_timeout` rend
+    // `Ok(None)` à l'expiration plutôt que de bloquer indéfiniment ; une seule requête
+    // traitée sinon, qu'elle porte un code ou une erreur — le serveur ferme aussitôt
+    // après, dans les deux cas.
+    let requete = serveur
+        .recv_timeout(DELAI_ATTENTE_REDIRECTION)
+        .map_err(|e| ErreurCompte::Reseau(e.to_string()))?;
+    let Some(requete) = requete else {
+        // Sortie propre : ferme le serveur local plutôt que de le laisser écouter
+        // derrière. Le message ne nomme ni le code ni le secret — seulement qu'il
+        // faut relancer.
+        drop(serveur);
+        return Err(ErreurCompte::Reseau(
+            "aucune réponse reçue du site dans le délai imparti — rien n'est arrivé, relancez la connexion"
+                .to_string(),
+        ));
+    };
     let (code, erreur) = extraire_code_ou_erreur(requete.url());
     let reponse = tiny_http::Response::from_string(PAGE_DE_RETOUR).with_header(
         tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
