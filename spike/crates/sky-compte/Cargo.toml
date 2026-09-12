@@ -11,6 +11,6 @@ serde_json.workspace = true
 ureq.workspace = true
 keyring = { version = "3", features = ["windows-native"] }
 sky-crypto = { version = "0.0.0", path = "../sky-crypto" }
-
-[dev-dependencies]
 tiny_http = "0.12"
+rand = "0.9"
+sha2 = "0.10"
