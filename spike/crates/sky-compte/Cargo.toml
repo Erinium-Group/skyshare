@@ -9,6 +9,8 @@ publish.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
+keyring = { version = "3", features = ["windows-native"] }
+sky-crypto = { version = "0.0.0", path = "../sky-crypto" }
 
 [dev-dependencies]
 tiny_http = "0.12"

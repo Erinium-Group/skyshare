@@ -20,6 +20,25 @@ impl Identity {
         self.secret.public_key().to_bytes()
     }
 
+    /// Sérialise la clé privée en octets bruts, pour le coffre-fort du
+    /// système (jalon 1).
+    ///
+    /// Ces octets sont le secret complet de l'identité : quiconque les
+    /// obtient peut se faire passer pour cet appareil. Ils ne doivent
+    /// jamais être journalisés ni transiter ailleurs que vers le
+    /// gestionnaire d'identifiants du système.
+    pub fn en_octets(&self) -> [u8; 32] {
+        self.secret.to_bytes()
+    }
+
+    /// Reconstruit une identité à partir d'octets bruts (symétrique de
+    /// [`Identity::en_octets`]).
+    pub fn depuis_octets(octets: &[u8; 32]) -> Self {
+        Self {
+            secret: SecretKey::from_bytes(*octets),
+        }
+    }
+
     /// Scelle un message pour un destinataire.
     ///
     /// Utilise le mode « sealed box » : une paire de clés éphémère est générée
