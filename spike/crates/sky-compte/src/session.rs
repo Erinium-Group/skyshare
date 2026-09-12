@@ -116,12 +116,17 @@ struct ReponseRefresh {
 /// `coffre`, range le résultat dans `coffre`, le rend.
 ///
 /// Ce point d'entrée a échoué pour 100 % des tentatives réelles pendant tout le
-/// jalon C1, faute d'appelant — voir le brief de cette tâche. `jeton_valide`,
+/// jalon C1, faute d'appelant — voir le brief de cette tâche. `avec_jeton_valide`,
 /// plus bas, en est le premier appelant réel.
 ///
-/// Si `coffre` ne contient aucun jeton (jamais connecté), rend `ErreurCompte::Refuse` :
-/// du point de vue de l'appelant, l'absence de session à renouveler appelle la même
-/// réaction qu'un renouvellement refusé par le serveur — se reconnecter via `connecter`.
+/// Si `coffre` ne contient aucun jeton (jamais connecté), rend `ErreurCompte::Refuse`
+/// AVANT tout appel réseau : du point de vue de l'appelant, l'absence de session à
+/// renouveler appelle la même réaction qu'un renouvellement refusé par le serveur —
+/// se reconnecter via `connecter`. Cette garde reste nécessaire même si
+/// `avec_jeton_valide` ne l'atteint jamais avec un coffre vide (voir son propre
+/// garde-fou juste avant) : `renouveler` est elle-même `pub`, appelable directement
+/// par un futur appelant qui n'en connaît pas l'usage interne — sans cette garde,
+/// `.renouvellement` paniquerait sur `None`.
 pub fn renouveler(config: &Config, coffre: &Coffre) -> Result<Jetons, ErreurCompte> {
     let actuels = coffre.jetons()?.ok_or(ErreurCompte::Refuse)?;
     let client = ClientHttp::new(config);
@@ -132,37 +137,49 @@ pub fn renouveler(config: &Config, coffre: &Coffre) -> Result<Jetons, ErreurComp
     Ok(jetons)
 }
 
-/// Sonde `GET /api/sky/sync` avec `jeton` — seul le statut de la réponse compte, son
-/// corps est ignoré : ce n'est pas une vraie synchronisation (tâche 8), seulement le
-/// moyen de savoir si le serveur reconnaît encore ce jeton. `/api/sky/sync` est la
-/// seule route authentifiée du double qui ne modifie rien côté serveur, donc la
-/// sonder ne coûte aucun effet de bord.
-fn jeton_est_accepte(config: &Config, jeton: &str) -> Result<(), ErreurCompte> {
-    let client = ClientHttp::new(config);
-    client.get_json::<serde_json::Value>("/api/sky/sync", Some(jeton))?;
-    Ok(())
+/// Rend le jeton de session actuellement rangé dans `coffre` — AUCUN appel réseau,
+/// ne dit rien de sa validité auprès du serveur, seulement de sa présence locale.
+/// `Refuse` si le coffre ne contient encore aucun jeton (jamais connecté).
+///
+/// Volontairement dépourvue de toute notion de validité : un appel réseau de
+/// vérification préalable (une version antérieure de cette fonction sondait
+/// `GET /api/sky/sync` avant même l'appel réel) doublerait le nombre de requêtes
+/// sur la route la plus fréquente de l'application, dont le budget est publié et
+/// mesuré (`docs/mesures-jalon-c1.md`, côté site). `avec_jeton_valide`, juste après,
+/// compose ce jeton avec un vrai appel et réagit au 401 s'il survient — un sondage
+/// dirait « le jeton était bon il y a un instant » ; une reprise sur 401 dit « CET
+/// appel a été refusé », ce qui ne peut jamais se désynchroniser de la réalité.
+pub fn jeton_courant(coffre: &Coffre) -> Result<String, ErreurCompte> {
+    Ok(coffre.jetons()?.ok_or(ErreurCompte::Refuse)?.session)
 }
 
-/// Rend un jeton de session dont le serveur vient tout juste de confirmer qu'il le
-/// reconnaît, en renouvelant d'abord si nécessaire.
+/// Exécute `appel` avec le jeton de session courant ; si le serveur le refuse (401,
+/// donc `ErreurCompte::Refuse`), renouvelle une fois via `renouveler` puis retente
+/// `appel` une seule fois de plus avec le nouveau jeton.
 ///
-/// UNE SEULE reprise, jamais deux : si le jeton en coffre est refusé, `renouveler`
-/// est appelé une fois, et le nouveau jeton est sondé une seule fois de plus. Un
-/// second refus (jeton de renouvellement lui-même révoqué, ou nouveau jeton de
-/// session encore refusé) remonte tel quel, sans nouvelle tentative — sans cette
-/// borne, un jeton de renouvellement révoqué déclencherait une boucle infinie
-/// d'appels au serveur.
-pub fn jeton_valide(config: &Config, coffre: &Coffre) -> Result<String, ErreurCompte> {
-    let jetons = coffre.jetons()?.ok_or(ErreurCompte::Refuse)?;
-
-    match jeton_est_accepte(config, &jetons.session) {
-        Ok(()) => Ok(jetons.session),
+/// UNE SEULE reprise, jamais deux : tout échec au-delà de cette unique reprise —
+/// renouvellement lui-même refusé, ou nouveau jeton de session encore refusé —
+/// remonte tel quel, sans nouvelle tentative. Sans cette borne, un jeton de
+/// renouvellement révoqué déclencherait une boucle infinie d'appels au serveur.
+///
+/// C'est ici, et seulement ici, qu'un appel réseau réel est tenté avant d'avoir la
+/// certitude que le jeton est bon — contrairement à `jeton_courant`, qui ne
+/// suppose rien. Les tâches 8 et 9 appellent `avec_jeton_valide` pour la totalité
+/// de leurs appels authentifiés (`GET /api/sky/sync`, `POST /api/sky/envelopes`,
+/// etc.), jamais `jeton_courant` seule pour un appel réel : `jeton_courant` ne rend
+/// qu'un jeton PRÉSENT, pas un jeton VALIDE.
+pub fn avec_jeton_valide<T>(
+    config: &Config,
+    coffre: &Coffre,
+    appel: impl Fn(&str) -> Result<T, ErreurCompte>,
+) -> Result<T, ErreurCompte> {
+    let jeton = jeton_courant(coffre)?;
+    match appel(&jeton) {
         Err(ErreurCompte::Refuse) => {
             let renouveles = renouveler(config, coffre)?;
-            jeton_est_accepte(config, &renouveles.session)?;
-            Ok(renouveles.session)
+            appel(&renouveles.session)
         }
-        Err(autre) => Err(autre),
+        resultat => resultat,
     }
 }
 
