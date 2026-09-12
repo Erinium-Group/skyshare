@@ -10,12 +10,52 @@
 
 use std::cell::RefCell;
 use std::fmt;
+use std::sync::{Mutex, MutexGuard};
 
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use sky_crypto::Identity;
 
 use crate::erreur::ErreurCompte;
+
+/// Verrou global sérialisant tout accès de ce crate au trousseau système (Windows
+/// Credential Manager) — production comme tests.
+///
+/// CAUSE ÉTABLIE, PARTIELLEMENT : `cargo test` (mode par défaut, aucun drapeau)
+/// exécute les tests d'un même binaire sur des threads concurrents. Plusieurs
+/// d'entre eux créent des `Coffre::pour_test` DISTINCTS (préfixes vérifiés
+/// uniques — grep sur tout le crate) qui touchent néanmoins le MÊME magasin
+/// d'identifiants réel de la machine, PAS un magasin isolé par test. Une
+/// reproduction ciblée (40 threads, chacun sur sa propre cible, écriture puis
+/// lecture immédiate, 120 tentatives, sans réseau ni `FauxServeur`) N'A PAS
+/// suffi à elle seule à provoquer l'incohérence observée dans la vraie suite —
+/// le déclencheur exact semble exiger la charge combinée de la suite réelle
+/// (accès au trousseau concurrents AVEC des serveurs `tiny_http` et des requêtes
+/// `ureq` sur d'autres threads). La cause précise côté Windows (contention
+/// interne au service de gestion des identifiants, limite de simultanéité,
+/// interférence d'un antivirus scrutant les binaires fraîchement compilés, ou
+/// autre) n'a donc PAS pu être identifiée avec certitude au-delà de ce qui est
+/// exclu ci-dessus (pas une collision de nom de cible, pas un bug du registre de
+/// nettoyage `NETTOYAGE_TESTS`). Ce qui est établi sans ambiguïté : le symptôme
+/// n'apparaît QUE sous exécution parallèle, jamais avec `--test-threads=1`, et
+/// disparaît quand ce verrou retire la variable qui reste sous notre contrôle —
+/// deux opérations de ce crate sur le trousseau ne peuvent plus jamais se
+/// recouvrir dans le temps, quel que soit le mécanisme exact en cause côté OS.
+///
+/// Coût : les opérations de coffre, dans CE process, ne se recouvrent plus
+/// jamais entre elles. Acceptable : ni fréquentes ni sur un chemin chaud, en
+/// production (une poignée d'appels par lancement de l'application, jamais deux
+/// à la fois — un seul `Coffre` de production par processus) comme en test (une
+/// opération locale, jamais un appel réseau sous le verrou).
+static VERROU_TROUSSEAU: Mutex<()> = Mutex::new(());
+
+/// Acquiert `VERROU_TROUSSEAU`, en absorbant un empoisonnement éventuel : une
+/// panique d'un test PENDANT qu'il détient ce verrou (peu probable — aucun code
+/// sous le verrou ne panique volontairement) ne doit pas condamner tous les
+/// tests suivants à leur tour. Le contenu protégé est `()` : rien à corrompre.
+fn verrou_trousseau() -> MutexGuard<'static, ()> {
+    VERROU_TROUSSEAU.lock().unwrap_or_else(|empoisonne| empoisonne.into_inner())
+}
 
 /// Nom de service du coffre de production. Stable entre les lancements :
 /// c'est ce qui permet à l'identité de survivre à un redémarrage.
@@ -92,6 +132,7 @@ impl Coffre {
     /// l'identité — et donc les enveloppes en vol, et la reconnaissance de
     /// l'appareil par ses amis — survit à un redémarrage.
     pub fn identite(&self) -> Result<Identity, ErreurCompte> {
+        let _verrou = verrou_trousseau();
         let entree = self.entree(UTILISATEUR_IDENTITE)?;
         match entree.get_secret() {
             Ok(octets) => {
@@ -120,6 +161,7 @@ impl Coffre {
     /// un message d'erreur — exactement ce que `corps_sans_en_tete` (dans
     /// `http.rs`) évite déjà pour les réponses du serveur.
     pub fn jetons(&self) -> Result<Option<Jetons>, ErreurCompte> {
+        let _verrou = verrou_trousseau();
         let entree = self.entree(UTILISATEUR_JETONS)?;
         match entree.get_password() {
             Ok(json) => serde_json::from_str(&json).map(Some).map_err(|_| {
@@ -132,6 +174,7 @@ impl Coffre {
 
     /// Range les jetons de session, en écrasant les précédents s'il y en a.
     pub fn ranger_jetons(&self, jetons: &Jetons) -> Result<(), ErreurCompte> {
+        let _verrou = verrou_trousseau();
         let entree = self.entree(UTILISATEUR_JETONS)?;
         // Sérialisation d'une struct de deux `String` : n'échoue en pratique
         // jamais. Même prudence que côté lecture par cohérence : le message
@@ -145,6 +188,7 @@ impl Coffre {
     /// Oublie les jetons de session (déconnexion). N'affecte pas l'identité
     /// de l'appareil : perdre sa session ne doit pas régénérer une clé.
     pub fn oublier(&self) -> Result<(), ErreurCompte> {
+        let _verrou = verrou_trousseau();
         let entree = self.entree(UTILISATEUR_JETONS)?;
         match entree.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
@@ -181,6 +225,7 @@ impl Drop for RegistreNettoyage {
 }
 
 fn supprimer_silencieusement(service: &str, utilisateur: &str) {
+    let _verrou = verrou_trousseau();
     if let Ok(entree) = Entry::new(service, utilisateur) {
         let _ = entree.delete_credential();
     }
