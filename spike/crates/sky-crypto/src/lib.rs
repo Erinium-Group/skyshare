@@ -3,8 +3,9 @@ use crypto_box::{aead::OsRng, PublicKey, SecretKey};
 
 /// L'identité cryptographique d'un appareil.
 ///
-/// La clé privée ne quitte jamais la machine (spec §4.2). Dans le spike elle
-/// est éphémère ; au jalon 1 elle ira dans le coffre-fort du système.
+/// La clé privée ne quitte jamais la machine (spec §4.2). Elle vit dans le
+/// coffre-fort du système d'exploitation (`sky_compte::Coffre`) ;
+/// `en_octets` et `depuis_octets` servent à l'y ranger et à l'en relire.
 pub struct Identity {
     secret: SecretKey,
 }

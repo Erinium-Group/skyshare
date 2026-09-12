@@ -19,6 +19,10 @@ use crate::erreur::ErreurCompte;
 
 /// Nom de service du coffre de production. Stable entre les lancements :
 /// c'est ce qui permet à l'identité de survivre à un redémarrage.
+///
+/// Choisi délibérément, pas un nom technique laissé au hasard : c'est le nom
+/// du produit, celui que l'utilisateur verra dans son gestionnaire
+/// d'identifiants Windows.
 const SERVICE_PRODUCTION: &str = "SkyShare";
 const UTILISATEUR_IDENTITE: &str = "identite";
 const UTILISATEUR_JETONS: &str = "jetons";
@@ -108,10 +112,19 @@ impl Coffre {
     }
 
     /// Relit les jetons de session, s'ils existent.
+    ///
+    /// En cas de contenu illisible (JSON corrompu ou trafiqué), l'erreur ne
+    /// reprend jamais ce contenu : le message de `serde_json` échote la
+    /// valeur fautive en clair (p. ex. `invalid type: integer \`123456789\`,
+    /// expected a string`), ce qui ferait fuiter un fragment du coffre par
+    /// un message d'erreur — exactement ce que `corps_sans_en_tete` (dans
+    /// `http.rs`) évite déjà pour les réponses du serveur.
     pub fn jetons(&self) -> Result<Option<Jetons>, ErreurCompte> {
         let entree = self.entree(UTILISATEUR_JETONS)?;
         match entree.get_password() {
-            Ok(json) => serde_json::from_str(&json).map(Some).map_err(erreur_coffre),
+            Ok(json) => serde_json::from_str(&json).map(Some).map_err(|_| {
+                ErreurCompte::Coffre("jetons illisibles dans le coffre".to_string())
+            }),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(erreur_coffre(e)),
         }
@@ -120,7 +133,12 @@ impl Coffre {
     /// Range les jetons de session, en écrasant les précédents s'il y en a.
     pub fn ranger_jetons(&self, jetons: &Jetons) -> Result<(), ErreurCompte> {
         let entree = self.entree(UTILISATEUR_JETONS)?;
-        let json = serde_json::to_string(jetons).map_err(erreur_coffre)?;
+        // Sérialisation d'une struct de deux `String` : n'échoue en pratique
+        // jamais. Même prudence que côté lecture par cohérence : le message
+        // d'erreur ne doit jamais reprendre le contenu qu'il tente d'écrire.
+        let json = serde_json::to_string(jetons).map_err(|_| {
+            ErreurCompte::Coffre("échec de sérialisation des jetons".to_string())
+        })?;
         entree.set_password(&json).map_err(erreur_coffre)
     }
 
@@ -244,6 +262,27 @@ mod tests {
 
         assert_eq!(coffre.jetons().unwrap(), None);
         assert_eq!(coffre.identite().unwrap().public_key(), identite_avant);
+    }
+
+    #[test]
+    fn jetons_corrompus_ne_fuient_pas_dans_l_erreur() {
+        // Ecrit directement, en contournant `ranger_jetons`, un contenu qui
+        // n'a pas la forme de `Jetons` — comme le ferait une corruption ou
+        // une falsification du trousseau. Le marqueur ci-dessous simule un
+        // fragment du secret reel : si le message d'erreur le reprend, la
+        // fuite est prouvee.
+        let coffre = Coffre::pour_test("sky-test-jetons-corrompus");
+        let entree = Entry::new(&coffre.service, UTILISATEUR_JETONS).unwrap();
+        entree
+            .set_password(r#"{"session":123456789,"renouvellement":"SECRET-DE-RENOUVELLEMENT"}"#)
+            .unwrap();
+
+        let erreur = coffre.jetons().unwrap_err();
+        let message = erreur.to_string();
+
+        assert_eq!(message, "échec du coffre local : jetons illisibles dans le coffre");
+        assert!(!message.contains("123456789"));
+        assert!(!message.contains("SECRET-DE-RENOUVELLEMENT"));
     }
 
     #[test]
