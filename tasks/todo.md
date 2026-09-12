@@ -166,11 +166,15 @@ réellement, une clé fausse ferait échouer le GCM.
 
 ### Reporté au jalon C2
 
-- **Les comptes protégés par double authentification ne peuvent pas se connecter depuis
-  l'application native.** Le point le plus visible pour un utilisateur réel.
-- **`sontAmis` et `proprietaireDe` n'ont aucun appelant en production** — les routes
-  réécrivent le prédicat sur place. Quatrième occurrence dans ce projet d'une protection
-  construite sans être branchée (voir tasks/lessons.md, 04/09). Le C2 doit la câbler.
+- ~~Les comptes protégés par double authentification ne peuvent pas se connecter depuis
+  l'application native.~~ **Réglé le 13/09/2026** (jalon C2, tâche 2, déployé en
+  `f916dcc`) : le second facteur se fait dans le navigateur, et le `state` signé traverse
+  l'étape TOTP, lié à la session qui l'a ouvert.
+- ~~`sontAmis` et `proprietaireDe` n'ont aucun appelant en production — une protection
+  construite sans être branchée, à câbler au C2.~~ **Diagnostic faux, corrigé le
+  13/09/2026** : leur prédicat est répliqué exprès dans `deposer`, `definirMembres` et
+  `amisDe` ; les câbler rouvrirait la fuite temporelle. **Ne pas les câbler** (voir
+  tasks/lessons.md, 13/09).
 - **Le versionnage de la synchronisation ignore les suppressions non maximales** : un
   client peut manquer une suppression si une autre, plus récente, a déjà relevé la version.
 - **Ne pas toucher à l'alphabet du code ami** (31 caractères, S/5 et B/8 exclus) : le

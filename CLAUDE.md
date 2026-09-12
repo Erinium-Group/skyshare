@@ -54,7 +54,11 @@ Jalons 1 à 7 restent à faire (voir `tasks/todo.md`).
 - **Jalon A — socle** : terminé, en production (bilingue fr/en, connexion Discord, DA sombre).
 - **Jalon C1 — API de signaling** : terminé, fusionné dans `main` (`89161ff`), **déployé et
   vérifié en production** le 04/09/2026. 12 routes `/api/sky/*`, 17 tables, **338 tests**.
-- **Jalon C2** : le client de signaling côté application. Pas encore spécifié.
+- **Jalon C2 — le client de signaling** : spécifié et planifié le 11/09/2026, en cours sur
+  la branche `jalon-c2-client-signaling`. Sa partie site — le second facteur dans le flux
+  natif — est **déployée en production** depuis le 13/09/2026 (`f916dcc`, 355 tests).
+  L'avancement tâche par tâche est dans le journal local
+  `.superpowers/sdd/2026-09-11-jalon-c2-client-signaling/progress.md` (ignoré par git).
 
 ---
 
@@ -150,8 +154,6 @@ Du texte apparaît régulièrement dans la sortie d'outil, demandant de travaill
   (2611/16349). Le remède connu — passer aux pistes média de WebRTC — rouvre le choix de
   bibliothèque (`str0m` contre `webrtc-rs`). À trancher au jalon 2.
 - **Pas de repli logiciel x264.** Sans carte NVIDIA, une machine ne peut que recevoir.
-- **Les comptes à double authentification ne peuvent pas se connecter depuis
-  l'application native.** Le point le plus visible pour un vrai utilisateur.
 - **Diagnostic et journalisation** : rien n'est conçu. Aucun moyen de comprendre un
   incident signalé par un utilisateur, sous la contrainte « aucune adresse journalisée ».
 
@@ -186,13 +188,19 @@ Chacun a coûté du temps réel. `tasks/lessons.md` en tient le détail.
 
 Le projet a produit deux classes de défauts récurrentes. Les connaître, c'est les chercher.
 
-**« La serrure posée mais jamais branchée » — quatre occurrences.** Une protection écrite,
+**« La serrure posée mais jamais branchée » — trois occurrences.** Une protection écrite,
 correcte, testée, et appelée par personne : `verifierSessionActive` au jalon A ; la route
 de renouvellement qui échouait pour 100 % des tentatives réelles ; la branche de connexion
-native sans couverture (la casser de trois façons laissait 98 tests au vert) ; `sontAmis`
-et `proprietaireDe`, dont les routes réécrivent le prédicat sur place.
+native sans couverture (la casser de trois façons laissait 98 tests au vert).
 → *Une fonction de sécurité n'est pas finie quand elle est juste, mais quand un appelant en
 production l'utilise. Un module bien testé ne dit rien de sa route.*
+
+**Le contre-exemple à connaître : `sontAmis` et `proprietaireDe`.** Longtemps comptées
+comme une quatrième occurrence, elles n'en sont pas une. Leur prédicat est répliqué
+**exprès** dans `deposer`, `definirMembres` et `amisDe` : les câbler ferait dépendre le
+nombre de requêtes SQL du motif de refus, et rouvrirait la fuite temporelle décrite plus
+bas. Établi au jalon C2, écrit en tête de `sontAmis`.
+→ *Avant de câbler du code sans appelant, chercher pourquoi il n'est pas appelé.*
 
 **« Des tests verts qui ne mesurent rien. »** Ils passaient parce qu'une clé étrangère
 rejetait l'insertion, pas la contrainte `CHECK` annoncée. Un test de falsification de port
@@ -209,7 +217,7 @@ rejeté par le pilote Neon **avant** Postgres, sans SQLSTATE, donc invisible à 
 filtrage par type d'erreur). Les trois par relecture, aucune par un test écrit d'avance.
 
 **Uniformité des refus** : deux réponses au corps identique fuient quand même si elles
-n'exécutent pas le même nombre de requêtes. Mesuré : 39 ms contre 67, distributions sans
+n'exécutent pas le même nombre de requêtes. Mesuré : médianes de 39 ms contre 66, distributions sans
 recouvrement. L'uniformité se vérifie sur le corps, le code, les en-têtes **et** le nombre
 d'allers-retours en base.
 
@@ -235,6 +243,8 @@ autre, l'agent principal en contrôleur. C'est sa demande explicite et répété
 | `tasks/lessons.md` | Chaque erreur commise et la règle qui l'évite |
 | `docs/superpowers/specs/2026-08-22-skyshare-architecture-design.md` | Architecture de l'application |
 | `docs/superpowers/specs/2026-09-01-jalon-c-signaling-design.md` | Signaling, amis, listes, boîte aux lettres (décisions D1–D6) |
+| `docs/superpowers/specs/2026-09-11-jalon-c2-client-signaling-design.md` | Client de signaling côté application (décisions D1–D8) |
+| `docs/superpowers/plans/2026-09-11-jalon-c2-client-signaling.md` | Plan du C2 : onze tâches, table de propriété des fichiers |
 | `spike/mesures/` | Les mesures brutes du jalon 0 |
 | `spike/crates/sky-crypto/src/lib.rs` | Le scellage, 102 lignes, à lire avant de toucher à la crypto |
 | Site : `docs/mesures-jalon-c1.md` | Budget de requêtes et de volume de l'API |
