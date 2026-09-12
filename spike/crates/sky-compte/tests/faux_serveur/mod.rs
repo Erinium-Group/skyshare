@@ -108,6 +108,40 @@ fn id_deterministe(texte: &str) -> i64 {
     (h % 2_000_000_000).max(1) as i64
 }
 
+/// Demande d'ami reçue, telle que rendue par `GET /api/sky/sync` dans
+/// `demandes[]` — forme figée par `Demande` (site : `src/lib/sky/amis.ts`,
+/// fonction `demandesDe`). `friendshipId`/`demandeurId` en camelCase, le
+/// reste en snake_case — même relevé de forme que `AmiFaux` ci-dessus, pas
+/// une convention uniforme inventée pour ce double. AJOUT DE LA TÂCHE 8
+/// (hors scope de la tâche 4) : la tâche 4 figeait ce tableau à `[]` en dur
+/// ; sans lui, `accepter_ami` (tâche 8) est inutilisable — le client n'a
+/// aucun moyen de connaître l'identifiant d'amitié à accepter.
+#[derive(Debug, Clone, Serialize)]
+pub struct DemandeFausse {
+    #[serde(rename = "friendshipId")]
+    pub friendship_id: i64,
+    #[serde(rename = "demandeurId")]
+    pub demandeur_id: i64,
+    pub discord_name: String,
+    pub discord_avatar: Option<String>,
+    pub created_at: String,
+}
+
+/// Appareil de l'utilisateur COURANT, tel que rendu par `GET /api/sky/sync`
+/// dans `appareils[]` — forme figée par `Appareil` (site :
+/// `src/lib/sky/appareils.ts`). Ne porte PAS `public_key` : c'est la vue de
+/// gestion « mes appareils », distincte de `AppareilDAmiFaux` ci-dessus.
+/// AJOUT DE LA TÂCHE 8, même raison que `DemandeFausse`.
+#[derive(Debug, Clone, Serialize)]
+pub struct AppareilFaux {
+    pub id: i64,
+    pub nom: String,
+    pub plateforme: String,
+    pub created_at: String,
+    pub last_seen_at: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
 /// Enveloppe scellée telle que rendue par `GET /api/sky/sync` — forme figée
 /// par `Enveloppe` (site : `src/lib/sky/enveloppes.ts`) ET par la fonction
 /// `serialiser` de `sync/route.ts` qui convertit `charge` (un `Buffer` côté
@@ -146,6 +180,39 @@ pub struct EtatFaux {
     pub amis: Vec<AmiFaux>,
     pub enveloppes: Vec<EnveloppeFausse>,
     pub version: u64,
+
+    /// AJOUTS DE LA TÂCHE 8 (hors brief de la tâche 4, extension autorisée
+    /// par le coordinateur — voir le commentaire de `DemandeFausse` et
+    /// `AppareilFaux` ci-dessus) : `demandes` et `appareils` étaient figés
+    /// en dur à `[]` par la tâche 4. Sans eux, `accepter_ami` n'a aucun
+    /// identifiant d'amitié à consommer et `enregistrer_appareil` ne peut
+    /// pas être vérifié bout en bout par `synchroniser`.
+    pub demandes: Vec<DemandeFausse>,
+    pub appareils: Vec<AppareilFaux>,
+
+    /// `POST /api/sky/devices` — prochain identifiant rendu par un
+    /// enregistrement réussi. Incrémenté à chaque succès (premier
+    /// enregistrement -> 1), jamais réutilisé.
+    pub prochain_id_appareil: i64,
+
+    /// `POST /api/sky/friends` — couple (code, identifiant d'amitié résultant)
+    /// accepté. `None` par défaut : AUCUN code n'est valide tant qu'un test
+    /// ne l'a pas explicitement enregistré — même principe que
+    /// `code_natif_valide`.
+    pub code_ami_valide: Option<(String, i64)>,
+
+    /// Fait répondre `409 {"error":"Demande déjà existante"}` à `POST
+    /// /api/sky/friends` pour le code enregistré dans `code_ami_valide`, au
+    /// lieu du succès normal — simule une demande déjà en cours.
+    pub ami_deja_demande: bool,
+
+    /// `POST /api/sky/friends/{id}/accept` — identifiant d'amitié qui peut
+    /// être accepté avec succès. `None`, ou un identifiant différent de
+    /// celui demandé, produit `404 {"error":"Amitié introuvable"}` — même
+    /// refus indistinct que le site pour les trois causes qu'il recouvre
+    /// (amitié inexistante, amitié d'autrui, amitié qu'on a soi-même
+    /// demandée).
+    pub amitie_acceptable: Option<i64>,
 
     /// Jetons que le double reconnaît sur une route authentifiée (`GET
     /// /api/sky/sync`, `POST /api/sky/envelopes`) — PAS une vérification
@@ -363,6 +430,13 @@ fn repondre(mut requete: tiny_http::Request, etat: &Arc<Mutex<EtatFaux>>) {
         (Method::Post, "/api/auth/native") => gerer_auth_native(etat, &corps_brut),
         (Method::Post, "/api/auth/refresh") => gerer_refresh(etat, &corps_brut),
         (Method::Post, "/api/sky/envelopes") => gerer_depot(etat, jeton.as_deref(), &corps_brut),
+        (Method::Post, "/api/sky/devices") => gerer_devices(etat, jeton.as_deref(), &corps_brut),
+        (Method::Post, "/api/sky/friends") => gerer_friends(etat, jeton.as_deref(), &corps_brut),
+        (Method::Post, chemin_accept)
+            if chemin_accept.starts_with("/api/sky/friends/") && chemin_accept.ends_with("/accept") =>
+        {
+            gerer_accepter_ami(etat, jeton.as_deref(), chemin_accept)
+        }
         _ => (404u16, json!({ "error": "route inconnue du double" }).to_string()),
     };
 
@@ -469,7 +543,14 @@ fn gerer_sync(
         return refus;
     }
 
-    if version_connue == Some(e.version) {
+    // AJOUT DE LA TÂCHE 8 : une enveloppe en attente COURT-CIRCUITE
+    // `inchange`, même règle que `construireEtat` côté site
+    // (`enveloppe_en_attente || version !== versionConnue`). Sans ce
+    // court-circuit, une enveloppe déposée entre deux synchronisations de
+    // MÊME version (le cas courant — déposer une enveloppe ne touche que
+    // `enveloppes`, jamais `version`, tout comme sur le vrai serveur) ne
+    // voyagerait plus jamais : la négociation ne se terminerait jamais.
+    if version_connue == Some(e.version) && e.enveloppes.is_empty() {
         return (200, json!({ "inchange": true }).to_string());
     }
 
@@ -477,15 +558,126 @@ fn gerer_sync(
         "version": e.version,
         "code": CODE_FAUX,
         "amis": e.amis,
-        // Pas encore pilotables par EtatFaux (hors scope de cette tâche) —
-        // mais TOUJOURS présents, tableaux vides plutôt qu'absents, même
-        // règle que `amis[].appareils`.
-        "demandes": Vec::<Value>::new(),
+        "demandes": e.demandes,
         "listes": Vec::<Value>::new(),
-        "appareils": Vec::<Value>::new(),
+        "appareils": e.appareils,
         "enveloppes": e.enveloppes,
     });
+
+    // Le vrai serveur EFFACE les enveloppes en les livrant (`releverPour`,
+    // `enveloppes.ts` côté site) — sans cette ligne, une même enveloppe
+    // réapparaîtrait indéfiniment à chaque synchronisation suivante au
+    // lieu de n'être vue qu'une fois. `corps` est déjà construit (donc
+    // déjà une copie possédée des enveloppes actuelles) avant que ce
+    // `clear` ne mute l'état partagé.
+    e.enveloppes.clear();
+
     (200, corps.to_string())
+}
+
+/// `POST /api/sky/devices` — valide `publicKey`/`nom`/`plateforme` comme le
+/// vrai (`clePubliqueValide`, longueur de `nom`, liste blanche de
+/// plateformes), incrémente `prochain_id_appareil` à chaque succès. AJOUT
+/// DE LA TÂCHE 8 (hors brief de la tâche 4).
+fn gerer_devices(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    if let Some(refus) = autoriser_appel(&mut e, jeton) {
+        return refus;
+    }
+
+    let valeur: Value = match serde_json::from_str(corps_brut) {
+        Ok(v) => v,
+        Err(_) => return (400, json!({ "error": "Corps JSON invalide" }).to_string()),
+    };
+    let public_key = valeur.get("publicKey").and_then(Value::as_str);
+    let nom = valeur.get("nom").and_then(Value::as_str);
+    let plateforme = valeur.get("plateforme").and_then(Value::as_str);
+
+    let Some(_public_key) = public_key.filter(|v| cle_publique_valide(v)) else {
+        return (400, json!({ "error": "publicKey invalide : attendu 32 octets en base64" }).to_string());
+    };
+    let Some(nom) = nom.filter(|v| !v.is_empty() && v.chars().count() <= 64) else {
+        return (400, json!({ "error": "nom invalide : attendu 1 a 64 caracteres" }).to_string());
+    };
+    const PLATEFORMES_VALIDES: [&str; 3] = ["windows", "macos", "linux"];
+    let Some(plateforme) = plateforme.filter(|v| PLATEFORMES_VALIDES.contains(v)) else {
+        return (
+            400,
+            json!({ "error": format!("plateforme invalide : attendu {}", PLATEFORMES_VALIDES.join(", ")) })
+                .to_string(),
+        );
+    };
+    e.prochain_id_appareil += 1;
+    let appareil = AppareilFaux {
+        id: e.prochain_id_appareil,
+        nom: nom.to_string(),
+        plateforme: plateforme.to_string(),
+        created_at: "2026-01-01T00:00:00.000Z".to_string(),
+        last_seen_at: None,
+        revoked_at: None,
+    };
+    let corps = serde_json::to_string(&appareil).expect("AppareilFaux se sérialise toujours");
+    (201, corps)
+}
+
+/// Décode `valeur` en base64 standard et vérifie qu'il s'agit de 32 octets
+/// en forme canonique — même règle que `clePubliqueValide` côté site
+/// (`src/app/api/sky/devices/route.ts`) : ce double ne doit pas être plus
+/// permissif que le vrai serveur.
+fn cle_publique_valide(valeur: &str) -> bool {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    match STANDARD.decode(valeur) {
+        Ok(octets) => octets.len() == 32 && STANDARD.encode(&octets) == valeur,
+        Err(_) => false,
+    }
+}
+
+/// `POST /api/sky/friends` — refuse par défaut (`404`), sauf correspondance
+/// exacte avec `code_ami_valide`, auquel cas `ami_deja_demande` bascule
+/// entre succès (`201`) et conflit (`409`). AJOUT DE LA TÂCHE 8.
+fn gerer_friends(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    if let Some(refus) = autoriser_appel(&mut e, jeton) {
+        return refus;
+    }
+
+    let valeur: Value = match serde_json::from_str(corps_brut) {
+        Ok(v) => v,
+        Err(_) => return (400, json!({ "error": "Corps JSON invalide" }).to_string()),
+    };
+    let Some(code) = valeur.get("code").and_then(Value::as_str) else {
+        return (400, json!({ "error": "code invalide : attendu une chaîne" }).to_string());
+    };
+
+    match &e.code_ami_valide {
+        Some((c, id)) if c == code => {
+            if e.ami_deja_demande {
+                (409, json!({ "error": "Demande déjà existante" }).to_string())
+            } else {
+                (201, json!({ "id": id }).to_string())
+            }
+        }
+        _ => (404, json!({ "error": "Code ami introuvable" }).to_string()),
+    }
+}
+
+/// `POST /api/sky/friends/{id}/accept` — l'identifiant voyage dans le
+/// chemin, la route ne lit aucun corps (même contrat que le site). AJOUT DE
+/// LA TÂCHE 8.
+fn gerer_accepter_ami(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, chemin: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    if let Some(refus) = autoriser_appel(&mut e, jeton) {
+        return refus;
+    }
+
+    let id: Option<i64> =
+        chemin.strip_prefix("/api/sky/friends/").and_then(|s| s.strip_suffix("/accept")).and_then(|s| s.parse().ok());
+
+    match (id, e.amitie_acceptable) {
+        (Some(id), Some(acceptable)) if id == acceptable => (200, json!({ "ok": true }).to_string()),
+        _ => (404, json!({ "error": "Amitié introuvable" }).to_string()),
+    }
 }
 
 /// `POST /api/auth/native` — refuse toujours SAUF si `code`/`secret`
@@ -637,6 +829,7 @@ fn gerer_depot(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     // « Qu'est-ce qui, précisément, ferait échouer ce test ? » Réponse pour
     // chacun des tests ci-dessous en commentaire, avec la neutralisation
@@ -981,5 +1174,147 @@ mod tests {
         assert_eq!(reponse.status(), 404);
         assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Depot refuse"}"#);
         assert_eq!(s.etat_mut().depots_recus, 0);
+    }
+
+    // --- AJOUTS DE LA TÂCHE 8 (extension du double, brief le permet
+    // explicitement — voir le commentaire de `EtatFaux`) -------------------
+
+    #[test]
+    fn sync_court_circuite_inchange_quand_une_enveloppe_attend() {
+        // LE PIÈGE SIGNALÉ PAR LE CAHIER DES CHARGES DE LA TÂCHE 8 : une
+        // enveloppe déposée entre deux appels à VERSION INCHANGÉE doit
+        // continuer à voyager. Échoue si `gerer_sync` répondait `inchange`
+        // dès que `version_connue == e.version`, sans regarder si une
+        // enveloppe attend encore.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        s.etat_mut().version = 5;
+        s.etat_mut().enveloppes.push(EnveloppeFausse {
+            id: "1".to_string(),
+            expediteur_device_id: 1,
+            destinataire_device_id: 2,
+            charge: "YQ==".to_string(),
+        });
+
+        let recu: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=5", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+
+        assert_ne!(recu, serde_json::json!({ "inchange": true }));
+        assert_eq!(recu["enveloppes"][0]["id"], "1");
+    }
+
+    #[test]
+    fn sync_efface_les_enveloppes_apres_livraison() {
+        // Échoue si `gerer_sync` ne vidait pas `EtatFaux::enveloppes` après
+        // les avoir servies : un second appel, à la MÊME version, verrait
+        // alors encore l'enveloppe déjà livrée — soit en la retransmettant
+        // (si le court-circuit ci-dessus manquait aussi), soit en
+        // continuant à empêcher `inchange` pour toujours.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        s.etat_mut().version = 5;
+        s.etat_mut().enveloppes.push(EnveloppeFausse {
+            id: "1".to_string(),
+            expediteur_device_id: 1,
+            destinataire_device_id: 2,
+            charge: "YQ==".to_string(),
+        });
+
+        let premier: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=5", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(premier["enveloppes"][0]["id"], "1");
+
+        let second: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=5", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(second, serde_json::json!({ "inchange": true }));
+    }
+
+    #[test]
+    fn devices_refuse_une_cle_publique_tronquee() {
+        // Échoue si le double acceptait une clé publique qui ne décode pas
+        // vers exactement 32 octets sous forme canonique — un double plus
+        // permissif que le vrai serveur (`clePubliqueValide`) donnerait une
+        // confiance imméritée aux tests des tâches suivantes.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        let cle_tronquee = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
+
+        let reponse = ureq::post(&format!("{}/api/sky/devices", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(&format!(
+                r#"{{"publicKey":"{cle_tronquee}","nom":"Mon PC","plateforme":"windows"}}"#
+            ))
+            .unwrap_err();
+        let reponse = reponse.into_response().unwrap();
+        assert_eq!(reponse.status(), 400);
+    }
+
+    #[test]
+    fn devices_reussit_et_incremente_lidentifiant() {
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        let cle = base64::engine::general_purpose::STANDARD.encode([2u8; 32]);
+
+        let recu: serde_json::Value = ureq::post(&format!("{}/api/sky/devices", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(&format!(r#"{{"publicKey":"{cle}","nom":"Mon PC","plateforme":"windows"}}"#))
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(recu["id"], 1);
+    }
+
+    #[test]
+    fn friends_refuse_un_code_inconnu_et_reussit_avec_le_code_enregistre() {
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+
+        let refuse = ureq::post(&format!("{}/api/sky/friends", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(r#"{"code":"INCONNU1"}"#)
+            .unwrap_err();
+        assert_eq!(refuse.into_response().unwrap().status(), 404);
+
+        s.etat_mut().code_ami_valide = Some(("AMIVALID".to_string(), 42));
+        let recu: serde_json::Value = ureq::post(&format!("{}/api/sky/friends", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(r#"{"code":"AMIVALID"}"#)
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(recu["id"], 42);
+    }
+
+    #[test]
+    fn friends_accept_reussit_pour_lidentifiant_pilote_et_refuse_sinon() {
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        s.etat_mut().amitie_acceptable = Some(7);
+
+        let refuse = ureq::post(&format!("{}/api/sky/friends/8/accept", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string("{}")
+            .unwrap_err();
+        assert_eq!(refuse.into_response().unwrap().status(), 404);
+
+        let recu: serde_json::Value = ureq::post(&format!("{}/api/sky/friends/7/accept", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string("{}")
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(recu["ok"], true);
     }
 }

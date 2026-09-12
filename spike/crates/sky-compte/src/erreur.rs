@@ -52,7 +52,7 @@ impl ErreurCompte {
 /// échoté dans un corps de réponse — mais si un intermédiaire (proxy, page
 /// d'erreur générique, etc.) le faisait un jour, ce filtre l'empêche d'atterrir
 /// tel quel dans nos messages d'erreur et donc dans un rapport de bug.
-fn corps_sans_en_tete(corps: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn corps_sans_en_tete(corps: &str) -> std::borrow::Cow<'_, str> {
     match corps.find("Bearer ") {
         None => std::borrow::Cow::Borrowed(corps),
         Some(debut) => {

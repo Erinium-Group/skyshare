@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::erreur::ErreurCompte;
+use crate::erreur::{corps_sans_en_tete, ErreurCompte};
 
 /// Serveur de production, utilisé quand `SKY_API_URL` est absente.
 const BASE_URL_PAR_DEFAUT: &str = "https://eriniumgroup.vercel.app";
@@ -35,6 +35,29 @@ impl Config {
     pub fn vers(url: &str) -> Config {
         Config { base_url: url.to_string() }
     }
+}
+
+/// Issue d'une requête dont certains statuts, en plus d'un 2xx et de 401,
+/// sont des résultats métier attendus (404, 409, ...) plutôt que des
+/// erreurs de protocole imprévues.
+///
+/// Ajoutée pour la tâche 8 (`sky_compte::annuaire`) — `ajouter_ami` et
+/// `accepter_ami` doivent distinguer un 404 (« code introuvable » /
+/// « amitié introuvable ») d'un 409 (« demande déjà existante »), ce
+/// qu'aucune des deux méthodes existantes ne permettait : elles écrasent
+/// tout statut hors 401/2xx dans `ErreurCompte::Protocole(String)`, et en
+/// extraire le code depuis la chaîne de caractères pour les redistinguer
+/// est exactement ce que ce type évite. Réutilisée telle quelle par la
+/// tâche 9.
+pub enum ReponseHttp<T> {
+    /// Statut 2xx, corps décodé en `T`.
+    Succes(T),
+    /// Tout statut autre que 2xx et 401 : le code d'état et le corps de la
+    /// réponse, rédigé par `corps_sans_en_tete` (jamais de jeton, par la
+    /// même garantie que `ErreurCompte::Protocole`). C'est à l'appelant de
+    /// faire correspondre `statut` à un cas métier connu ; un statut qu'il
+    /// ne reconnaît pas reste pour lui une erreur à traiter comme telle.
+    Refus { statut: u16, corps: String },
 }
 
 /// Client HTTP synchrone vers l'API du site — pas de runtime asynchrone,
@@ -95,6 +118,42 @@ impl ClientHttp {
             Err(ureq::Error::Status(statut, rep)) => {
                 let corps = rep.into_string().unwrap_or_default();
                 Err(ErreurCompte::depuis_statut(statut, &corps))
+            }
+            Err(ureq::Error::Transport(transport)) => Err(ErreurCompte::Reseau(transport.to_string())),
+        }
+    }
+
+    /// Requête `POST` qui rend les refus métier attendus (404, 409, ...)
+    /// comme une valeur plutôt que comme une erreur de protocole — voir
+    /// `ReponseHttp`. Même garanties que `post_json` pour `jeton` et pour
+    /// l'absence de jeton dans un message d'erreur.
+    pub fn post_json_avec_refus<B: Serialize, T: DeserializeOwned>(
+        &self,
+        chemin: &str,
+        corps: &B,
+        jeton: Option<&str>,
+    ) -> Result<ReponseHttp<T>, ErreurCompte> {
+        let requete = Self::avec_jeton(self.agent.post(&self.url(chemin)), jeton);
+        Self::traiter_reponse_avec_refus(requete.send_json(corps))
+    }
+
+    /// Comme `traiter_reponse`, mais un statut autre que 2xx/401 devient
+    /// `Ok(ReponseHttp::Refus { .. })` plutôt que `Err(ErreurCompte::Protocole(_))`.
+    /// 401 reste `Err(ErreurCompte::Refuse)` — c'est ce qui permet à
+    /// `avec_jeton_valide` de continuer à renouveler dessus sans rien savoir
+    /// de `ReponseHttp`.
+    fn traiter_reponse_avec_refus<T: DeserializeOwned>(
+        reponse: Result<ureq::Response, ureq::Error>,
+    ) -> Result<ReponseHttp<T>, ErreurCompte> {
+        match reponse {
+            Ok(rep) => rep
+                .into_json::<T>()
+                .map(ReponseHttp::Succes)
+                .map_err(|e| ErreurCompte::Protocole(e.to_string())),
+            Err(ureq::Error::Status(401, _)) => Err(ErreurCompte::Refuse),
+            Err(ureq::Error::Status(statut, rep)) => {
+                let corps = rep.into_string().unwrap_or_default();
+                Ok(ReponseHttp::Refus { statut, corps: corps_sans_en_tete(&corps).into_owned() })
             }
             Err(ureq::Error::Transport(transport)) => Err(ErreurCompte::Reseau(transport.to_string())),
         }
