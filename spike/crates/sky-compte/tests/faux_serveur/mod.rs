@@ -161,6 +161,24 @@ pub struct EtatFaux {
     /// cryptographiquement valide ».
     pub jetons_acceptes: HashSet<String>,
 
+    /// Jetons de RENOUVELLEMENT que `POST /api/auth/refresh` reconnaît —
+    /// même principe que `jetons_acceptes`, mais un espace de noms séparé :
+    /// un jeton d'accès et un jeton de renouvellement ne doivent jamais
+    /// être interchangeables (même distinction que le site, où
+    /// `verifyJWT`/`verifyRefreshToken` sont deux vérifications séparées,
+    /// `src/lib/auth/jwt.ts`). Peuplé par un `POST /api/auth/native`
+    /// réussi, ou directement par un test via
+    /// `FauxServeur::jeton_de_renouvellement_de_test()`.
+    ///
+    /// RONDE DE CORRECTION 2 : avant cette ronde, `POST /api/auth/refresh`
+    /// ne lisait jamais son corps — n'importe quelle chaîne réussissait.
+    /// Ce champ ferme cet angle mort SANS aller jusqu'à la vérification de
+    /// signature JWT (exclue explicitement par le coordinateur) : la
+    /// propriété fermée est « le jeton de renouvellement présenté est un
+    /// jeton que CE double a lui-même délivré comme jeton de
+    /// renouvellement », pas « il est cryptographiquement valide ».
+    pub jetons_de_renouvellement_valides: HashSet<String>,
+
     /// Couple (code, secret) que `POST /api/auth/native` accepte —
     /// `None` par défaut : AUCUN code n'est valide tant qu'un test ne l'a
     /// pas explicitement enregistré ici, fidèle au test prescrit par le
@@ -203,6 +221,26 @@ pub struct EtatFaux {
     /// refusés confondus — observable pour prouver qu'un client renouvelle
     /// une fois et retente, plutôt que de boucler indéfiniment.
     pub appels_de_renouvellement: u64,
+
+    /// Fait échouer TOUT dépôt (`POST /api/sky/envelopes`) par ailleurs
+    /// bien formé et authentifié, avec le refus UNIFORME et INDISTINCT
+    /// `404 {"error":"Depot refuse"}` — la MÊME forme que le vrai serveur
+    /// rend pour `pas_ami`, `appareil_inconnu` ET `pas_mon_appareil` (voir
+    /// `deposer`, `src/lib/sky/enveloppes.ts` du site) : distinguer ces
+    /// cas apprendrait à l'appelant qu'un appareil donné existe,
+    /// exactement ce que la garde réelle referme.
+    ///
+    /// RONDE DE CORRECTION 2 : avant cette ronde, `gerer_depot` acceptait
+    /// INCONDITIONNELLEMENT tout dépôt bien formé et authentifié — aucun
+    /// chemin vers ce 404, alors même que la forme était déjà relevée à
+    /// l'étape 1 du rapport. Ce double ne réplique pas le graphe d'amitié
+    /// réel (`EtatFaux` ne modélise pas « mes propres appareils » côté
+    /// expéditeur) : ce champ expose un interrupteur pilotable, dans le
+    /// même esprit que `refuser_tout`/`refuser_echange`, pour qu'un test
+    /// simule « ce dépôt est refusé » sans avoir à modéliser toute la
+    /// logique métier — le double imite un contrat, il ne réimplémente pas
+    /// le serveur.
+    pub refuser_depot: bool,
 
     /// Nombre de dépôts d'enveloppe ACCEPTÉS par `POST /api/sky/envelopes`
     /// (forme valide, authentification passée) — observable pour les
@@ -272,6 +310,17 @@ impl FauxServeur {
         self.etat_mut().jetons_acceptes.insert(JETON.to_string());
         JETON.to_string()
     }
+
+    /// Jeton de RENOUVELLEMENT pré-approuvé — symétrique de
+    /// `jeton_de_test()`, mais pour `POST /api/auth/refresh` plutôt que
+    /// pour les routes authentifiées : l'insère dans
+    /// `EtatFaux::jetons_de_renouvellement_valides` s'il n'y est pas déjà,
+    /// puis le rend.
+    pub fn jeton_de_renouvellement_de_test(&self) -> String {
+        const JETON: &str = "jeton-de-renouvellement-de-test";
+        self.etat_mut().jetons_de_renouvellement_valides.insert(JETON.to_string());
+        JETON.to_string()
+    }
 }
 
 impl Drop for FauxServeur {
@@ -312,7 +361,7 @@ fn repondre(mut requete: tiny_http::Request, etat: &Arc<Mutex<EtatFaux>>) {
     let (statut, corps_reponse) = match (&methode, chemin.as_str()) {
         (Method::Get, "/api/sky/sync") => gerer_sync(etat, jeton.as_deref(), version_connue),
         (Method::Post, "/api/auth/native") => gerer_auth_native(etat, &corps_brut),
-        (Method::Post, "/api/auth/refresh") => gerer_refresh(etat),
+        (Method::Post, "/api/auth/refresh") => gerer_refresh(etat, &corps_brut),
         (Method::Post, "/api/sky/envelopes") => gerer_depot(etat, jeton.as_deref(), &corps_brut),
         _ => (404u16, json!({ "error": "route inconnue du double" }).to_string()),
     };
@@ -443,16 +492,37 @@ fn gerer_sync(
 /// correspondent EXACTEMENT au couple enregistré dans
 /// `EtatFaux::code_natif_valide` (voir son commentaire). Un succès émet un
 /// jeton d'accès et un jeton de renouvellement, tous deux fabriqués (pas
-/// de JWT réel), et enregistre le jeton d'accès dans
-/// `EtatFaux::jetons_acceptes` — c'est ce qui permet à ce jeton de servir
-/// ensuite sur `GET /api/sky/sync`/`POST /api/sky/envelopes`.
+/// de JWT réel), et enregistre chacun dans l'ensemble reconnu qui lui
+/// correspond (`jetons_acceptes` / `jetons_de_renouvellement_valides`) —
+/// c'est ce qui permet au premier de servir sur `GET /api/sky/sync`/`POST
+/// /api/sky/envelopes`, et au second sur `POST /api/auth/refresh`.
+///
+/// ORDRE DES VÉRIFICATIONS — forme AVANT refus, comme le vrai
+/// (`api/auth/native/route.ts` : `typeof code !== "string" || typeof
+/// secret !== "string"` sort en 400 avant même d'appeler `echangerCode`) :
+///
+///  1. `code`/`secret` doivent être des chaînes présentes dans le corps →
+///     sinon `400 {"error":"Requete invalide"}`, MÊME SI
+///     `refuser_echange`/`refuser_tout` sont actifs — un corps malformé
+///     n'atteint jamais la logique de refus, exactement comme le site
+///     n'appelle jamais `echangerCode` sur un corps mal typé.
+///  2. `refuser_echange`/`refuser_tout`, ou absence de correspondance avec
+///     `code_natif_valide` → `401 {"error":"Code refuse"}`, forme
+///     confirmée par le test prescrit par le brief
+///     (`le_double_refuse_sans_distinguer`), qui ne configure jamais
+///     `code_natif_valide` et doit continuer à voir ce refus.
 ///
 /// Forme de succès `{ acces, refresh }` confirmée par
-/// `api/auth/native/route.ts`. Forme de refus `401 {"error":"Code
-/// refuse"}` confirmée par le test prescrit par le brief
-/// (`le_double_refuse_sans_distinguer`), qui ne configure jamais
-/// `code_natif_valide` et doit continuer à voir ce refus.
+/// `api/auth/native/route.ts`.
 fn gerer_auth_native(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, String) {
+    let valeur: Option<Value> = serde_json::from_str(corps_brut).ok();
+    let code = valeur.as_ref().and_then(|v| v.get("code")).and_then(Value::as_str);
+    let secret = valeur.as_ref().and_then(|v| v.get("secret")).and_then(Value::as_str);
+
+    let (Some(code), Some(secret)) = (code, secret) else {
+        return (400, json!({ "error": "Requete invalide" }).to_string());
+    };
+
     let mut e = etat.lock().expect("mutex etat faux empoisonne");
     const REFUS: &str = r#"{"error":"Code refuse"}"#;
 
@@ -460,13 +530,9 @@ fn gerer_auth_native(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, Str
         return (401, REFUS.to_string());
     }
 
-    let valeur: Option<Value> = serde_json::from_str(corps_brut).ok();
-    let code = valeur.as_ref().and_then(|v| v.get("code")).and_then(Value::as_str);
-    let secret = valeur.as_ref().and_then(|v| v.get("secret")).and_then(Value::as_str);
-
-    let accepte = match (&e.code_natif_valide, code, secret) {
-        (Some((c, s)), Some(code), Some(secret)) => c == code && s == secret,
-        _ => false,
+    let accepte = match &e.code_natif_valide {
+        Some((c, s)) => c == code && s == secret,
+        None => false,
     };
     if !accepte {
         return (401, REFUS.to_string());
@@ -479,6 +545,7 @@ fn gerer_auth_native(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, Str
     let acces = "jeton-acces-natif".to_string();
     let refresh = "jeton-refresh-natif".to_string();
     e.jetons_acceptes.insert(acces.clone());
+    e.jetons_de_renouvellement_valides.insert(refresh.clone());
     (200, json!({ "acces": acces, "refresh": refresh }).to_string())
 }
 
@@ -490,19 +557,45 @@ fn gerer_auth_native(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, Str
 /// `jetons_acceptes` au succès, pour qu'un client puisse effectivement
 /// s'en servir sur l'appel suivant — sans quoi « renouveler » ne
 /// prouverait rien.
-fn gerer_refresh(etat: &Arc<Mutex<EtatFaux>>) -> (u16, String) {
+///
+/// RONDE DE CORRECTION 2 — le champ `refresh` du corps est maintenant
+/// EXIGÉ et VÉRIFIÉ contre `EtatFaux::jetons_de_renouvellement_valides` :
+/// avant cette ronde, n'importe quelle chaîne (ou son absence) réussissait
+/// tant que `refuser_tout` n'était pas actif. Toujours PAS de vérification
+/// de signature (exclue explicitement par le coordinateur) — seulement
+/// « ce double a-t-il lui-même délivré ce jeton de renouvellement ».
+/// `appels_de_renouvellement` compte TOUT appel reçu, forme invalide
+/// comprise : c'est un compteur d'appels, pas de succès.
+fn gerer_refresh(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, String) {
     let mut e = etat.lock().expect("mutex etat faux empoisonne");
     e.appels_de_renouvellement += 1;
-    if e.refuser_tout {
+
+    let valeur: Option<Value> = serde_json::from_str(corps_brut).ok();
+    let refresh = valeur.as_ref().and_then(|v| v.get("refresh")).and_then(Value::as_str);
+
+    let Some(refresh) = refresh else {
+        return (400, json!({ "error": "Requete invalide" }).to_string());
+    };
+
+    if e.refuser_tout || !e.jetons_de_renouvellement_valides.contains(refresh) {
         return (401, json!({ "error": "Renouvellement refuse" }).to_string());
     }
+
     e.jetons_acceptes.insert("jeton-neuf".to_string());
     (200, json!({ "acces": "jeton-neuf" }).to_string())
 }
 
 /// `POST /api/sky/envelopes` — succès `204` sans corps (forme confirmée par
 /// `envelopes/route.ts`), refus de forme `400`, refus authentifié partagé
-/// avec `GET /api/sky/sync` via `autoriser_appel`.
+/// avec `GET /api/sky/sync` via `autoriser_appel`, refus sémantique
+/// UNIFORME `404` piloté par `EtatFaux::refuser_depot` (voir son
+/// commentaire — RONDE DE CORRECTION 2).
+///
+/// ORDRE, comme le vrai (`deposer`, `enveloppes.ts`) : authentification,
+/// PUIS forme du corps, PUIS refus sémantique — un corps malformé rend
+/// toujours 400 avant que `refuser_depot` soit même consulté, exactement
+/// comme le site calcule `octetsBase64Estimes`/valide les types avant
+/// d'appeler `deposer`.
 fn gerer_depot(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &str) -> (u16, String) {
     let mut e = etat.lock().expect("mutex etat faux empoisonne");
     if let Some(refus) = autoriser_appel(&mut e, jeton) {
@@ -521,6 +614,13 @@ fn gerer_depot(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &st
     else {
         return (400, json!({ "error": "Corps invalide" }).to_string());
     };
+
+    if e.refuser_depot {
+        // Refus UNIFORME et INDISTINCT — jamais de détail sur LEQUEL de
+        // pas_ami/appareil_inconnu/pas_mon_appareil s'appliquerait, même
+        // principe que POST /api/auth/native pour "Code refuse".
+        return (404, json!({ "error": "Depot refuse" }).to_string());
+    }
 
     e.depots_recus += 1;
     let id = (e.enveloppes.len() + 1).to_string();
@@ -661,12 +761,16 @@ mod tests {
     fn refuser_tout_refuse_aussi_le_renouvellement() {
         // Échoue si `refuser_tout` laissait passer `POST /api/auth/refresh`
         // — exactement la distinction avec `refuser_le_premier_appel`, qui
-        // elle épargne le renouvellement.
+        // elle épargne le renouvellement. Jeton de renouvellement RECONNU
+        // attaché : le refus testé ici doit venir de `refuser_tout`, jamais
+        // d'un jeton de renouvellement inconnu (voir
+        // `refresh_refuse_un_jeton_de_renouvellement_inconnu`).
         let s = FauxServeur::demarrer();
+        let jeton_renouvellement = s.jeton_de_renouvellement_de_test();
         s.etat_mut().refuser_tout = true;
 
         let reponse = ureq::post(&format!("{}/api/auth/refresh", s.url()))
-            .send_string(r#"{"refresh":"peu importe"}"#)
+            .send_string(&format!(r#"{{"refresh":"{jeton_renouvellement}"}}"#))
             .unwrap_err();
         assert_eq!(reponse.into_response().unwrap().status(), 401);
         assert_eq!(s.etat_mut().appels_de_renouvellement, 1);
@@ -677,13 +781,44 @@ mod tests {
         // Échoue si la valeur rendue n'est pas exactement "jeton-neuf" (ce
         // que la tâche 7 attend), ou si le compteur ne progresse pas.
         let s = FauxServeur::demarrer();
+        let jeton_renouvellement = s.jeton_de_renouvellement_de_test();
         let recu: serde_json::Value = ureq::post(&format!("{}/api/auth/refresh", s.url()))
-            .send_string(r#"{"refresh":"peu importe"}"#)
+            .send_string(&format!(r#"{{"refresh":"{jeton_renouvellement}"}}"#))
             .unwrap()
             .into_json()
             .unwrap();
         assert_eq!(recu["acces"], "jeton-neuf");
         assert_eq!(s.etat_mut().appels_de_renouvellement, 1);
+    }
+
+    #[test]
+    fn refresh_refuse_un_jeton_de_renouvellement_inconnu() {
+        // Échoue si un jeton de renouvellement quelconque, jamais délivré
+        // par ce double, était accepté — c'est l'angle mort signalé par le
+        // relecteur : avant cette ronde, N'IMPORTE QUELLE chaîne réussissait
+        // ici tant que `refuser_tout` n'était pas actif.
+        let s = FauxServeur::demarrer();
+        let reponse = ureq::post(&format!("{}/api/auth/refresh", s.url()))
+            .send_string(r#"{"refresh":"peu importe"}"#)
+            .unwrap_err();
+        let reponse = reponse.into_response().unwrap();
+        assert_eq!(reponse.status(), 401);
+        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Renouvellement refuse"}"#);
+    }
+
+    #[test]
+    fn refresh_400_sur_champ_manquant() {
+        // Échoue si un corps sans `refresh` (ou dont `refresh` n'est pas
+        // une chaîne) produisait autre chose qu'un 400 — même ordre que le
+        // site : la forme est vérifiée AVANT toute décision de refus.
+        let s = FauxServeur::demarrer();
+        for corps in [r#"{}"#, r#"{"refresh":42}"#, r#"pas du json"#] {
+            let reponse =
+                ureq::post(&format!("{}/api/auth/refresh", s.url())).send_string(corps).unwrap_err();
+            let reponse = reponse.into_response().unwrap();
+            assert_eq!(reponse.status(), 400, "corps testé : {corps}");
+            assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Requete invalide"}"#);
+        }
     }
 
     #[test]
@@ -798,5 +933,53 @@ mod tests {
         };
         assert_eq!(reponse.status(), 401);
         assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Code refuse"}"#);
+    }
+
+    #[test]
+    fn auth_native_400_sur_corps_malforme() {
+        // Échoue si un corps où `code`/`secret` sont absents ou ne sont
+        // pas des chaînes produisait un 401 plutôt qu'un 400 — le vrai
+        // serveur distingue les deux (`typeof code !== "string" ...` sort
+        // en 400 AVANT tout appel à `echangerCode`), ce double doit faire
+        // pareil. Même avec `code_natif_valide` enregistré, ces corps ne
+        // doivent jamais atteindre la comparaison : sinon un attaquant qui
+        // envoie un `code` numérique apprendrait quelque chose du timing.
+        let s = FauxServeur::demarrer();
+        s.etat_mut().code_natif_valide =
+            Some(("CODEVALIDE".to_string(), "secret-correct".to_string()));
+
+        for corps in [
+            r#"{"code":42,"secret":"secret-correct"}"#,
+            r#"{"code":"CODEVALIDE","secret":42}"#,
+            r#"{"code":"CODEVALIDE"}"#,
+            r#"{}"#,
+            r#"pas du json"#,
+        ] {
+            let reponse =
+                ureq::post(&format!("{}/api/auth/native", s.url())).send_string(corps).unwrap_err();
+            let reponse = reponse.into_response().unwrap();
+            assert_eq!(reponse.status(), 400, "corps testé : {corps}");
+            assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Requete invalide"}"#);
+        }
+    }
+
+    #[test]
+    fn depot_refuse_de_maniere_uniforme_quand_pilote() {
+        // Échoue si `refuser_depot` ne produisait pas le refus UNIFORME
+        // `404 {"error":"Depot refuse"}`, ou si le dépôt refusé était quand
+        // même compté dans `depots_recus` — c'était le trou signalé par le
+        // relecteur : avant cette ronde, aucun chemin ne menait à ce 404.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        s.etat_mut().refuser_depot = true;
+
+        let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(r#"{"expediteur_device_id":1,"destinataire_device_id":2,"charge":"YQ=="}"#)
+            .unwrap_err();
+        let reponse = reponse.into_response().unwrap();
+        assert_eq!(reponse.status(), 404);
+        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Depot refuse"}"#);
+        assert_eq!(s.etat_mut().depots_recus, 0);
     }
 }
