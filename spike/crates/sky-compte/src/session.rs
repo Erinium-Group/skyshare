@@ -97,6 +97,75 @@ pub fn echanger_le_code(config: &Config, code: &str, secret: &str) -> Result<Jet
     Ok(Jetons { session: reponse.acces, renouvellement: reponse.refresh })
 }
 
+#[derive(Serialize)]
+struct CorpsRefresh<'a> {
+    refresh: &'a str,
+}
+
+/// `POST /api/auth/refresh` rend un seul champ — jamais de nouveau jeton de
+/// renouvellement (voir `gerer_refresh` côté double, et
+/// `api/auth/refresh/route.ts` côté site) : un renouvellement ne fait que
+/// remplacer le jeton de session, le jeton de renouvellement présenté reste
+/// valable pour la prochaine fois.
+#[derive(Deserialize)]
+struct ReponseRefresh {
+    acces: String,
+}
+
+/// Renouvelle le jeton de session à partir du jeton de renouvellement rangé dans
+/// `coffre`, range le résultat dans `coffre`, le rend.
+///
+/// Ce point d'entrée a échoué pour 100 % des tentatives réelles pendant tout le
+/// jalon C1, faute d'appelant — voir le brief de cette tâche. `jeton_valide`,
+/// plus bas, en est le premier appelant réel.
+///
+/// Si `coffre` ne contient aucun jeton (jamais connecté), rend `ErreurCompte::Refuse` :
+/// du point de vue de l'appelant, l'absence de session à renouveler appelle la même
+/// réaction qu'un renouvellement refusé par le serveur — se reconnecter via `connecter`.
+pub fn renouveler(config: &Config, coffre: &Coffre) -> Result<Jetons, ErreurCompte> {
+    let actuels = coffre.jetons()?.ok_or(ErreurCompte::Refuse)?;
+    let client = ClientHttp::new(config);
+    let corps = CorpsRefresh { refresh: &actuels.renouvellement };
+    let reponse: ReponseRefresh = client.post_json("/api/auth/refresh", &corps, None)?;
+    let jetons = Jetons { session: reponse.acces, renouvellement: actuels.renouvellement };
+    coffre.ranger_jetons(&jetons)?;
+    Ok(jetons)
+}
+
+/// Sonde `GET /api/sky/sync` avec `jeton` — seul le statut de la réponse compte, son
+/// corps est ignoré : ce n'est pas une vraie synchronisation (tâche 8), seulement le
+/// moyen de savoir si le serveur reconnaît encore ce jeton. `/api/sky/sync` est la
+/// seule route authentifiée du double qui ne modifie rien côté serveur, donc la
+/// sonder ne coûte aucun effet de bord.
+fn jeton_est_accepte(config: &Config, jeton: &str) -> Result<(), ErreurCompte> {
+    let client = ClientHttp::new(config);
+    client.get_json::<serde_json::Value>("/api/sky/sync", Some(jeton))?;
+    Ok(())
+}
+
+/// Rend un jeton de session dont le serveur vient tout juste de confirmer qu'il le
+/// reconnaît, en renouvelant d'abord si nécessaire.
+///
+/// UNE SEULE reprise, jamais deux : si le jeton en coffre est refusé, `renouveler`
+/// est appelé une fois, et le nouveau jeton est sondé une seule fois de plus. Un
+/// second refus (jeton de renouvellement lui-même révoqué, ou nouveau jeton de
+/// session encore refusé) remonte tel quel, sans nouvelle tentative — sans cette
+/// borne, un jeton de renouvellement révoqué déclencherait une boucle infinie
+/// d'appels au serveur.
+pub fn jeton_valide(config: &Config, coffre: &Coffre) -> Result<String, ErreurCompte> {
+    let jetons = coffre.jetons()?.ok_or(ErreurCompte::Refuse)?;
+
+    match jeton_est_accepte(config, &jetons.session) {
+        Ok(()) => Ok(jetons.session),
+        Err(ErreurCompte::Refuse) => {
+            let renouveles = renouveler(config, coffre)?;
+            jeton_est_accepte(config, &renouveles.session)?;
+            Ok(renouveles.session)
+        }
+        Err(autre) => Err(autre),
+    }
+}
+
 /// Sépare `code` et `error` de la requête de redirection reçue par le serveur local
 /// (`/?code=...` ou `/?error=...`).
 fn extraire_code_ou_erreur(chemin: &str) -> (Option<String>, Option<String>) {

@@ -12,4 +12,7 @@ pub mod session;
 pub use coffre::{Coffre, Jetons};
 pub use erreur::ErreurCompte;
 pub use http::{ClientHttp, Config};
-pub use session::{connecter, echanger_le_code, empreinte_du_secret, secret_aleatoire, url_de_depart};
+pub use session::{
+    connecter, echanger_le_code, empreinte_du_secret, jeton_valide, renouveler, secret_aleatoire,
+    url_de_depart,
+};
