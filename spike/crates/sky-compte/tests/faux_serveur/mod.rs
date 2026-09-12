@@ -19,6 +19,7 @@
 //! Aucun runtime asynchrone : `tiny_http` est synchrone, une seule
 //! requête traitée à la fois sur le fil dédié du double.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
@@ -135,7 +136,7 @@ pub struct EnveloppeFausse {
 /// réponses du double, sans jamais toucher la production.
 ///
 /// `amis`, `enveloppes` et `version` sont les trois champs exigés par le
-/// brief de cette tâche. Les cinq champs suivants sont un AJOUT délibéré,
+/// brief de cette tâche. Les champs suivants sont un AJOUT délibéré,
 /// tranché par le coordinateur en dehors du brief : les tâches 6, 7 et 9
 /// ont déjà leurs tests écrits contre ces noms précis, et sky-compte ne
 /// compilerait pas sans eux. Voir le commentaire de chacun pour le
@@ -146,19 +147,35 @@ pub struct EtatFaux {
     pub enveloppes: Vec<EnveloppeFausse>,
     pub version: u64,
 
+    /// Jetons que le double reconnaît sur une route authentifiée (`GET
+    /// /api/sky/sync`, `POST /api/sky/envelopes`) — PAS une vérification
+    /// de signature JWT (hors de portée d'un double : aucun secret partagé
+    /// n'existe pour `sky-compte`), seulement la liste de ce que CE double
+    /// a lui-même émis (`POST /api/auth/native` réussi, `POST
+    /// /api/auth/refresh` réussi), enrichissable directement par un test
+    /// via `FauxServeur::jeton_de_test()`. Un jeton absent d'ici — vide,
+    /// aléatoire, périmé, ou simplement jamais délivré — est refusé
+    /// exactement comme une absence totale de jeton (voir
+    /// `autoriser_appel`) : la propriété utile est « un client qui
+    /// n'envoie pas un jeton reconnu est détecté », pas « le jeton est
+    /// cryptographiquement valide ».
+    pub jetons_acceptes: HashSet<String>,
+
+    /// Couple (code, secret) que `POST /api/auth/native` accepte —
+    /// `None` par défaut : AUCUN code n'est valide tant qu'un test ne l'a
+    /// pas explicitement enregistré ici, fidèle au test prescrit par le
+    /// brief (`le_double_refuse_sans_distinguer`, qui ne configure jamais
+    /// ce champ et doit continuer à voir un refus). Une tâche qui a
+    /// besoin d'un login natif réussi (tâche 6, pour ranger des jetons
+    /// dans le coffre) enregistre ce couple avant d'appeler `POST
+    /// /api/auth/native` — voir
+    /// `auth_native_reussit_avec_le_code_enregistre_et_le_jeton_fonctionne_ensuite`
+    /// plus bas pour l'exemple complet.
+    pub code_natif_valide: Option<(String, String)>,
+
     /// Fait répondre `401 {"error":"Code refuse"}` à `POST /api/auth/native`
-    /// quel que soit le corps envoyé.
-    ///
-    /// À CETTE TÂCHE, ce champ est REDONDANT avec le comportement PAR
-    /// DÉFAUT de la route (voir `gerer_auth_native` plus bas) : `EtatFaux`
-    /// ne porte encore aucun moyen d'enregistrer un couple (code, secret)
-    /// "valide", donc le double refuse déjà systématiquement tout échange,
-    /// exactement la forme observée côté site pour un code qui n'a jamais
-    /// été émis (`le_double_refuse_sans_distinguer` ci-dessous le prouve
-    /// SANS jamais toucher ce champ). Il est exposé maintenant pour que
-    /// les tâches 6/7/9 compilent contre lui, et pour rester le point de
-    /// court-circuit le jour où une tâche future donnerait au double un
-    /// chemin de succès conditionnel.
+    /// même si `code_natif_valide` correspond — un court-circuit explicite,
+    /// distinct du refus par défaut (absence de `code_natif_valide`).
     pub refuser_echange: bool,
 
     /// Fait répondre 401 au PROCHAIN appel authentifié (`GET
@@ -166,14 +183,20 @@ pub struct EtatFaux {
     /// consommé (remis à `false`) dès qu'il a servi à refuser un appel.
     /// Sert à éprouver le renouvellement de jeton côté client : refus,
     /// renouvellement via `POST /api/auth/refresh`, nouvelle tentative
-    /// réussie.
+    /// réussie. S'applique APRÈS la vérification du jeton (voir
+    /// `autoriser_appel`) : un appel qui présente déjà un jeton inconnu
+    /// échoue pour cette raison-là, jamais pour celle-ci — les deux
+    /// causes restent indépendamment pilotables et rendent des messages
+    /// différents.
     pub refuser_le_premier_appel: bool,
 
     /// Refuse TOUT appel authentifié ET tout renouvellement — à la
     /// différence de `refuser_le_premier_appel`, qui épargne
     /// délibérément `POST /api/auth/refresh` (sans quoi éprouver le
     /// renouvellement lui-même serait impossible). Utile pour simuler un
-    /// compte totalement révoqué.
+    /// compte totalement révoqué. Même remarque que ci-dessus sur l'ordre
+    /// des vérifications : un jeton inconnu échoue pour cette raison-là
+    /// avant même que `refuser_tout` soit consulté.
     pub refuser_tout: bool,
 
     /// Nombre d'appels reçus sur `POST /api/auth/refresh`, acceptés ou
@@ -238,6 +261,17 @@ impl FauxServeur {
     pub fn etat_mut(&self) -> MutexGuard<'_, EtatFaux> {
         self.etat.lock().expect("le mutex de l'etat faux est empoisonne")
     }
+
+    /// Jeton pré-approuvé, pratique pour un test qui a seulement besoin
+    /// d'un appel authentifié réussi sans passer par l'échange natif
+    /// complet : l'insère dans `EtatFaux::jetons_acceptes` s'il n'y est
+    /// pas déjà, puis le rend. Toujours la même valeur pour une instance
+    /// donnée — appeler cette méthode plusieurs fois rend le même jeton.
+    pub fn jeton_de_test(&self) -> String {
+        const JETON: &str = "jeton-de-test";
+        self.etat_mut().jetons_acceptes.insert(JETON.to_string());
+        JETON.to_string()
+    }
 }
 
 impl Drop for FauxServeur {
@@ -265,6 +299,7 @@ fn adresse_port(serveur: &Server) -> u16 {
 fn repondre(mut requete: tiny_http::Request, etat: &Arc<Mutex<EtatFaux>>) {
     let methode = requete.method().clone();
     let (chemin, version_connue) = decouper_chemin(requete.url());
+    let jeton = extraire_jeton_bearer(&requete);
 
     let mut corps_brut = String::new();
     if matches!(methode, Method::Post) {
@@ -275,10 +310,10 @@ fn repondre(mut requete: tiny_http::Request, etat: &Arc<Mutex<EtatFaux>>) {
     }
 
     let (statut, corps_reponse) = match (&methode, chemin.as_str()) {
-        (Method::Get, "/api/sky/sync") => gerer_sync(etat, version_connue),
-        (Method::Post, "/api/auth/native") => gerer_auth_native(etat),
+        (Method::Get, "/api/sky/sync") => gerer_sync(etat, jeton.as_deref(), version_connue),
+        (Method::Post, "/api/auth/native") => gerer_auth_native(etat, &corps_brut),
         (Method::Post, "/api/auth/refresh") => gerer_refresh(etat),
-        (Method::Post, "/api/sky/envelopes") => gerer_depot(etat, &corps_brut),
+        (Method::Post, "/api/sky/envelopes") => gerer_depot(etat, jeton.as_deref(), &corps_brut),
         _ => (404u16, json!({ "error": "route inconnue du double" }).to_string()),
     };
 
@@ -307,29 +342,81 @@ fn decouper_chemin(brut: &str) -> (String, Option<u64>) {
     }
 }
 
-/// Applique les deux leviers de refus partagés par les routes authentifiées
-/// du double (`GET /api/sky/sync`, `POST /api/sky/envelopes`) :
-/// `refuser_tout` (permanent) et `refuser_le_premier_appel` (un coup,
-/// consommé dès qu'il a servi). Rend `Some((401, corps))` si l'appel doit
-/// être refusé, `None` sinon.
+/// Extrait le jeton d'un en-tête `Authorization: Bearer <jeton>`, ou `None`
+/// si l'en-tête est absent, mal formé (préfixe autre que `Bearer `), ou
+/// vide après le préfixe.
 ///
-/// Forme du refus alignée sur `handleAuthError` côté site
-/// (`src/lib/auth/middleware.ts`) pour une session absente :
-/// `401 {"error":"Non authentifie"}`.
-fn refuser_appel_authentifie(etat: &mut EtatFaux) -> Option<(u16, String)> {
-    if etat.refuser_tout {
+/// La comparaison du préfixe est insensible à la casse (`bearer`/`Bearer`),
+/// même tolérance que `getSession` côté site
+/// (`authHeader.toLowerCase().startsWith("bearer ")`,
+/// `src/lib/auth/middleware.ts`) — un des rares points où imiter le site
+/// coûte aussi peu que de l'ignorer.
+fn extraire_jeton_bearer(requete: &tiny_http::Request) -> Option<String> {
+    let en_tete = requete.headers().iter().find(|h| h.field.equiv("Authorization"))?;
+    let valeur = en_tete.value.as_str();
+    if valeur.len() < 7 || !valeur[..7].eq_ignore_ascii_case("bearer ") {
+        return None;
+    }
+    let jeton = valeur[7..].trim();
+    if jeton.is_empty() {
+        None
+    } else {
+        Some(jeton.to_string())
+    }
+}
+
+/// Décide si un appel à une route authentifiée du double (`GET
+/// /api/sky/sync`, `POST /api/sky/envelopes`) peut passer, et pourquoi
+/// sinon. Rend `Some((401, corps))` si l'appel doit être refusé, `None`
+/// sinon.
+///
+/// DEUX CAUSES DE REFUS, DEUX MESSAGES, VOLONTAIREMENT DISTINCTS —
+/// exigence explicite du coordinateur (task-4-report.md, ronde de
+/// correction 1) : la tâche 7 doit pouvoir éprouver le renouvellement de
+/// jeton, ce qui suppose de distinguer « ce jeton ne veut rien dire pour
+/// moi » (pas de jeton, ou un jeton que ce double n'a jamais reconnu) de
+/// « je refuse ce jeton pourtant reconnu, exprès, parce qu'un test me l'a
+/// demandé » (`refuser_tout`/`refuser_le_premier_appel`). Un client qui
+/// recevrait le MÊME message dans les deux cas ne pourrait pas savoir
+/// s'il doit renouveler son jeton ou abandonner :
+///
+///  1. Jeton absent OU non reconnu (absent de
+///     `EtatFaux::jetons_acceptes`) → `401 {"error":"Non authentifie"}`,
+///     même forme que `handleAuthError` côté site
+///     (`src/lib/auth/middleware.ts`) pour une session absente. C'est la
+///     PREMIÈRE vérification : un jeton inconnu échoue pour cette raison,
+///     jamais pour `refuser_tout`/`refuser_le_premier_appel`, qui ne sont
+///     même pas consultés dans ce cas.
+///  2. Jeton reconnu, mais `refuser_tout` (permanent) ou
+///     `refuser_le_premier_appel` (un coup, consommé dès qu'il a servi)
+///     est actif → `401 {"error":"Acces refuse"}` — message DIFFÉRENT du
+///     précédent, à dessein : c'est ce qui permet à un test de vérifier
+///     PRÉCISÉMENT laquelle des deux causes a produit le refus.
+fn autoriser_appel(etat: &mut EtatFaux, jeton: Option<&str>) -> Option<(u16, String)> {
+    let jeton_reconnu = match jeton {
+        Some(j) => etat.jetons_acceptes.contains(j),
+        None => false,
+    };
+    if !jeton_reconnu {
         return Some((401, json!({ "error": "Non authentifie" }).to_string()));
+    }
+    if etat.refuser_tout {
+        return Some((401, json!({ "error": "Acces refuse" }).to_string()));
     }
     if etat.refuser_le_premier_appel {
         etat.refuser_le_premier_appel = false;
-        return Some((401, json!({ "error": "Non authentifie" }).to_string()));
+        return Some((401, json!({ "error": "Acces refuse" }).to_string()));
     }
     None
 }
 
-fn gerer_sync(etat: &Arc<Mutex<EtatFaux>>, version_connue: Option<u64>) -> (u16, String) {
+fn gerer_sync(
+    etat: &Arc<Mutex<EtatFaux>>,
+    jeton: Option<&str>,
+    version_connue: Option<u64>,
+) -> (u16, String) {
     let mut e = etat.lock().expect("mutex etat faux empoisonne");
-    if let Some(refus) = refuser_appel_authentifie(&mut e) {
+    if let Some(refus) = autoriser_appel(&mut e, jeton) {
         return refus;
     }
 
@@ -352,42 +439,73 @@ fn gerer_sync(etat: &Arc<Mutex<EtatFaux>>, version_connue: Option<u64>) -> (u16,
     (200, corps.to_string())
 }
 
-/// `POST /api/auth/native` — voir le commentaire de `EtatFaux::refuser_echange`
-/// pour la raison pour laquelle cette route refuse systématiquement à ce
-/// stade du jalon.
-fn gerer_auth_native(etat: &Arc<Mutex<EtatFaux>>) -> (u16, String) {
-    let e = etat.lock().expect("mutex etat faux empoisonne");
+/// `POST /api/auth/native` — refuse toujours SAUF si `code`/`secret`
+/// correspondent EXACTEMENT au couple enregistré dans
+/// `EtatFaux::code_natif_valide` (voir son commentaire). Un succès émet un
+/// jeton d'accès et un jeton de renouvellement, tous deux fabriqués (pas
+/// de JWT réel), et enregistre le jeton d'accès dans
+/// `EtatFaux::jetons_acceptes` — c'est ce qui permet à ce jeton de servir
+/// ensuite sur `GET /api/sky/sync`/`POST /api/sky/envelopes`.
+///
+/// Forme de succès `{ acces, refresh }` confirmée par
+/// `api/auth/native/route.ts`. Forme de refus `401 {"error":"Code
+/// refuse"}` confirmée par le test prescrit par le brief
+/// (`le_double_refuse_sans_distinguer`), qui ne configure jamais
+/// `code_natif_valide` et doit continuer à voir ce refus.
+fn gerer_auth_native(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    const REFUS: &str = r#"{"error":"Code refuse"}"#;
+
     if e.refuser_echange || e.refuser_tout {
-        return (401, r#"{"error":"Code refuse"}"#.to_string());
+        return (401, REFUS.to_string());
     }
-    // Aucun mécanisme n'existe encore, à cette tâche, pour enregistrer un
-    // couple (code, secret) "valide" dans EtatFaux : le double refuse donc
-    // TOUJOURS l'échange, par CE chemin plutôt que par le court-circuit
-    // ci-dessus — distinction qui aura un sens le jour où une tâche future
-    // ajoutera un succès conditionnel ici, sans changer la forme du refus.
-    (401, r#"{"error":"Code refuse"}"#.to_string())
+
+    let valeur: Option<Value> = serde_json::from_str(corps_brut).ok();
+    let code = valeur.as_ref().and_then(|v| v.get("code")).and_then(Value::as_str);
+    let secret = valeur.as_ref().and_then(|v| v.get("secret")).and_then(Value::as_str);
+
+    let accepte = match (&e.code_natif_valide, code, secret) {
+        (Some((c, s)), Some(code), Some(secret)) => c == code && s == secret,
+        _ => false,
+    };
+    if !accepte {
+        return (401, REFUS.to_string());
+    }
+
+    // Valeurs fabriquées par le double, pas relevées du site : aucun test
+    // ne dépend de leur contenu précis, seulement de leur capacité à
+    // authentifier un appel ultérieur (voir
+    // `auth_native_reussit_avec_le_code_enregistre_et_le_jeton_fonctionne_ensuite`).
+    let acces = "jeton-acces-natif".to_string();
+    let refresh = "jeton-refresh-natif".to_string();
+    e.jetons_acceptes.insert(acces.clone());
+    (200, json!({ "acces": acces, "refresh": refresh }).to_string())
 }
 
 /// `POST /api/auth/refresh` — succès à un seul champ `acces` (jamais
 /// `refresh` en retour, forme confirmée par `api/auth/refresh/route.ts`).
 /// La valeur `"jeton-neuf"` est un CHOIX DU DOUBLE, pas une forme relevée
 /// du site : c'est la valeur que les tests de la tâche 7 attendent
-/// (demande explicite du coordinateur).
+/// (demande explicite du coordinateur). Enregistrée dans
+/// `jetons_acceptes` au succès, pour qu'un client puisse effectivement
+/// s'en servir sur l'appel suivant — sans quoi « renouveler » ne
+/// prouverait rien.
 fn gerer_refresh(etat: &Arc<Mutex<EtatFaux>>) -> (u16, String) {
     let mut e = etat.lock().expect("mutex etat faux empoisonne");
     e.appels_de_renouvellement += 1;
     if e.refuser_tout {
         return (401, json!({ "error": "Renouvellement refuse" }).to_string());
     }
+    e.jetons_acceptes.insert("jeton-neuf".to_string());
     (200, json!({ "acces": "jeton-neuf" }).to_string())
 }
 
 /// `POST /api/sky/envelopes` — succès `204` sans corps (forme confirmée par
 /// `envelopes/route.ts`), refus de forme `400`, refus authentifié partagé
-/// avec `GET /api/sky/sync` via `refuser_appel_authentifie`.
-fn gerer_depot(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, String) {
+/// avec `GET /api/sky/sync` via `autoriser_appel`.
+fn gerer_depot(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &str) -> (u16, String) {
     let mut e = etat.lock().expect("mutex etat faux empoisonne");
-    if let Some(refus) = refuser_appel_authentifie(&mut e) {
+    if let Some(refus) = autoriser_appel(&mut e, jeton) {
         return refus;
     }
 
@@ -432,8 +550,10 @@ mod tests {
         // tableau vide par défaut.
         let s = FauxServeur::demarrer();
         s.etat_mut().amis.push(AmiFaux::sans_appareil("bob"));
+        let jeton = s.jeton_de_test();
 
         let recu: serde_json::Value = ureq::get(&format!("{}/api/sky/sync", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
             .call()
             .unwrap()
             .into_json()
@@ -475,15 +595,66 @@ mod tests {
     fn refuser_le_premier_appel_ne_refuse_que_le_premier() {
         // Échoue si le refus n'est pas consommé (tous les appels
         // refuseraient) ou s'il est consommé trop tôt (aucun appel ne
-        // refuserait).
+        // refuserait). Jeton reconnu attaché aux deux appels : le refus
+        // testé ici doit venir de `refuser_le_premier_appel`, jamais d'un
+        // jeton absent ou inconnu (voir `sync_exige_un_jeton` pour cette
+        // autre cause).
         let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
         s.etat_mut().refuser_le_premier_appel = true;
 
-        let premier = ureq::get(&format!("{}/api/sky/sync", s.url())).call();
-        assert_eq!(premier.unwrap_err().into_response().unwrap().status(), 401);
+        let premier = ureq::get(&format!("{}/api/sky/sync", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .call();
+        let reponse_premier = premier.unwrap_err().into_response().unwrap();
+        assert_eq!(reponse_premier.status(), 401);
+        assert_eq!(reponse_premier.into_string().unwrap(), r#"{"error":"Acces refuse"}"#);
 
-        let second = ureq::get(&format!("{}/api/sky/sync", s.url())).call();
+        let second = ureq::get(&format!("{}/api/sky/sync", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .call();
         assert_eq!(second.unwrap().status(), 200);
+    }
+
+    #[test]
+    fn sync_exige_un_jeton() {
+        // Échoue si `GET /api/sky/sync` répondait avec succès sans aucun
+        // en-tête `Authorization` — exactement la réserve fermée par cette
+        // ronde de correction : un client qui oublierait son jeton ne doit
+        // plus jamais passer contre ce double.
+        let s = FauxServeur::demarrer();
+        let reponse = ureq::get(&format!("{}/api/sky/sync", s.url())).call();
+        let reponse = reponse.unwrap_err().into_response().unwrap();
+        assert_eq!(reponse.status(), 401);
+        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Non authentifie"}"#);
+    }
+
+    #[test]
+    fn sync_refuse_un_jeton_inconnu() {
+        // Échoue si un jeton quelconque, jamais délivré par ce double,
+        // était accepté — distinct du test précédent (jeton ABSENT) : ici
+        // un en-tête est bien présent, mais ne correspond à rien.
+        let s = FauxServeur::demarrer();
+        let reponse = ureq::get(&format!("{}/api/sky/sync", s.url()))
+            .set("Authorization", "Bearer nimporte-quoi")
+            .call();
+        let reponse = reponse.unwrap_err().into_response().unwrap();
+        assert_eq!(reponse.status(), 401);
+        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Non authentifie"}"#);
+    }
+
+    #[test]
+    fn sync_accepte_un_jeton_reconnu() {
+        // Échoue si un jeton pourtant présent dans `jetons_acceptes`
+        // était quand même refusé — la contre-preuve des deux tests
+        // précédents : le rejet vient bien de la reconnaissance du jeton,
+        // pas d'un refus systématique de toute authentification.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        let reponse = ureq::get(&format!("{}/api/sky/sync", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .call();
+        assert_eq!(reponse.unwrap().status(), 200);
     }
 
     #[test]
@@ -521,13 +692,16 @@ mod tests {
         // déposée ne réapparaît pas dans `GET /api/sky/sync` avec `id`
         // typé chaîne et les deux device_id typés nombre.
         let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
         let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
             .send_string(r#"{"expediteur_device_id":7,"destinataire_device_id":9,"charge":"YWJj"}"#)
             .unwrap();
         assert_eq!(reponse.status(), 204);
         assert_eq!(s.etat_mut().depots_recus, 1);
 
         let recu: serde_json::Value = ureq::get(&format!("{}/api/sky/sync", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
             .call()
             .unwrap()
             .into_json()
@@ -540,13 +714,30 @@ mod tests {
     }
 
     #[test]
+    fn depot_denveloppe_exige_aussi_un_jeton() {
+        // Échoue si `POST /api/sky/envelopes` acceptait un dépôt sans
+        // authentification — même réserve que `sync_exige_un_jeton`, sur
+        // l'AUTRE route authentifiée du double.
+        let s = FauxServeur::demarrer();
+        let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
+            .send_string(r#"{"expediteur_device_id":1,"destinataire_device_id":2,"charge":"YQ=="}"#);
+        let reponse = reponse.unwrap_err().into_response().unwrap();
+        assert_eq!(reponse.status(), 401);
+        // Le dépôt n'a pas dû être compté : le refus d'authentification
+        // précède toute lecture du corps.
+        assert_eq!(s.etat_mut().depots_recus, 0);
+    }
+
+    #[test]
     fn sync_rend_inchange_a_version_connue_et_complet_sinon() {
         // Échoue si `{ inchange: true }` n'est jamais rendu, ou si il l'est
         // pour une version qui ne correspond pas à l'état courant.
         let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
         s.etat_mut().version = 42;
 
         let a_jour: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=42", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
             .call()
             .unwrap()
             .into_json()
@@ -554,10 +745,58 @@ mod tests {
         assert_eq!(a_jour, serde_json::json!({ "inchange": true }));
 
         let perime: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=1", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
             .call()
             .unwrap()
             .into_json()
             .unwrap();
         assert_eq!(perime["version"], 42);
+    }
+
+    #[test]
+    fn auth_native_reussit_avec_le_code_enregistre_et_le_jeton_fonctionne_ensuite() {
+        // Échoue si un couple (code, secret) enregistré dans
+        // `code_natif_valide` ne produisait pas un succès, ou si le jeton
+        // d'accès reçu n'était pas ensuite reconnu par une route
+        // authentifiée — la moitié qui prouve que ce chemin de succès sert
+        // réellement à quelque chose (tâche 6 : ranger un jeton utilisable
+        // dans le coffre).
+        let s = FauxServeur::demarrer();
+        s.etat_mut().code_natif_valide =
+            Some(("CODEVALIDE".to_string(), "secret-correct".to_string()));
+
+        let recu: serde_json::Value = ureq::post(&format!("{}/api/auth/native", s.url()))
+            .send_string(r#"{"code":"CODEVALIDE","secret":"secret-correct"}"#)
+            .unwrap()
+            .into_json()
+            .unwrap();
+        let acces = recu["acces"].as_str().expect("acces attendu comme chaine").to_string();
+        assert!(!acces.is_empty());
+        assert!(recu["refresh"].is_string());
+
+        let reponse = ureq::get(&format!("{}/api/sky/sync", s.url()))
+            .set("Authorization", &format!("Bearer {acces}"))
+            .call();
+        assert_eq!(reponse.unwrap().status(), 200);
+    }
+
+    #[test]
+    fn auth_native_refuse_un_secret_incorrect_meme_code_enregistre() {
+        // Échoue si la comparaison acceptait un secret différent de celui
+        // enregistré — le couple doit correspondre EXACTEMENT, pas
+        // seulement le code.
+        let s = FauxServeur::demarrer();
+        s.etat_mut().code_natif_valide =
+            Some(("CODEVALIDE".to_string(), "secret-correct".to_string()));
+
+        let e = ureq::post(&format!("{}/api/auth/native", s.url()))
+            .send_string(r#"{"code":"CODEVALIDE","secret":"mauvais-secret"}"#)
+            .unwrap_err();
+        let reponse = match e {
+            ureq::Error::Status(_, r) => r,
+            _ => panic!("attendu 401"),
+        };
+        assert_eq!(reponse.status(), 401);
+        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Code refuse"}"#);
     }
 }
