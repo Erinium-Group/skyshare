@@ -12,6 +12,7 @@ sky-capture = { version = "0.0.0", path = "../sky-capture" }
 sky-encode = { version = "0.0.0", path = "../sky-encode" }
 sky-net = { version = "0.0.0", path = "../sky-net" }
 sky-crypto = { version = "0.0.0", path = "../sky-crypto" }
+sky-compte = { version = "0.0.0", path = "../sky-compte" }
 
 # Nécessaire à la source d'images synthétique (texture D3D11 animée) et à
 # l'identification de l'adaptateur derrière le device de capture.

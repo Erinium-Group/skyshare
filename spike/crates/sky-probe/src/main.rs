@@ -1,4 +1,5 @@
 mod cmd_capture;
+mod cmd_compte;
 mod cmd_netcheck;
 mod cmd_selftest;
 mod cmd_codecs;
@@ -7,7 +8,7 @@ mod cmd_host;
 mod cmd_hw;
 mod cmd_view;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "sky-probe", about = "Spike de faisabilité SkyShare — jalon 0")]
@@ -95,6 +96,71 @@ enum Cmd {
         #[arg(long, default_value = "recu.h265")]
         out: String,
     },
+    /// Connexion au compte SkyShare (ouvre le navigateur, jalon C2)
+    Login,
+    /// Appareils enregistrés sur le compte
+    Device(ArgsDevice),
+    /// Amis et demandes d'ami
+    Friends(ArgsFriends),
+    /// Affiche le code ami de ce compte
+    ///
+    /// /!\ Synchronise avec le serveur : une négociation en cours perdrait
+    /// l'offre en attente, le serveur l'efface en la livrant.
+    Code,
+}
+
+#[derive(Args)]
+struct ArgsDevice {
+    #[command(subcommand)]
+    cmd: CmdDevice,
+}
+
+#[derive(Subcommand)]
+enum CmdDevice {
+    /// Enregistre cet appareil auprès du compte connecté
+    ///
+    /// Refuse par défaut si un appareil est déjà enregistré sur cette
+    /// machine : chaque enregistrement en crée un NOUVEAU côté serveur.
+    Register {
+        /// Nom affiché pour cet appareil (visible par les amis)
+        nom: String,
+        /// Force un nouvel enregistrement même si un appareil existe déjà
+        #[arg(long)]
+        force: bool,
+    },
+    /// Liste les appareils enregistrés sur ce compte
+    ///
+    /// /!\ Synchronise avec le serveur : une négociation en cours perdrait
+    /// l'offre en attente, le serveur l'efface en la livrant.
+    List,
+}
+
+#[derive(Args)]
+struct ArgsFriends {
+    #[command(subcommand)]
+    cmd: CmdFriends,
+}
+
+#[derive(Subcommand)]
+enum CmdFriends {
+    /// Envoie une demande d'ami par code
+    ///
+    /// /!\ Synchronise avec le serveur (pour connaître son propre code) :
+    /// une négociation en cours perdrait l'offre en attente.
+    Add {
+        /// Code ami à ajouter (ex. SKY-ABCD-EFGH)
+        code: String,
+    },
+    /// Accepte une demande d'ami reçue
+    Accept {
+        /// Identifiant de la demande (voir `friends list`)
+        id: i64,
+    },
+    /// Liste les amis et les demandes reçues
+    ///
+    /// /!\ Synchronise avec le serveur : une négociation en cours perdrait
+    /// l'offre en attente, le serveur l'efface en la livrant.
+    List,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -141,5 +207,28 @@ fn main() -> anyhow::Result<()> {
             hauteur_synth: height,
         }),
         Cmd::View { seconds, out } => cmd_view::run(seconds, &out),
+        Cmd::Login => {
+            let (config, coffre) = cmd_compte::config_et_coffre()?;
+            cmd_compte::login(&config, &coffre)
+        }
+        Cmd::Device(args) => {
+            let (config, coffre) = cmd_compte::config_et_coffre()?;
+            match args.cmd {
+                CmdDevice::Register { nom, force } => cmd_compte::device_register(&config, &coffre, &nom, force),
+                CmdDevice::List => cmd_compte::device_list(&config, &coffre),
+            }
+        }
+        Cmd::Friends(args) => {
+            let (config, coffre) = cmd_compte::config_et_coffre()?;
+            match args.cmd {
+                CmdFriends::Add { code } => cmd_compte::friends_add(&config, &coffre, &code),
+                CmdFriends::Accept { id } => cmd_compte::friends_accept(&config, &coffre, id),
+                CmdFriends::List => cmd_compte::friends_list(&config, &coffre),
+            }
+        }
+        Cmd::Code => {
+            let (config, coffre) = cmd_compte::config_et_coffre()?;
+            cmd_compte::code(&config, &coffre)
+        }
     }
 }
