@@ -157,44 +157,94 @@ fn enregistrer_appareil_reussit_et_rend_lidentifiant() {
     assert_eq!(id2, 2, "un second enregistrement doit recevoir un identifiant distinct");
 }
 
+#[test]
+fn enregistrer_appareil_avec_un_octet_nul_est_refuse_sans_appel_reseau() {
+    // RONDE DE CORRECTION 1 — « Important 2 » (task-8-review.md) :
+    // `enregistrer_appareil` doit refuser un `nom` portant l'octet NUL
+    // AVANT tout appel réseau, même principe que valider une taille avant
+    // un dépôt d'enveloppe.
+    //
+    // PREUVE QU'AUCUN APPEL RÉSEAU N'EST TENTÉ : la configuration vise le
+    // port 1 en local, qui refuse toute connexion immédiatement (même
+    // technique que `http.rs::aucun_jeton_dans_lechec_reseau_reel`). Si la
+    // validation avait lieu APRÈS la construction de la requête, l'erreur
+    // serait `ErreurCompte::Reseau`, jamais `Protocole` — c'est la
+    // VARIANTE de l'erreur qui discrimine le chemin réellement emprunté,
+    // pas seulement l'échec en général.
+    let coffre = Coffre::pour_test("sky-test-annuaire-appareil-nul");
+    let cle = [1u8; 32];
+
+    let r = enregistrer_appareil(&Config::vers("http://127.0.0.1:1"), &coffre, "a\0b", &cle);
+    assert!(matches!(r, Err(sky_compte::ErreurCompte::Protocole(_))));
+}
+
 // --- ajouter_ami ----------------------------------------------------------
 
 #[test]
 fn ajouter_ami_reussit_avec_le_code_enregistre() {
+    // "BUDDY234" est BIEN FORMÉ (8 caractères de l'alphabet réel
+    // `ABCDEFGHJKMNPQRSTUVWXYZ23456789`) — remplace l'ancien "AMIVALID",
+    // qui contenait `I` et `L`, absents de cet alphabet (ronde de
+    // correction 1, voir task-8-review.md « Important 1 »).
     let s = FauxServeur::demarrer();
     let jeton = s.jeton_de_test();
-    s.etat_mut().code_ami_valide = Some(("AMIVALID".to_string(), 42));
+    s.etat_mut().code_ami_valide = Some(("BUDDY234".to_string(), 42));
 
     let coffre = Coffre::pour_test("sky-test-annuaire-ajouter-ami-succes");
     coffre.ranger_jetons(&sky_compte::Jetons { session: jeton, renouvellement: "peu-importe".to_string() }).unwrap();
 
-    let r = ajouter_ami(&Config::vers(&s.url()), &coffre, "AMIVALID").unwrap();
+    let r = ajouter_ami(&Config::vers(&s.url()), &coffre, "BUDDY234").unwrap();
     assert_eq!(r, AjoutAmi::Envoyee { friendship_id: 42 });
 }
 
 #[test]
 fn ajouter_ami_avec_un_code_inconnu_rend_code_introuvable_pas_une_erreur() {
+    // "STRANGE9" est BIEN FORMÉ mais non enregistré — remplace l'ancien
+    // "INCONNU1", qui contenait `I`, `O` et `1`, absents de l'alphabet
+    // réel : rejoué contre le vrai serveur, "INCONNU1" recevrait un 400 de
+    // forme, pas le 404 métier que ce test vérifie ici. Voir
+    // `ajouter_ami_avec_un_code_mal_forme_rend_une_erreur_pas_code_introuvable`
+    // pour le cas de forme invalide.
     let s = FauxServeur::demarrer();
     let jeton = s.jeton_de_test();
 
     let coffre = Coffre::pour_test("sky-test-annuaire-ajouter-ami-inconnu");
     coffre.ranger_jetons(&sky_compte::Jetons { session: jeton, renouvellement: "peu-importe".to_string() }).unwrap();
 
-    let r = ajouter_ami(&Config::vers(&s.url()), &coffre, "INCONNU1").unwrap();
+    let r = ajouter_ami(&Config::vers(&s.url()), &coffre, "STRANGE9").unwrap();
     assert_eq!(r, AjoutAmi::CodeIntrouvable);
+}
+
+#[test]
+fn ajouter_ami_avec_un_code_mal_forme_rend_une_erreur_pas_code_introuvable() {
+    // RONDE DE CORRECTION 1 — « Important 1 » (task-8-review.md) : le
+    // double applique désormais la même validation de forme que le site
+    // (alphabet réel, 8 caractères). "INCONNU1" contient `I`, `O` et `1`,
+    // absents de `ABCDEFGHJKMNPQRSTUVWXYZ23456789` : contre le vrai
+    // serveur ce code reçoit un 400 AVANT toute recherche — `ajouter_ami`
+    // doit donc rendre une ERREUR de protocole, jamais
+    // `AjoutAmi::CodeIntrouvable` (qui suppose une forme correcte).
+    let s = FauxServeur::demarrer();
+    let jeton = s.jeton_de_test();
+
+    let coffre = Coffre::pour_test("sky-test-annuaire-ajouter-ami-malforme");
+    coffre.ranger_jetons(&sky_compte::Jetons { session: jeton, renouvellement: "peu-importe".to_string() }).unwrap();
+
+    let r = ajouter_ami(&Config::vers(&s.url()), &coffre, "INCONNU1");
+    assert!(matches!(r, Err(sky_compte::ErreurCompte::Protocole(_))));
 }
 
 #[test]
 fn ajouter_ami_deja_demande_rend_deja_demandee_pas_une_erreur() {
     let s = FauxServeur::demarrer();
     let jeton = s.jeton_de_test();
-    s.etat_mut().code_ami_valide = Some(("AMIVALID".to_string(), 42));
+    s.etat_mut().code_ami_valide = Some(("BUDDY234".to_string(), 42));
     s.etat_mut().ami_deja_demande = true;
 
     let coffre = Coffre::pour_test("sky-test-annuaire-ajouter-ami-deja");
     coffre.ranger_jetons(&sky_compte::Jetons { session: jeton, renouvellement: "peu-importe".to_string() }).unwrap();
 
-    let r = ajouter_ami(&Config::vers(&s.url()), &coffre, "AMIVALID").unwrap();
+    let r = ajouter_ami(&Config::vers(&s.url()), &coffre, "BUDDY234").unwrap();
     assert_eq!(r, AjoutAmi::DejaDemandee);
 }
 
@@ -244,6 +294,42 @@ fn synchroniser_expose_lappareil_dun_ami_avec_sa_cle_publique() {
     assert_eq!(etat.amis[0].appareils.len(), 1);
     assert_eq!(etat.amis[0].appareils[0].id, 5);
     assert_eq!(etat.amis[0].appareils[0].public_key, base64_de_test());
+}
+
+#[test]
+fn un_ami_sans_appareil_se_desserialise_en_tableau_vide_sans_erreur() {
+    // RONDE DE CORRECTION 1 — remplace
+    // `un_ami_sans_appareil_donne_un_tableau_vide_pas_une_erreur`
+    // (`annuaire.rs`), structurellement incapable de rougir : `resoudre_ami`
+    // y rendait une RÉFÉRENCE vers l'élément que le test avait lui-même
+    // construit — `.appareils` ne pouvait être que ce que le test y avait
+    // mis, quelle que soit l'implémentation (task-8-review.md).
+    //
+    // Ce test passe cette fois par le VRAI chemin de désérialisation
+    // (double HTTP -> `synchroniser` -> `convertir_etat`). NÉANMOINS, le
+    // même défaut structurel resurgit sous une autre forme, VÉRIFIÉ par
+    // neutralisation : filtrer/mapper un vecteur VIDE rend toujours un
+    // vecteur vide, quelle que soit la logique du filtre ou du mappage —
+    // inverser le filtre `cle_publique_valide` dans `convertir_etat`
+    // (`!cle_publique_valide(...)` au lieu de `cle_publique_valide(...)`)
+    // laisse CE test vert, faute d'un seul élément à filtrer. Aucune
+    // neutralisation plausible du chemin `amis[].appareils` ne peut donc le
+    // faire rougir : il prouve seulement, et c'est réel mais modeste, que
+    // `"appareils": []` traverse la désérialisation JSON -> `Etat` sans
+    // erreur ni panique. La construction de la liste ELLE-MÊME (avec un
+    // appareil réel) est couverte par
+    // `synchroniser_expose_lappareil_dun_ami_avec_sa_cle_publique`
+    // ci-dessus, qui elle rougit bel et bien sur la même neutralisation.
+    let s = FauxServeur::demarrer();
+    let jeton = s.jeton_de_test();
+    s.etat_mut().amis.push(AmiFaux::sans_appareil("bob"));
+
+    let coffre = Coffre::pour_test("sky-test-annuaire-ami-sans-appareil-deserialise");
+    coffre.ranger_jetons(&sky_compte::Jetons { session: jeton, renouvellement: "peu-importe".to_string() }).unwrap();
+
+    let etat = synchroniser(&Config::vers(&s.url()), &coffre, None).unwrap();
+    assert_eq!(etat.amis.len(), 1);
+    assert!(etat.amis[0].appareils.is_empty());
 }
 
 #[test]

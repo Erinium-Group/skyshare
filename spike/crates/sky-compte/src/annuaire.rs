@@ -321,10 +321,37 @@ struct ReponseAppareil {
     id: i64,
 }
 
+/// Vérifie `nom` contre la même règle que `nomValide`/`texteStockable`
+/// côté site (`devices/route.ts`, `texte.ts`) — AVANT tout appel réseau,
+/// même principe que valider une taille avant un dépôt : on valide contre
+/// ce que le serveur refuse, pas contre ce que ce client juge acceptable.
+///
+/// Longueur mesurée en UNITÉS DE CODE UTF-16 (`encode_utf16().count()`),
+/// PAS en caractères Unicode : c'est ainsi que `nom.length` compte en
+/// JavaScript, et c'est cette mesure-là que `nomValide` applique. Un seul
+/// caractère hors du plan de base (ex. la plupart des emoji) compte pour 2
+/// unités UTF-16 mais pour 1 seul `char` Rust — les deux mesures divergent
+/// dès qu'une telle valeur apparaît dans `nom`.
+///
+/// `texteStockable` refuse aussi un substitut Unicode isolé
+/// (U+D800-U+DFFF) — NON reproduit ici : un `&str` Rust est garanti UTF-8
+/// valide et ne peut structurellement pas porter une telle valeur (il n'y
+/// a aucune séquence UTF-8 pour un substitut isolé). Seuls l'octet NUL et
+/// la longueur restent donc à vérifier côté client.
+fn nom_appareil_valide(nom: &str) -> bool {
+    let longueur_utf16 = nom.encode_utf16().count();
+    (1..=64).contains(&longueur_utf16) && !nom.contains('\0')
+}
+
 /// Enregistre l'appareil courant. `cle` est la clé publique X25519 de
 /// l'appareil, encodée en base64 standard avant l'envoi — c'est la forme
 /// que `POST /api/sky/devices` attend (`clePubliqueValide`, côté site).
 pub fn enregistrer_appareil(config: &Config, coffre: &Coffre, nom: &str, cle: &[u8; 32]) -> Result<i64, ErreurCompte> {
+    if !nom_appareil_valide(nom) {
+        return Err(ErreurCompte::Protocole(
+            "nom d'appareil invalide : attendu 1 a 64 unites UTF-16, sans octet NUL".to_string(),
+        ));
+    }
     let plateforme = plateforme_locale()?;
 
     use base64::engine::general_purpose::STANDARD;
@@ -484,10 +511,6 @@ mod tests {
         ami_avec_appareils(id, nom, vec![AppareilDAmi { id: id * 10, public_key: cle_de_test() }])
     }
 
-    fn ami_sans_appareil(id: i64, nom: &str) -> Ami {
-        ami_avec_appareils(id, nom, Vec::new())
-    }
-
     fn etat_avec(amis: Vec<Ami>) -> Etat {
         Etat {
             version: 1,
@@ -521,11 +544,16 @@ mod tests {
         assert!(matches!(r, Err(ErreurCompte::Protocole(_))));
     }
 
-    #[test]
-    fn un_ami_sans_appareil_donne_un_tableau_vide_pas_une_erreur() {
-        let etat = etat_avec(vec![ami_sans_appareil(1, "bob")]);
-        assert!(resoudre_ami(&etat, "bob").unwrap().appareils.is_empty());
-    }
+    // L'ancien test `un_ami_sans_appareil_donne_un_tableau_vide_pas_une_erreur`
+    // a été retiré ici (ronde de correction 1) : il vérifiait une fixture
+    // construite par le test lui-même via `resoudre_ami`, qui rend une
+    // RÉFÉRENCE — `.appareils` ne pouvait être que ce que le test y avait
+    // mis, aucune implémentation de `resoudre_ami` ne pouvait le faire
+    // rougir. Remplacé par
+    // `un_ami_sans_appareil_se_desserialise_en_tableau_vide_sans_erreur`
+    // dans `annuaire_test.rs`, qui passe par le vrai chemin de
+    // désérialisation — voir son commentaire pour ce qu'il prouve
+    // réellement (moins que son nom ne le suggérerait).
 
     #[test]
     fn aucune_correspondance_est_une_erreur() {

@@ -575,6 +575,29 @@ fn gerer_sync(
     (200, corps.to_string())
 }
 
+/// Reproduit `nomValide` + `texteStockable` côté site (`devices/route.ts`,
+/// `texte.ts`) : longueur en UNITÉS DE CODE UTF-16 (`encode_utf16().count()`),
+/// PAS en caractères Unicode — `nom.length` en JavaScript compte ainsi, et
+/// l'ancienne mesure de ce double (`chars().count()`) en divergeait dès
+/// qu'un caractère hors du plan de base (la plupart des emoji : 2 unités
+/// UTF-16, 1 seul `char`) apparaissait dans `nom`.
+///
+/// RONDE DE CORRECTION 1 : avant cette ronde, ce double n'appliquait NI
+/// cette mesure NI le refus de l'octet NUL — un `nom` que le vrai serveur
+/// refuse en 400 (`texteStockable`) était accepté en 201 ici, la même
+/// classe de défaut que ce projet a déjà payée trois fois (voir
+/// task-8-review.md, « Important 2 », et `CLAUDE.md`, « Validation des
+/// entrées »).
+///
+/// Le substitut Unicode isolé (U+D800-U+DFFF), que `texteStockable` refuse
+/// aussi côté site, n'est PAS vérifié ici : un `&str` Rust désérialisé
+/// depuis un JSON par `serde_json` est garanti UTF-8 valide et ne peut
+/// structurellement pas porter une telle valeur.
+fn nom_appareil_valide(valeur: &str) -> bool {
+    let longueur_utf16 = valeur.encode_utf16().count();
+    (1..=64).contains(&longueur_utf16) && !valeur.contains('\0')
+}
+
 /// `POST /api/sky/devices` — valide `publicKey`/`nom`/`plateforme` comme le
 /// vrai (`clePubliqueValide`, longueur de `nom`, liste blanche de
 /// plateformes), incrémente `prochain_id_appareil` à chaque succès. AJOUT
@@ -596,7 +619,7 @@ fn gerer_devices(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &
     let Some(_public_key) = public_key.filter(|v| cle_publique_valide(v)) else {
         return (400, json!({ "error": "publicKey invalide : attendu 32 octets en base64" }).to_string());
     };
-    let Some(nom) = nom.filter(|v| !v.is_empty() && v.chars().count() <= 64) else {
+    let Some(nom) = nom.filter(|v| nom_appareil_valide(v)) else {
         return (400, json!({ "error": "nom invalide : attendu 1 a 64 caracteres" }).to_string());
     };
     const PLATEFORMES_VALIDES: [&str; 3] = ["windows", "macos", "linux"];
@@ -618,6 +641,43 @@ fn gerer_devices(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &
     };
     let corps = serde_json::to_string(&appareil).expect("AppareilFaux se sérialise toujours");
     (201, corps)
+}
+
+/// Alphabet réel des codes ami — même valeur que `ALPHABET` côté site
+/// (`src/lib/sky/codes.ts`) : sans `I`, `L`, `O`, `0`, `1`, pour éviter
+/// l'ambiguïté visuelle. NE JAMAIS CHANGER (invaliderait les codes déjà
+/// émis en production, voir `CLAUDE.md` du dépôt) — recopiée ici, pas
+/// importée : ce double ne dépend d'aucun code du site.
+const ALPHABET_CODE_AMI: &str = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+/// Même règle que `codeValide` côté site : exactement 8 caractères, tous
+/// dans `ALPHABET_CODE_AMI`.
+fn code_ami_valide_forme(brut: &str) -> bool {
+    brut.chars().count() == 8 && brut.chars().all(|c| ALPHABET_CODE_AMI.contains(c))
+}
+
+/// Ramène une saisie à sa forme canonique, ou `None` — même règle que
+/// `normaliserCode` côté site (`codes.ts`) : espaces de bord retirés, mise
+/// en capitales, préfixe `SKY-` retiré s'il est présent, puis tous les
+/// tirets retirés. `None` si le résultat n'a pas la forme d'un code valide.
+///
+/// RONDE DE CORRECTION 1 : avant cette ronde, `gerer_friends` ne
+/// reproduisait NI cette normalisation NI `code_ami_valide_forme` — un
+/// code hors alphabet (ex. `"INCONNU1"`, qui contient `I`, `O` et `1`)
+/// recevait un 404 métier du double alors que le vrai serveur rend un 400
+/// de forme AVANT même de chercher le code (`friends/route.ts`, lignes
+/// 25-56). Le test `ajouter_ami_avec_un_code_inconnu_...` prouvait alors
+/// l'inverse de ce qui se produit en production pour cette entrée précise
+/// — voir task-8-review.md, « Important 1 ».
+fn normaliser_code_ami(brut: &str) -> Option<String> {
+    let majuscules = brut.trim().to_uppercase();
+    let sans_prefixe = majuscules.strip_prefix("SKY-").unwrap_or(&majuscules);
+    let sans_tirets: String = sans_prefixe.chars().filter(|&c| c != '-').collect();
+    if code_ami_valide_forme(&sans_tirets) {
+        Some(sans_tirets)
+    } else {
+        None
+    }
 }
 
 /// Décode `valeur` en base64 standard et vérifie qu'il s'agit de 32 octets
@@ -646,9 +706,18 @@ fn gerer_friends(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &
         Ok(v) => v,
         Err(_) => return (400, json!({ "error": "Corps JSON invalide" }).to_string()),
     };
-    let Some(code) = valeur.get("code").and_then(Value::as_str) else {
+    let Some(code_brut) = valeur.get("code").and_then(Value::as_str) else {
         return (400, json!({ "error": "code invalide : attendu une chaîne" }).to_string());
     };
+
+    // Normalisation ET validation de forme ICI, avant toute comparaison au
+    // code piloté — même endroit et même ordre que le site
+    // (`friends/route.ts`) : c'est ce qui distingue le 400 (forme
+    // invalide) du 404 (forme correcte, code inconnu).
+    let Some(code) = normaliser_code_ami(code_brut) else {
+        return (400, json!({ "error": "code invalide : forme inattendue" }).to_string());
+    };
+    let code = code.as_str();
 
     match &e.code_ami_valide {
         Some((c, id)) if c == code => {
@@ -665,17 +734,29 @@ fn gerer_friends(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &
 /// `POST /api/sky/friends/{id}/accept` — l'identifiant voyage dans le
 /// chemin, la route ne lit aucun corps (même contrat que le site). AJOUT DE
 /// LA TÂCHE 8.
+///
+/// RONDE DE CORRECTION 1 (Mineur) : la forme de l'identifiant est
+/// maintenant validée — un entier strictement positif, comme le site
+/// (`friends/[id]/accept/route.ts` : `Number.isInteger(x) && x > 0`),
+/// AVANT toute comparaison à `amitie_acceptable`. Un identifiant mal formé
+/// (non numérique, négatif, nul, décimal) rend désormais 400, pas le même
+/// 404 qu'un identifiant bien formé mais inexistant — voir
+/// task-8-review.md, « Mineur 3 ».
 fn gerer_accepter_ami(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, chemin: &str) -> (u16, String) {
     let mut e = etat.lock().expect("mutex etat faux empoisonne");
     if let Some(refus) = autoriser_appel(&mut e, jeton) {
         return refus;
     }
 
-    let id: Option<i64> =
-        chemin.strip_prefix("/api/sky/friends/").and_then(|s| s.strip_suffix("/accept")).and_then(|s| s.parse().ok());
+    let segment = chemin.strip_prefix("/api/sky/friends/").and_then(|s| s.strip_suffix("/accept"));
+    let id = segment.and_then(|s| s.parse::<i64>().ok()).filter(|id| *id > 0);
 
-    match (id, e.amitie_acceptable) {
-        (Some(id), Some(acceptable)) if id == acceptable => (200, json!({ "ok": true }).to_string()),
+    let Some(id) = id else {
+        return (400, json!({ "error": "Identifiant invalide" }).to_string());
+    };
+
+    match e.amitie_acceptable {
+        Some(acceptable) if id == acceptable => (200, json!({ "ok": true }).to_string()),
         _ => (404, json!({ "error": "Amitié introuvable" }).to_string()),
     }
 }
@@ -1278,6 +1359,40 @@ mod tests {
 
     #[test]
     fn friends_refuse_un_code_inconnu_et_reussit_avec_le_code_enregistre() {
+        // "STRANGE9" et "BUDDY234" sont tous deux BIEN FORMÉS (8 caractères
+        // de l'alphabet réel `ABCDEFGHJKMNPQRSTUVWXYZ23456789`) — ce test
+        // vise la distinction 404 (forme correcte, inconnu) / succès, pas
+        // la validation de forme elle-même (voir
+        // `friends_refuse_un_code_mal_forme_avec_400` pour celle-ci).
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+
+        let refuse = ureq::post(&format!("{}/api/sky/friends", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(r#"{"code":"STRANGE9"}"#)
+            .unwrap_err();
+        assert_eq!(refuse.into_response().unwrap().status(), 404);
+
+        s.etat_mut().code_ami_valide = Some(("BUDDY234".to_string(), 42));
+        let recu: serde_json::Value = ureq::post(&format!("{}/api/sky/friends", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(r#"{"code":"BUDDY234"}"#)
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(recu["id"], 42);
+    }
+
+    #[test]
+    fn friends_refuse_un_code_mal_forme_avec_400() {
+        // RONDE DE CORRECTION 1, « Important 1 » : "INCONNU1" contient `I`,
+        // `O` et `1`, absents de l'alphabet réel — contre le vrai serveur
+        // ce code reçoit un 400 de forme, JAMAIS le 404 métier qu'un
+        // double moins strict rendrait. Neutralisation : retirer l'appel à
+        // `normaliser_code_ami` dans `gerer_friends` (revenir à une
+        // comparaison directe à `code_ami_valide`) fait rougir CE test
+        // précis, seul — les codes bien formés des deux tests voisins
+        // restent inchangés par une telle neutralisation.
         let s = FauxServeur::demarrer();
         let jeton = s.jeton_de_test();
 
@@ -1285,16 +1400,71 @@ mod tests {
             .set("Authorization", &format!("Bearer {jeton}"))
             .send_string(r#"{"code":"INCONNU1"}"#)
             .unwrap_err();
-        assert_eq!(refuse.into_response().unwrap().status(), 404);
+        let reponse = refuse.into_response().unwrap();
+        assert_eq!(reponse.status(), 400);
+        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"code invalide : forme inattendue"}"#);
+    }
 
-        s.etat_mut().code_ami_valide = Some(("AMIVALID".to_string(), 42));
-        let recu: serde_json::Value = ureq::post(&format!("{}/api/sky/friends", s.url()))
+    #[test]
+    fn devices_refuse_un_nom_avec_octet_nul() {
+        // RONDE DE CORRECTION 1, « Important 2 » : le site refuse l'octet
+        // NUL dans `nom` via `texteStockable` (400) avant que la valeur
+        // n'atteigne Postgres, qui la refuserait par un 500. Échoue si le
+        // double acceptait encore un `nom` qui le porte.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        let cle = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+        let corps = serde_json::json!({"publicKey": cle, "nom": "a\u{0}b", "plateforme": "windows"});
+
+        let reponse = ureq::post(&format!("{}/api/sky/devices", s.url()))
             .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(r#"{"code":"AMIVALID"}"#)
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(recu["id"], 42);
+            .send_string(&corps.to_string())
+            .unwrap_err();
+        assert_eq!(reponse.into_response().unwrap().status(), 400);
+    }
+
+    #[test]
+    fn devices_mesure_la_longueur_du_nom_en_unites_utf16() {
+        // RONDE DE CORRECTION 1 : `nomValide` mesure `nom.length` — des
+        // unités de code UTF-16, pas des caractères Unicode. Un emoji
+        // (U+1F600) compte pour 2 unités UTF-16 mais pour 1 seul `char`
+        // Rust : 33 emoji, c'est 33 `chars()` (accepté par l'ANCIENNE
+        // mesure de ce double, `chars().count() <= 64`) mais 66 unités
+        // UTF-16 (refusé par la vraie mesure, > 64). Échoue si le double
+        // mesurait encore en caractères.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        let cle = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+        let nom_trop_long: String = "😀".repeat(33);
+        assert_eq!(nom_trop_long.chars().count(), 33);
+        assert_eq!(nom_trop_long.encode_utf16().count(), 66);
+
+        let corps = serde_json::json!({"publicKey": cle, "nom": nom_trop_long, "plateforme": "windows"});
+        let reponse = ureq::post(&format!("{}/api/sky/devices", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(&corps.to_string())
+            .unwrap_err();
+        assert_eq!(reponse.into_response().unwrap().status(), 400);
+    }
+
+    #[test]
+    fn friends_accept_refuse_un_identifiant_mal_forme_avec_400() {
+        // RONDE DE CORRECTION 1 (Mineur) : un identifiant non entier,
+        // négatif ou nul reçoit 400 côté site, pas le même 404 qu'un
+        // identifiant bien formé mais inexistant.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        s.etat_mut().amitie_acceptable = Some(7);
+
+        for id in ["0", "-3", "abc", "7.5"] {
+            let reponse = ureq::post(&format!("{}/api/sky/friends/{id}/accept", s.url()))
+                .set("Authorization", &format!("Bearer {jeton}"))
+                .send_string("{}")
+                .unwrap_err();
+            let reponse = reponse.into_response().unwrap();
+            assert_eq!(reponse.status(), 400, "identifiant testé : {id}");
+            assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Identifiant invalide"}"#);
+        }
     }
 
     #[test]
