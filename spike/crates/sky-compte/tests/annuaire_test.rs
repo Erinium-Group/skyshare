@@ -42,6 +42,12 @@ fn synchroniser_ne_jette_jamais_les_enveloppes_dune_reponse_complete() {
     // oubliait de reporter `enveloppes`, ce test rougirait alors que
     // `amis` resterait correct — la preuve que c'est bien CE champ qui est
     // vérifié, pas un effet de bord d'un autre.
+    //
+    // RONDE DE CORRECTION 1 (IMPORTANT 2, task-9-review.md) : le double ne
+    // livre plus qu'à l'appareil associé au jeton qui synchronise (voir
+    // `EtatFaux::jetons_appareil`) — ce test doit donc enregistrer un
+    // appareil réel avec CE jeton avant de déposer une enveloppe à son
+    // intention, au lieu du `9` arbitraire d'avant cette ronde.
     let s = FauxServeur::demarrer();
     let jeton = s.jeton_de_test();
     s.etat_mut().version = 1;
@@ -49,12 +55,14 @@ fn synchroniser_ne_jette_jamais_les_enveloppes_dune_reponse_complete() {
     let coffre = Coffre::pour_test("sky-test-annuaire-sync-enveloppes");
     coffre.ranger_jetons(&sky_compte::Jetons { session: jeton, renouvellement: "peu-importe".to_string() }).unwrap();
 
+    let id_appareil = enregistrer_appareil(&Config::vers(&s.url()), &coffre, "Mon PC", &[1u8; 32]).unwrap();
+
     // Dépose une enveloppe directement dans l'état piloté plutôt que par
     // `POST /api/sky/envelopes` : ce test vise `synchroniser`, pas le dépôt.
     s.etat_mut().enveloppes.push(faux_serveur::EnveloppeFausse {
         id: "1".to_string(),
         expediteur_device_id: 7,
-        destinataire_device_id: 9,
+        destinataire_device_id: id_appareil,
         charge: "YWJj".to_string(),
     });
 
@@ -62,7 +70,7 @@ fn synchroniser_ne_jette_jamais_les_enveloppes_dune_reponse_complete() {
     assert_eq!(etat.enveloppes.len(), 1);
     assert_eq!(etat.enveloppes[0].id, "1");
     assert_eq!(etat.enveloppes[0].expediteur_device_id, 7);
-    assert_eq!(etat.enveloppes[0].destinataire_device_id, 9);
+    assert_eq!(etat.enveloppes[0].destinataire_device_id, id_appareil);
     assert_eq!(etat.enveloppes[0].charge, "YWJj");
 }
 
@@ -106,6 +114,11 @@ fn une_enveloppe_en_attente_court_circuite_inchange_meme_a_version_egale() {
     // charges sur le double : une enveloppe déposée entre deux appels à
     // version inchangée doit continuer à voyager, pas se perdre derrière
     // un `{ inchange: true }` prématuré.
+    //
+    // RONDE DE CORRECTION 1 : même adaptation que le test précédent — un
+    // appareil réel est enregistré avec le jeton qui synchronise, et
+    // l'enveloppe vise cet appareil, pas un `2` arbitraire qu'aucun jeton
+    // ne possède plus depuis le filtrage par appareil.
     let s = FauxServeur::demarrer();
     let jeton = s.jeton_de_test();
     s.etat_mut().version = 5;
@@ -113,12 +126,14 @@ fn une_enveloppe_en_attente_court_circuite_inchange_meme_a_version_egale() {
     let coffre = Coffre::pour_test("sky-test-annuaire-envelope-court-circuite");
     coffre.ranger_jetons(&sky_compte::Jetons { session: jeton, renouvellement: "peu-importe".to_string() }).unwrap();
 
+    let id_appareil = enregistrer_appareil(&Config::vers(&s.url()), &coffre, "Mon PC", &[2u8; 32]).unwrap();
+
     let precedent = Etat { version: 5, ..etat_vide() };
 
     s.etat_mut().enveloppes.push(faux_serveur::EnveloppeFausse {
         id: "42".to_string(),
         expediteur_device_id: 1,
-        destinataire_device_id: 2,
+        destinataire_device_id: id_appareil,
         charge: "eA==".to_string(),
     });
 

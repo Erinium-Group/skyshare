@@ -353,6 +353,13 @@ fn nom_appareil_valide(nom: &str) -> bool {
 /// `expediteur_device_id`. Le faire ICI, jamais laissé à la charge de
 /// l'appelant, évite la classe de défaut la plus coûteuse de ce jalon — une
 /// fonction juste que personne n'appelle jamais dans le bon ordre.
+///
+/// DÉSYNCHRONISATION COFFRE/SERVEUR (RONDE DE CORRECTION 1, Mineur 2 de la
+/// revue de la tâche 9) : si l'écriture locale échoue APRÈS que le serveur a
+/// déjà créé l'appareil (`id` existe côté serveur), l'erreur rendue le dit
+/// explicitement — voir plus bas. Ni reprise automatique ni suppression
+/// côté serveur ici : cas rare (échec d'écriture du trousseau), et une
+/// correction automatique dépasserait la portée de cette tâche.
 pub fn enregistrer_appareil(config: &Config, coffre: &Coffre, nom: &str, cle: &[u8; 32]) -> Result<i64, ErreurCompte> {
     if !nom_appareil_valide(nom) {
         return Err(ErreurCompte::Protocole(
@@ -373,7 +380,20 @@ pub fn enregistrer_appareil(config: &Config, coffre: &Coffre, nom: &str, cle: &[
         Ok(reponse.id)
     })?;
 
-    coffre.ranger_identifiant_appareil(id)?;
+    // À ce point, l'appareil `id` existe DÉJÀ côté serveur : un échec
+    // d'écriture locale ici (trousseau indisponible, refusé par l'OS, ...)
+    // ne doit jamais ressembler à un échec d'enregistrement ordinaire. Sans
+    // ce message précis, l'appelant croirait l'opération entièrement ratée
+    // et réessaierait — créant un SECOND appareil côté serveur, pendant que
+    // le premier reste orphelin (son identifiant introuvable localement,
+    // donc plus aucun dépôt possible tant qu'il n'est pas retrouvé).
+    if let Err(erreur_coffre) = coffre.ranger_identifiant_appareil(id) {
+        return Err(ErreurCompte::Coffre(format!(
+            "appareil {id} créé côté serveur mais son identifiant n'a pas pu être enregistré \
+             localement ({erreur_coffre}) — un nouvel appel à enregistrer_appareil créera un \
+             second appareil, celui-ci restera orphelin côté serveur"
+        )));
+    }
 
     Ok(id)
 }

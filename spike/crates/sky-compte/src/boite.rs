@@ -6,6 +6,8 @@
 //! ce crate. `relever`, elle, n'appelle jamais le réseau : voir sa
 //! documentation pour la raison.
 
+use std::fmt;
+
 use serde::Serialize;
 use sky_crypto::Identity;
 
@@ -38,11 +40,30 @@ const TAILLE_MAX_CHARGE_SCELLEE: usize = 4096;
 pub const TAILLE_MAX_CLAIR: usize = TAILLE_MAX_CHARGE_SCELLEE - SURCOUT_SCELLEMENT;
 
 /// Un message déchiffré, tel que rendu par `relever`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `clair` porte l'offre ou la réponse SDP d'une connexion — adresses IP
+/// comprises. Ne dérive **pas** `Debug` : même discipline que `Jetons`
+/// (`coffre.rs`), pour la même raison — un `panic!`, un `assert_eq!` échoué
+/// ou un `{:?}` de débogage sur cette valeur ne doit jamais écrire une
+/// charge en clair, ce que le projet promet de ne jamais journaliser.
+/// L'implémentation manuelle ci-dessous montre `id` et
+/// `expediteur_device_id` (sans risque, ce sont des identifiants opaques)
+/// et la LONGUEUR de `clair`, jamais son contenu.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Message {
     pub id: String,
     pub expediteur_device_id: i64,
     pub clair: Vec<u8>,
+}
+
+impl fmt::Debug for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Message")
+            .field("id", &self.id)
+            .field("expediteur_device_id", &self.expediteur_device_id)
+            .field("clair_longueur_octets", &self.clair.len())
+            .finish()
+    }
 }
 
 #[derive(Serialize)]
@@ -300,5 +321,38 @@ mod tests {
         let identite = Identity::generate();
         let etat = etat_avec(Vec::new());
         assert!(relever(&etat, &identite).is_empty());
+    }
+
+    #[test]
+    fn le_debug_de_message_naffiche_pas_le_clair() {
+        // RONDE DE CORRECTION 1, IMPORTANT 1 : `clair` porte une offre ou
+        // une réponse SDP (adresses IP comprises) — un `{:?}` ne doit
+        // jamais l'écrire, même discipline que `le_debug_de_jetons_...`
+        // dans `coffre.rs`.
+        //
+        // DEUX ASSERTIONS, POUR DEUX FUITES DIFFÉRENTES : un `clair` texte
+        // fuiterait tel quel (`contains`) ; un `#[derive(Debug)]` NAÏF sur
+        // `Vec<u8>` ne réimprime PAS le texte littéral — il énumère les
+        // octets en décimal (`[84, 69, 77, ...]`), ce que `contains` seul
+        // ne détecterait PAS. La borne de longueur ci-dessous couvre CE
+        // cas : 4200 octets de clair énumérés un par un pèseraient
+        // largement plus que 300 caractères, alors que le masquage voulu
+        // n'affiche qu'un nombre. Neutralisation : remettre
+        // `#[derive(Debug, ...)]` sur `Message` fait rougir CE test sur la
+        // borne de longueur, et lui seul.
+        const MOTIF: &str = "TEMOIN-SDP-EN-CLAIR-avec-IP-203.0.113.42-";
+        let clair: Vec<u8> = MOTIF.repeat(100).into_bytes(); // ~4200 octets.
+        let message = Message { id: "1".to_string(), expediteur_device_id: 7, clair: clair.clone() };
+
+        let debug = format!("{message:?}");
+
+        assert!(!debug.contains(MOTIF), "le rendu Debug a laissé fuir le clair en texte : {debug}");
+        assert!(
+            debug.len() < 300,
+            "le rendu Debug ({} caracteres) est bien plus long que necessaire pour {} octets de \
+             clair masqué — il les énumère probablement un par un : {debug}",
+            debug.len(),
+            clair.len(),
+        );
     }
 }

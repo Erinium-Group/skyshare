@@ -19,7 +19,7 @@
 //! Aucun runtime asynchrone : `tiny_http` est synchrone, une seule
 //! requête traitée à la fois sur le fil dédié du double.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
@@ -313,6 +313,30 @@ pub struct EtatFaux {
     /// (forme valide, authentification passée) — observable pour les
     /// tests de boîte aux lettres des tâches suivantes.
     pub depots_recus: u64,
+
+    /// Associe un jeton d'ACCÈS à l'appareil que `POST /api/sky/devices` a
+    /// créé avec CE jeton — même lien que `devices.session_id` côté site
+    /// (`appareils.ts::enregistrerAppareil`, posé à l'enregistrement), lu
+    /// ensuite par `GET /api/sky/sync` pour résoudre `deviceIdCourant`
+    /// (`sync/route.ts` : `UPDATE devices ... WHERE session_id = $1
+    /// RETURNING id`).
+    ///
+    /// RONDE DE CORRECTION 1 (IMPORTANT 2 de task-9-review.md) : avant
+    /// cette ronde, `gerer_sync` ne filtrait `enveloppes` par AUCUN
+    /// appareil — tout jeton authentifié recevait la boîte aux lettres
+    /// COMPLÈTE, y compris les enveloppes d'un autre appareil. Ce champ est
+    /// ce qui permet à `gerer_sync` de reproduire la portée réelle
+    /// (`deviceIdCourant`, `etat.ts` "RONDE DE CORRECTION 1 (§2)") : un
+    /// jeton absent d'ici (aucun `POST /api/sky/devices` réussi avec lui)
+    /// n'a, structurellement, aucun appareil courant — `enveloppes` vaut
+    /// alors toujours `[]`, jamais celles d'un autre appareil, exactement
+    /// comme une session sans application installée côté site.
+    ///
+    /// Un jeton peut réenregistrer un NOUVEL appareil (l'entrée est
+    /// écrasée, jamais cumulée) : un second `POST /api/sky/devices` avec le
+    /// même jeton fait pointer ce jeton vers le second appareil, comme un
+    /// second appel réel à `enregistrerAppareil` sur la même session.
+    pub jetons_appareil: HashMap<String, i64>,
 }
 
 /// Serveur double : un `tiny_http::Server` sur un port éphémère, dans un
@@ -376,6 +400,19 @@ impl FauxServeur {
         const JETON: &str = "jeton-de-test";
         self.etat_mut().jetons_acceptes.insert(JETON.to_string());
         JETON.to_string()
+    }
+
+    /// Jeton d'accès pré-approuvé, DISTINCT de celui rendu par
+    /// `jeton_de_test()` (et de tout autre `suffixe`) — AJOUT DE LA RONDE
+    /// DE CORRECTION 1 (task-9-review.md, IMPORTANT 2) : prouver que le
+    /// double isole les enveloppes par appareil exige de faire coexister
+    /// DEUX appareils, donc deux jetons, dans le même `FauxServeur`.
+    /// `jeton_de_test()` seule ne le permettait pas : elle rend toujours la
+    /// même valeur, quel que soit le nombre d'appels.
+    pub fn jeton_de_test_pour(&self, suffixe: &str) -> String {
+        let jeton = format!("jeton-de-test-{suffixe}");
+        self.etat_mut().jetons_acceptes.insert(jeton.clone());
+        jeton
     }
 
     /// Jeton de RENOUVELLEMENT pré-approuvé — symétrique de
@@ -543,14 +580,38 @@ fn gerer_sync(
         return refus;
     }
 
-    // AJOUT DE LA TÂCHE 8 : une enveloppe en attente COURT-CIRCUITE
-    // `inchange`, même règle que `construireEtat` côté site
-    // (`enveloppe_en_attente || version !== versionConnue`). Sans ce
-    // court-circuit, une enveloppe déposée entre deux synchronisations de
-    // MÊME version (le cas courant — déposer une enveloppe ne touche que
-    // `enveloppes`, jamais `version`, tout comme sur le vrai serveur) ne
-    // voyagerait plus jamais : la négociation ne se terminerait jamais.
-    if version_connue == Some(e.version) && e.enveloppes.is_empty() {
+    // RONDE DE CORRECTION 1 (IMPORTANT 2 de task-9-review.md) : l'appareil
+    // COURANT est celui que `jetons_appareil` associe à CE jeton (posé par
+    // `gerer_devices` au dernier `POST /api/sky/devices` réussi avec lui)
+    // — même résolution que `deviceIdCourant` côté site, depuis
+    // `devices.session_id`. `None` pour un jeton qui n'a jamais enregistré
+    // d'appareil (session web sans application) : structurellement, un tel
+    // jeton n'a AUCUNE enveloppe à recevoir, jamais celles d'un autre
+    // appareil — voir `EtatFaux::jetons_appareil`.
+    let appareil_courant = jeton.and_then(|j| e.jetons_appareil.get(j).copied());
+
+    // Enveloppes dont CET appareil est le destinataire — jamais toutes
+    // celles de `e.enveloppes`. AVANT cette ronde, `gerer_sync` rendait
+    // `e.enveloppes` intégralement à tout jeton authentifié, quel que soit
+    // l'appareil qui l'avait déposée : un jeton pouvait relever — et donc
+    // EFFACER, la lecture est destructive — une enveloppe scellée pour la
+    // clé d'un AUTRE appareil, perdue pour son vrai destinataire.
+    let enveloppes_pour_cet_appareil: Vec<EnveloppeFausse> = match appareil_courant {
+        Some(id) => e.enveloppes.iter().filter(|env| env.destinataire_device_id == id).cloned().collect(),
+        None => Vec::new(),
+    };
+
+    // AJOUT DE LA TÂCHE 8, PORTÉE RESTREINTE PAR CETTE RONDE : une
+    // enveloppe en attente COURT-CIRCUITE `inchange`, même règle que
+    // `construireEtat` côté site (`enveloppe_en_attente || version !==
+    // versionConnue`) — mais désormais SEULEMENT une enveloppe en attente
+    // POUR CET APPAREIL, comme `enveloppe_en_attente` côté site
+    // (`destinataire_device_id = $2` où `$2` est `deviceIdCourant`, jamais
+    // « une enveloppe existe quelque part »). Sans ce court-circuit, une
+    // enveloppe déposée entre deux synchronisations de MÊME version (le cas
+    // courant — déposer une enveloppe ne touche que `enveloppes`, jamais
+    // `version`) ne voyagerait plus jamais.
+    if version_connue == Some(e.version) && enveloppes_pour_cet_appareil.is_empty() {
         return (200, json!({ "inchange": true }).to_string());
     }
 
@@ -561,16 +622,19 @@ fn gerer_sync(
         "demandes": e.demandes,
         "listes": Vec::<Value>::new(),
         "appareils": e.appareils,
-        "enveloppes": e.enveloppes,
+        "enveloppes": enveloppes_pour_cet_appareil,
     });
 
     // Le vrai serveur EFFACE les enveloppes en les livrant (`releverPour`,
     // `enveloppes.ts` côté site) — sans cette ligne, une même enveloppe
-    // réapparaîtrait indéfiniment à chaque synchronisation suivante au
-    // lieu de n'être vue qu'une fois. `corps` est déjà construit (donc
-    // déjà une copie possédée des enveloppes actuelles) avant que ce
-    // `clear` ne mute l'état partagé.
-    e.enveloppes.clear();
+    // réapparaîtrait indéfiniment à chaque synchronisation suivante au lieu
+    // de n'être vue qu'une fois. RONDE DE CORRECTION 1 : n'efface plus QUE
+    // les enveloppes livrées à CET appareil — celles des autres restent en
+    // attente, exactement comme `releverPour([deviceIdCourant])` côté site
+    // ne touche jamais les lignes des autres appareils.
+    if let Some(id) = appareil_courant {
+        e.enveloppes.retain(|env| env.destinataire_device_id != id);
+    }
 
     (200, corps.to_string())
 }
@@ -639,6 +703,17 @@ fn gerer_devices(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &
         last_seen_at: None,
         revoked_at: None,
     };
+
+    // RONDE DE CORRECTION 1 (IMPORTANT 2) : c'est ICI, au succès de
+    // l'enregistrement, que le jeton présenté est lié à l'appareil qu'il
+    // vient de créer — même moment que le site (`devices.session_id` posé
+    // par `enregistrerAppareil`, `appareils.ts`). `gerer_sync` lit cette
+    // association pour ne livrer que les enveloppes de CET appareil — voir
+    // le commentaire de `EtatFaux::jetons_appareil`.
+    if let Some(jeton) = jeton {
+        e.jetons_appareil.insert(jeton.to_string(), appareil.id);
+    }
+
     let corps = serde_json::to_string(&appareil).expect("AppareilFaux se sérialise toujours");
     (201, corps)
 }
@@ -966,6 +1041,25 @@ mod tests {
     // pratiquée pour le prouver — voir task-4-report.md pour le relevé
     // complet des neutralisations et de leur rougissement.
 
+    /// Enregistre un appareil via `POST /api/sky/devices` avec `jeton`, en
+    /// HTTP brut (pas via `sky_compte`, ces tests visent le double
+    /// directement) — AJOUT DE LA RONDE DE CORRECTION 1 (IMPORTANT 2) :
+    /// plusieurs tests de ce module doivent maintenant faire correspondre
+    /// un jeton à un appareil AVANT de vérifier qu'une enveloppe le
+    /// rejoint, puisque `gerer_sync` ne livre plus qu'à l'appareil associé
+    /// (`EtatFaux::jetons_appareil`). Rend l'identifiant attribué par le
+    /// double, à utiliser comme `destinataire_device_id`.
+    fn enregistrer_appareil_http(s: &FauxServeur, jeton: &str) -> i64 {
+        let cle = base64::engine::general_purpose::STANDARD.encode([5u8; 32]);
+        let recu: serde_json::Value = ureq::post(&format!("{}/api/sky/devices", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(&format!(r#"{{"publicKey":"{cle}","nom":"Appareil de test","plateforme":"windows"}}"#))
+            .expect("enregistrement d'appareil attendu en succes dans ce test")
+            .into_json()
+            .expect("reponse JSON attendue");
+        recu["id"].as_i64().expect("id attendu comme entier")
+    }
+
     #[test]
     fn le_double_rend_un_tableau_vide_jamais_absent() {
         // Échoue si `appareils` est sérialisé absent (Option::None -> champ
@@ -1149,11 +1243,20 @@ mod tests {
         // Échoue si `depots_recus` ne progresse pas, ou si l'enveloppe
         // déposée ne réapparaît pas dans `GET /api/sky/sync` avec `id`
         // typé chaîne et les deux device_id typés nombre.
+        //
+        // RONDE DE CORRECTION 1 : le jeton qui relève doit désormais avoir
+        // un appareil associé (`jetons_appareil`) — sans quoi `gerer_sync`
+        // rend `enveloppes: []` par construction. `enregistrer_appareil_http`
+        // fournit cet appareil et son identifiant réel, utilisé ci-dessous
+        // comme `destinataire_device_id` au lieu d'un `9` arbitraire.
         let s = FauxServeur::demarrer();
         let jeton = s.jeton_de_test();
+        let id_appareil = enregistrer_appareil_http(&s, &jeton);
         let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
             .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(r#"{"expediteur_device_id":7,"destinataire_device_id":9,"charge":"YWJj"}"#)
+            .send_string(&format!(
+                r#"{{"expediteur_device_id":7,"destinataire_device_id":{id_appareil},"charge":"YWJj"}}"#
+            ))
             .unwrap();
         assert_eq!(reponse.status(), 204);
         assert_eq!(s.etat_mut().depots_recus, 1);
@@ -1167,7 +1270,7 @@ mod tests {
         let enveloppe = &recu["enveloppes"][0];
         assert!(enveloppe["id"].is_string());
         assert_eq!(enveloppe["expediteur_device_id"], 7);
-        assert_eq!(enveloppe["destinataire_device_id"], 9);
+        assert_eq!(enveloppe["destinataire_device_id"], id_appareil);
         assert_eq!(enveloppe["charge"], "YWJj");
     }
 
@@ -1416,13 +1519,20 @@ mod tests {
         // continuer à voyager. Échoue si `gerer_sync` répondait `inchange`
         // dès que `version_connue == e.version`, sans regarder si une
         // enveloppe attend encore.
+        //
+        // RONDE DE CORRECTION 1 : le jeton qui synchronise doit avoir un
+        // appareil associé — le court-circuit ne regarde désormais QUE les
+        // enveloppes de CET appareil (voir `EtatFaux::jetons_appareil`),
+        // donc l'enveloppe poussée ci-dessous vise l'identifiant que le
+        // double vient réellement d'attribuer, pas un `2` arbitraire.
         let s = FauxServeur::demarrer();
         let jeton = s.jeton_de_test();
+        let id_appareil = enregistrer_appareil_http(&s, &jeton);
         s.etat_mut().version = 5;
         s.etat_mut().enveloppes.push(EnveloppeFausse {
             id: "1".to_string(),
             expediteur_device_id: 1,
-            destinataire_device_id: 2,
+            destinataire_device_id: id_appareil,
             charge: "YQ==".to_string(),
         });
 
@@ -1438,19 +1548,52 @@ mod tests {
     }
 
     #[test]
+    fn sync_ne_court_circuite_pas_inchange_pour_une_enveloppe_dun_autre_appareil() {
+        // NOUVEAU (RONDE DE CORRECTION 1) : symétrique du test précédent —
+        // une enveloppe qui attend un AUTRE appareil ne doit PAS empêcher
+        // `inchange`. Avant cette ronde, `gerer_sync` regardait
+        // `e.enveloppes.is_empty()` globalement : une enveloppe pour
+        // n'importe quel appareil aurait fait échouer ce test-ci en
+        // court-circuitant `inchange` à tort.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        let mon_id = enregistrer_appareil_http(&s, &jeton);
+        s.etat_mut().version = 5;
+        s.etat_mut().enveloppes.push(EnveloppeFausse {
+            id: "1".to_string(),
+            expediteur_device_id: 1,
+            destinataire_device_id: mon_id + 1000, // un AUTRE appareil, jamais le mien.
+            charge: "YQ==".to_string(),
+        });
+
+        let recu: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=5", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+
+        assert_eq!(recu, serde_json::json!({ "inchange": true }));
+    }
+
+    #[test]
     fn sync_efface_les_enveloppes_apres_livraison() {
         // Échoue si `gerer_sync` ne vidait pas `EtatFaux::enveloppes` après
         // les avoir servies : un second appel, à la MÊME version, verrait
         // alors encore l'enveloppe déjà livrée — soit en la retransmettant
         // (si le court-circuit ci-dessus manquait aussi), soit en
         // continuant à empêcher `inchange` pour toujours.
+        //
+        // RONDE DE CORRECTION 1 : même adaptation que le test précédent —
+        // jeton associé à un appareil réel, enveloppe adressée à celui-ci.
         let s = FauxServeur::demarrer();
         let jeton = s.jeton_de_test();
+        let id_appareil = enregistrer_appareil_http(&s, &jeton);
         s.etat_mut().version = 5;
         s.etat_mut().enveloppes.push(EnveloppeFausse {
             id: "1".to_string(),
             expediteur_device_id: 1,
-            destinataire_device_id: 2,
+            destinataire_device_id: id_appareil,
             charge: "YQ==".to_string(),
         });
 
@@ -1469,6 +1612,56 @@ mod tests {
             .into_json()
             .unwrap();
         assert_eq!(second, serde_json::json!({ "inchange": true }));
+    }
+
+    #[test]
+    fn sync_nefface_pas_les_enveloppes_dun_autre_appareil() {
+        // NOUVEAU (RONDE DE CORRECTION 1) : la consommation à la livraison
+        // ne doit effacer QUE les enveloppes livrées à CET appareil. Avant
+        // cette ronde, `e.enveloppes.clear()` videait tout — une enveloppe
+        // pour un autre appareil, jamais vue par ce jeton, disparaissait
+        // quand même.
+        let s = FauxServeur::demarrer();
+        let jeton_a = s.jeton_de_test_pour("a-nefface-pas-autrui");
+        let _id_a = enregistrer_appareil_http(&s, &jeton_a); // seul le jeton sert ici.
+        let jeton_b = s.jeton_de_test_pour("b-nefface-pas-autrui");
+        let id_b = enregistrer_appareil_http(&s, &jeton_b);
+        s.etat_mut().version = 5;
+        s.etat_mut().enveloppes.push(EnveloppeFausse {
+            id: "1".to_string(),
+            expediteur_device_id: 1,
+            destinataire_device_id: id_b,
+            charge: "YQ==".to_string(),
+        });
+
+        // A synchronise SANS `?version=` (délibérément, voir ci-dessous) :
+        // ne doit RIEN voir (l'enveloppe est pour B), et ne doit RIEN
+        // effacer.
+        //
+        // SANS `?version=` — PAS UN OUBLI : avec `?version=5` (= e.version),
+        // et aucune enveloppe pour A, le court-circuit `inchange` renvoie
+        // AVANT MÊME D'ATTEINDRE la ligne qui efface — la neutralisation
+        // visée ici (retirer le filtre de `retain`) ne serait alors JAMAIS
+        // exercée, et ce test resterait vert même cassé. Sans `?version=`,
+        // `version_connue` vaut `None`, qui ne peut jamais égaler
+        // `Some(e.version)` : la branche complète (et sa consommation) est
+        // TOUJOURS empruntée.
+        let _: serde_json::Value = ureq::get(&format!("{}/api/sky/sync", s.url()))
+            .set("Authorization", &format!("Bearer {jeton_a}"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(s.etat_mut().enveloppes.len(), 1, "l'enveloppe de B doit survivre à la synchronisation de A");
+
+        // B synchronise ensuite : doit voir SON enveloppe, encore présente.
+        let recu_b: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=5", s.url()))
+            .set("Authorization", &format!("Bearer {jeton_b}"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(recu_b["enveloppes"][0]["destinataire_device_id"], id_b);
     }
 
     #[test]

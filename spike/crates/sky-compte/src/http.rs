@@ -60,6 +60,18 @@ pub enum ReponseHttp<T> {
     Refus { statut: u16, corps: String },
 }
 
+/// Issue BRUTE d'une requête — voir `ClientHttp::issue_requete`. Distincte
+/// de `ReponseHttp` : `Succes` porte ici la `ureq::Response` non décodée,
+/// jamais un `T` déjà désérialisé.
+enum IssueRequete {
+    // `Box` : `ureq::Response` pèse largement plus que la variante `Refus`
+    // (clippy::large_enum_variant) — l'indirection évite que CHAQUE valeur
+    // de cet enum, y compris un simple refus, porte la taille du plus gros
+    // cas.
+    Succes(Box<ureq::Response>),
+    Refus { statut: u16, corps: String },
+}
+
 /// Client HTTP synchrone vers l'API du site — pas de runtime asynchrone,
 /// `ureq` bloque le thread appelant le temps de la requête.
 pub struct ClientHttp {
@@ -145,15 +157,30 @@ impl ClientHttp {
     fn traiter_reponse_avec_refus<T: DeserializeOwned>(
         reponse: Result<ureq::Response, ureq::Error>,
     ) -> Result<ReponseHttp<T>, ErreurCompte> {
-        match reponse {
-            Ok(rep) => rep
+        match Self::issue_requete(reponse)? {
+            IssueRequete::Succes(rep) => rep
                 .into_json::<T>()
                 .map(ReponseHttp::Succes)
                 .map_err(|e| ErreurCompte::Protocole(e.to_string())),
+            IssueRequete::Refus { statut, corps } => Ok(ReponseHttp::Refus { statut, corps }),
+        }
+    }
+
+    /// Branche commune à `traiter_reponse_avec_refus` et
+    /// `post_json_reponse_vide_avec_refus` — RONDE DE CORRECTION 1 (Mineur
+    /// 1 de la revue de la tâche 9) : les deux dupliquaient ~10 lignes de
+    /// décision 401/statut/transport, identiques mot pour mot. Ce que fait
+    /// un SUCCÈS diffère entre les deux (décoder un corps, ou l'ignorer sur
+    /// un 204) — c'est la SEULE chose que cette fonction laisse à
+    /// l'appelant, en lui rendant la `ureq::Response` brute plutôt qu'un
+    /// `T` déjà décodé.
+    fn issue_requete(reponse: Result<ureq::Response, ureq::Error>) -> Result<IssueRequete, ErreurCompte> {
+        match reponse {
+            Ok(rep) => Ok(IssueRequete::Succes(Box::new(rep))),
             Err(ureq::Error::Status(401, _)) => Err(ErreurCompte::Refuse),
             Err(ureq::Error::Status(statut, rep)) => {
                 let corps = rep.into_string().unwrap_or_default();
-                Ok(ReponseHttp::Refus { statut, corps: corps_sans_en_tete(&corps).into_owned() })
+                Ok(IssueRequete::Refus { statut, corps: corps_sans_en_tete(&corps).into_owned() })
             }
             Err(ureq::Error::Transport(transport)) => Err(ErreurCompte::Reseau(transport.to_string())),
         }
@@ -180,14 +207,9 @@ impl ClientHttp {
         jeton: Option<&str>,
     ) -> Result<ReponseHttp<()>, ErreurCompte> {
         let requete = Self::avec_jeton(self.agent.post(&self.url(chemin)), jeton);
-        match requete.send_json(corps) {
-            Ok(_reponse_2xx) => Ok(ReponseHttp::Succes(())),
-            Err(ureq::Error::Status(401, _)) => Err(ErreurCompte::Refuse),
-            Err(ureq::Error::Status(statut, rep)) => {
-                let corps = rep.into_string().unwrap_or_default();
-                Ok(ReponseHttp::Refus { statut, corps: corps_sans_en_tete(&corps).into_owned() })
-            }
-            Err(ureq::Error::Transport(transport)) => Err(ErreurCompte::Reseau(transport.to_string())),
+        match Self::issue_requete(requete.send_json(corps))? {
+            IssueRequete::Succes(_reponse_2xx) => Ok(ReponseHttp::Succes(())),
+            IssueRequete::Refus { statut, corps } => Ok(ReponseHttp::Refus { statut, corps }),
         }
     }
 }
