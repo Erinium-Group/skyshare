@@ -398,6 +398,55 @@ pub fn enregistrer_appareil(config: &Config, coffre: &Coffre, nom: &str, cle: &[
     Ok(id)
 }
 
+/// Alphabet réel des codes ami — même valeur que `ALPHABET` côté site
+/// (`src/lib/sky/codes.ts`) : sans `I`, `L`, `O`, `0`, `1`, pour éviter
+/// l'ambiguïté visuelle. NE JAMAIS CHANGER (invaliderait les codes déjà émis
+/// en production, voir `CLAUDE.md` du dépôt) — recopié ici, pas importé :
+/// cette bibliothèque ne dépend d'aucun code du site.
+const ALPHABET_CODE_AMI: &str = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+/// Même règle que `codeValide` côté site : exactement 8 caractères, tous
+/// dans `ALPHABET_CODE_AMI`.
+fn code_ami_valide_forme(brut: &str) -> bool {
+    brut.chars().count() == 8 && brut.chars().all(|c| ALPHABET_CODE_AMI.contains(c))
+}
+
+/// Ramène une saisie humaine de code ami à sa forme canonique, ou `None` —
+/// reproduit EXACTEMENT `normaliserCode` côté site (`src/lib/sky/codes.ts`) :
+/// espaces de bord retirés, mise en capitales, PUIS préfixe `SKY-` retiré
+/// s'il est présent, PUIS tous les tirets retirés ; le résultat doit avoir
+/// la forme d'un code valide (8 caractères de `ALPHABET_CODE_AMI`).
+///
+/// IMPLÉMENTATION PROPRE À CETTE BIBLIOTHÈQUE, PAS REPRISE DU SERVEUR
+/// DOUBLE : si le double appelait cette même fonction, il imiterait le
+/// client au lieu du site qu'il est censé témoigner — ce sont deux copies
+/// volontairement distinctes.
+///
+/// L'ORDRE COMPTE : la mise en capitales précède le retrait du préfixe, donc
+/// `"sky-abcdefgh"` (préfixe en minuscules) est valide — le retirer avant de
+/// capitaliser le manquerait.
+///
+/// Capitalisation par `to_uppercase()` (Unicode complet), JAMAIS
+/// `to_ascii_uppercase()` : JavaScript applique la casse Unicode complète,
+/// et un `ſ` (s long, U+017F) devient `S` des deux côtés — `S` appartient à
+/// l'alphabet.
+///
+/// `trim()` en JavaScript retire aussi U+FEFF (BOM), que `str::trim()` de
+/// Rust ne retire PAS (U+FEFF n'a pas la propriété Unicode `White_Space`,
+/// contrairement à tous les autres caractères que `trim()` de Rust couvre
+/// déjà) — retiré explicitement ici pour reproduire le comportement du site.
+pub fn normaliser_code_ami(brut: &str) -> Option<String> {
+    let recadre = brut.trim_matches(|c: char| c.is_whitespace() || c == '\u{FEFF}');
+    let majuscules = recadre.to_uppercase();
+    let sans_prefixe = majuscules.strip_prefix("SKY-").unwrap_or(&majuscules);
+    let sans_tirets: String = sans_prefixe.chars().filter(|&c| c != '-').collect();
+    if code_ami_valide_forme(&sans_tirets) {
+        Some(sans_tirets)
+    } else {
+        None
+    }
+}
+
 /// Issue d'un `ajouter_ami` — les deux refus attendus (`404`, `409`) sont
 /// des valeurs, pas des erreurs : ils font partie du déroulement normal de
 /// l'ajout d'un ami, contrairement à un échec réseau ou de protocole.
@@ -662,5 +711,64 @@ mod tests {
         let bruitee = format!("{valide}!!!");
         assert!(cle_publique_valide(&valide));
         assert!(!cle_publique_valide(&bruitee));
+    }
+
+    // --- normaliser_code_ami -----------------------------------------
+
+    #[test]
+    fn un_code_deja_canonique_est_inchange() {
+        assert_eq!(normaliser_code_ami("ABCDEFGH").as_deref(), Some("ABCDEFGH"));
+    }
+
+    #[test]
+    fn espaces_tirets_prefixe_et_minuscules_sont_tolere() {
+        assert_eq!(normaliser_code_ami("  sky-abcd-efgh  ").as_deref(), Some("ABCDEFGH"));
+    }
+
+    #[test]
+    fn la_majuscule_precede_le_retrait_du_prefixe() {
+        // NEUTRALISATION CIBLÉE : si l'implémentation retirait le préfixe
+        // "SKY-" AVANT de capitaliser, cette entrée en minuscules ne
+        // correspondrait plus au préfixe (comparaison sensible à la casse)
+        // et le résultat resterait "SKYABCDEFGH" (11 caractères) — invalide.
+        // Seule la capitalisation PUIS le retrait dans cet ordre rend
+        // "ABCDEFGH".
+        assert_eq!(normaliser_code_ami("sky-abcdefgh").as_deref(), Some("ABCDEFGH"));
+    }
+
+    #[test]
+    fn un_s_long_unicode_se_capitalise_comme_en_javascript() {
+        // NEUTRALISATION CIBLÉE : `to_ascii_uppercase()` laisserait 'ſ'
+        // (U+017F, LATIN SMALL LETTER LONG S) inchangé — hors de
+        // ALPHABET_CODE_AMI, donc refusé. `to_uppercase()` (casse Unicode
+        // complète, comme JavaScript) le convertit en 'S', qui appartient à
+        // l'alphabet : le code devient valide.
+        assert_eq!(normaliser_code_ami("ABCDEFGſ").as_deref(), Some("ABCDEFGS"));
+    }
+
+    #[test]
+    fn lalphabet_reste_verifie_apres_normalisation() {
+        // NEUTRALISATION CIBLÉE : si le contrôle d'alphabet disparaissait
+        // (seule la longueur restant vérifiée), "INCONNU1" — huit
+        // caractères, mais I, O et 1 sont absents de ALPHABET_CODE_AMI —
+        // serait accepté à tort.
+        assert_eq!(normaliser_code_ami("INCONNU1"), None);
+    }
+
+    #[test]
+    fn une_longueur_incorrecte_est_refusee() {
+        assert_eq!(normaliser_code_ami("ABCDEFG"), None); // 7
+        assert_eq!(normaliser_code_ami("ABCDEFGHJ"), None); // 9
+    }
+
+    #[test]
+    fn le_bom_unicode_est_retire_comme_par_trim_javascript() {
+        // NEUTRALISATION CIBLÉE : `str::trim()` de Rust seul ne retire PAS
+        // U+FEFF (il n'a pas la propriété Unicode White_Space) — sans le
+        // retrait explicite, ce code resterait précédé du caractère et la
+        // longueur totale (9 avant filtrage par l'alphabet, qui de toute
+        // façon rejetterait le caractère) échouerait la validation de forme.
+        let avec_bom = "\u{FEFF}ABCDEFGH\u{FEFF}";
+        assert_eq!(normaliser_code_ami(avec_bom).as_deref(), Some("ABCDEFGH"));
     }
 }

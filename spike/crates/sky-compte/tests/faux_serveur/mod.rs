@@ -165,6 +165,62 @@ pub struct EnveloppeFausse {
     pub charge: String,
 }
 
+/// Utilisateur courant tel que rendu par `GET /api/auth/me` — forme figée
+/// par la route (`src/app/api/auth/me/route.ts`, côté site). AJOUT DE LA
+/// TÂCHE 10 (hors brief de la tâche 4, extension autorisée par le
+/// coordinateur — voir « T10 : source du nom tranchée » dans le journal de
+/// progression) : `sky_compte::moi` n'a aucun autre moyen de connaître le
+/// nom Discord affiché après connexion, ni `connecter` ni `synchroniser` ne
+/// le portent.
+///
+/// Tous les champs en camelCase EXCEPT `id` (déjà sans casse à respecter) :
+/// forme exacte de la réponse JSON du site, pas une convention uniforme
+/// inventée pour ce double.
+#[derive(Debug, Clone, Serialize)]
+pub struct MoiFaux {
+    pub id: i64,
+    #[serde(rename = "discordId")]
+    pub discord_id: String,
+    #[serde(rename = "discordName")]
+    pub discord_name: String,
+    #[serde(rename = "discordAvatar")]
+    pub discord_avatar: Option<String>,
+    #[serde(rename = "discordEmail")]
+    pub discord_email: Option<String>,
+    #[serde(rename = "totpEnabled")]
+    pub totp_enabled: bool,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "isStaff")]
+    pub is_staff: bool,
+    #[serde(rename = "staffRole")]
+    pub staff_role: Option<String>,
+    #[serde(rename = "isInfluencer")]
+    pub is_influencer: bool,
+    #[serde(rename = "influencerCode")]
+    pub influencer_code: Option<String>,
+}
+
+impl MoiFaux {
+    /// Utilisateur minimal, pour les tests qui n'ont besoin que de `id` et
+    /// `discord_name` — ce que `sky_compte::Moi` porte réellement.
+    pub fn nouveau(id: i64, discord_name: &str) -> MoiFaux {
+        MoiFaux {
+            id,
+            discord_id: id.to_string(),
+            discord_name: discord_name.to_string(),
+            discord_avatar: None,
+            discord_email: None,
+            totp_enabled: false,
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            is_staff: false,
+            staff_role: None,
+            is_influencer: false,
+            influencer_code: None,
+        }
+    }
+}
+
 /// État piloté par les tests — les tâches suivantes du jalon (6, 7, 9)
 /// mutent ces champs via `FauxServeur::etat_mut()` pour commander les
 /// réponses du double, sans jamais toucher la production.
@@ -337,6 +393,21 @@ pub struct EtatFaux {
     /// même jeton fait pointer ce jeton vers le second appareil, comme un
     /// second appel réel à `enregistrerAppareil` sur la même session.
     pub jetons_appareil: HashMap<String, i64>,
+
+    /// `GET /api/auth/me` — utilisateur rendu sur succès. `None` par défaut :
+    /// AUCUN utilisateur n'est connu tant qu'un test ne l'a pas
+    /// explicitement enregistré, ce qui fait rendre `404` (même principe que
+    /// `code_ami_valide`, `amitie_acceptable`, etc.) — c'est aussi la forme
+    /// EXACTE du refus réel : `findUserById` rend `null` si le compte a
+    /// disparu entre l'émission du jeton et cet appel.
+    pub moi: Option<MoiFaux>,
+
+    /// Fait répondre `403 {"error":"TOTP verification required"}` à `GET
+    /// /api/auth/me`, AVANT même de consulter `moi` — reproduit la garde de
+    /// session partielle du site (`!session.totpVerified`), dont le message
+    /// est en anglais côté site, sans conséquence pour un client qui ne lit
+    /// jamais ce texte.
+    pub session_partielle_totp: bool,
 }
 
 /// Serveur double : un `tiny_http::Server` sur un port éphémère, dans un
@@ -464,6 +535,7 @@ fn repondre(mut requete: tiny_http::Request, etat: &Arc<Mutex<EtatFaux>>) {
 
     let (statut, corps_reponse) = match (&methode, chemin.as_str()) {
         (Method::Get, "/api/sky/sync") => gerer_sync(etat, jeton.as_deref(), version_connue),
+        (Method::Get, "/api/auth/me") => gerer_me(etat, jeton.as_deref()),
         (Method::Post, "/api/auth/native") => gerer_auth_native(etat, &corps_brut),
         (Method::Post, "/api/auth/refresh") => gerer_refresh(etat, &corps_brut),
         (Method::Post, "/api/sky/envelopes") => gerer_depot(etat, jeton.as_deref(), &corps_brut),
@@ -637,6 +709,25 @@ fn gerer_sync(
     }
 
     (200, corps.to_string())
+}
+
+/// `GET /api/auth/me` — AJOUT DE LA TÂCHE 10 (hors brief de la tâche 4).
+/// Authentification par le même mécanisme que les autres routes protégées
+/// (`autoriser_appel`), PUIS la garde de session partielle
+/// (`session_partielle_totp`), PUIS `moi` — même ordre que le site
+/// (`requireAuth` avant `!session.totpVerified` avant `findUserById`).
+fn gerer_me(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    if let Some(refus) = autoriser_appel(&mut e, jeton) {
+        return refus;
+    }
+    if e.session_partielle_totp {
+        return (403, json!({ "error": "TOTP verification required" }).to_string());
+    }
+    match &e.moi {
+        Some(moi) => (200, serde_json::to_string(moi).expect("MoiFaux se serialise toujours")),
+        None => (404, json!({ "error": "Utilisateur introuvable" }).to_string()),
+    }
 }
 
 /// Reproduit `nomValide` + `texteStockable` côté site (`devices/route.ts`,
@@ -1828,5 +1919,82 @@ mod tests {
             .into_json()
             .unwrap();
         assert_eq!(recu["ok"], true);
+    }
+
+    // --- /api/auth/me (AJOUT DE LA TÂCHE 10) --------------------------
+    //
+    // Même discipline que le reste de ce module : chaque route a ses tests
+    // HTTP directs, indépendants de `sky_compte` — ceux-là vivent dans
+    // `identite_test.rs`. Sans ceux-ci, `MoiFaux::nouveau` n'était appelée
+    // que par `identite_test.rs`, jamais par ce module : `cargo clippy`
+    // le rendait mort dans les quatre AUTRES binaires de test qui incluent
+    // ce fichier (`faux_serveur_test`, `session_test`, `boite_test`,
+    // `annuaire_test`), chacun compilant ce module séparément via `#[path]`.
+
+    #[test]
+    fn me_exige_un_jeton() {
+        // Échoue si `GET /api/auth/me` répondait sans en-tête `Authorization`
+        // — même garde que `sync_exige_un_jeton`.
+        let s = FauxServeur::demarrer();
+        let reponse = ureq::get(&format!("{}/api/auth/me", s.url())).call();
+        let reponse = reponse.unwrap_err().into_response().unwrap();
+        assert_eq!(reponse.status(), 401);
+        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Non authentifie"}"#);
+    }
+
+    #[test]
+    fn me_rend_lidentifiant_et_le_nom_discord_en_camel_case() {
+        // Échoue si `gerer_me` rendait `discord_name` (snake_case) plutôt
+        // que `discordName` — forme exacte de la réponse du site.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        s.etat_mut().moi = Some(MoiFaux::nouveau(42, "Killian"));
+
+        let recu: serde_json::Value = ureq::get(&format!("{}/api/auth/me", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .call()
+            .unwrap()
+            .into_json()
+            .unwrap();
+
+        assert_eq!(recu["id"], 42);
+        assert_eq!(recu["discordName"], "Killian");
+        assert!(recu.get("discord_name").is_none());
+    }
+
+    #[test]
+    fn me_sans_utilisateur_connu_rend_404() {
+        // Même principe que `code_ami_valide`/`amitie_acceptable` : aucun
+        // utilisateur n'est connu tant qu'un test ne l'a pas enregistré.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+
+        let reponse = ureq::get(&format!("{}/api/auth/me", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .call()
+            .unwrap_err();
+        let reponse = reponse.into_response().unwrap();
+        assert_eq!(reponse.status(), 404);
+        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Utilisateur introuvable"}"#);
+    }
+
+    #[test]
+    fn me_avec_session_partielle_rend_403_avant_de_consulter_moi() {
+        // Échoue si `gerer_me` consultait `moi` AVANT `session_partielle_totp`
+        // — même ordre que le site (`requireAuth` puis `!totpVerified` puis
+        // `findUserById`). `moi` est enregistré pour prouver que ce n'est
+        // PAS son absence qui produit ce refus.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        s.etat_mut().moi = Some(MoiFaux::nouveau(1, "peu importe"));
+        s.etat_mut().session_partielle_totp = true;
+
+        let reponse = ureq::get(&format!("{}/api/auth/me", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .call()
+            .unwrap_err();
+        let reponse = reponse.into_response().unwrap();
+        assert_eq!(reponse.status(), 403);
+        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"TOTP verification required"}"#);
     }
 }
