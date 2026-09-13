@@ -346,6 +346,13 @@ fn nom_appareil_valide(nom: &str) -> bool {
 /// Enregistre l'appareil courant. `cle` est la clé publique X25519 de
 /// l'appareil, encodée en base64 standard avant l'envoi — c'est la forme
 /// que `POST /api/sky/devices` attend (`clePubliqueValide`, côté site).
+///
+/// Range l'identifiant rendu par le serveur dans `coffre`
+/// (`Coffre::ranger_identifiant_appareil`, tâche 9) AVANT de le rendre à
+/// l'appelant : c'est ce que `deposer` (`boite.rs`) lit ensuite comme
+/// `expediteur_device_id`. Le faire ICI, jamais laissé à la charge de
+/// l'appelant, évite la classe de défaut la plus coûteuse de ce jalon — une
+/// fonction juste que personne n'appelle jamais dans le bon ordre.
 pub fn enregistrer_appareil(config: &Config, coffre: &Coffre, nom: &str, cle: &[u8; 32]) -> Result<i64, ErreurCompte> {
     if !nom_appareil_valide(nom) {
         return Err(ErreurCompte::Protocole(
@@ -361,10 +368,14 @@ pub fn enregistrer_appareil(config: &Config, coffre: &Coffre, nom: &str, cle: &[
     let client = ClientHttp::new(config);
     let corps = CorpsAppareil { public_key: &cle_b64, nom, plateforme };
 
-    avec_jeton_valide(config, coffre, |jeton| {
+    let id = avec_jeton_valide(config, coffre, |jeton| {
         let reponse: ReponseAppareil = client.post_json("/api/sky/devices", &corps, Some(jeton))?;
         Ok(reponse.id)
-    })
+    })?;
+
+    coffre.ranger_identifiant_appareil(id)?;
+
+    Ok(id)
 }
 
 /// Issue d'un `ajouter_ami` — les deux refus attendus (`404`, `409`) sont

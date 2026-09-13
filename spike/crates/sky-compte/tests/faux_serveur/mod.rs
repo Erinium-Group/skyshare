@@ -858,17 +858,52 @@ fn gerer_refresh(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, String)
     (200, json!({ "acces": "jeton-neuf" }).to_string())
 }
 
+/// Taille maximale d'une charge SCELLÉE (octets décodés) — même valeur que
+/// `TAILLE_CHARGE_MAX` côté site (`src/lib/sky/enveloppes.ts`).
+const TAILLE_CHARGE_MAX: usize = 4096;
+
+/// Estime le nombre d'octets qu'un texte base64 décodera, SANS décoder —
+/// reproduction EXACTE de `octetsBase64Estimes` (`envelopes/route.ts`) :
+/// arithmétique pure sur la longueur, padding standard géré ('=' final).
+/// AJOUT DE LA TÂCHE 9 : avant elle, ce double n'avait AUCUN contrôle de
+/// taille — un double plus indulgent que le vrai serveur sur ce point
+/// précis aurait laissé passer, sans jamais rougir, une charge que la vraie
+/// route refuse par son 404 uniforme.
+fn octets_base64_estimes(base64: &str) -> usize {
+    if base64.is_empty() {
+        return 0;
+    }
+    let mut rembourrage = 0;
+    if base64.ends_with("==") {
+        rembourrage = 2;
+    } else if base64.ends_with('=') {
+        rembourrage = 1;
+    }
+    (base64.len() * 3) / 4 - rembourrage
+}
+
 /// `POST /api/sky/envelopes` — succès `204` sans corps (forme confirmée par
-/// `envelopes/route.ts`), refus de forme `400`, refus authentifié partagé
-/// avec `GET /api/sky/sync` via `autoriser_appel`, refus sémantique
-/// UNIFORME `404` piloté par `EtatFaux::refuser_depot` (voir son
-/// commentaire — RONDE DE CORRECTION 2).
+/// `envelopes/route.ts`), refus de forme `400` (un par champ, AJOUT DE LA
+/// TÂCHE 9 — voir ci-dessous), refus authentifié partagé avec `GET
+/// /api/sky/sync` via `autoriser_appel`, refus sémantique UNIFORME `404`
+/// piloté par `EtatFaux::refuser_depot` OU par une charge scellée trop
+/// grosse (voir son commentaire et `octets_base64_estimes` — RONDE DE
+/// CORRECTION 2 puis TÂCHE 9).
 ///
-/// ORDRE, comme le vrai (`deposer`, `enveloppes.ts`) : authentification,
-/// PUIS forme du corps, PUIS refus sémantique — un corps malformé rend
-/// toujours 400 avant que `refuser_depot` soit même consulté, exactement
-/// comme le site calcule `octetsBase64Estimes`/valide les types avant
-/// d'appeler `deposer`.
+/// ORDRE, comme le vrai (`deposer`, `enveloppes.ts`, et la route elle-même) :
+/// authentification, PUIS forme du corps (identifiants strictement positifs,
+/// charge non vide), PUIS taille estimée, PUIS refus sémantique piloté — un
+/// corps malformé rend toujours 400 avant que `refuser_depot` ou la taille
+/// ne soient même consultés.
+///
+/// TÂCHE 9 — TROIS REFUS AJOUTÉS, le double étant auparavant plus indulgent
+/// que le site sur ces points précis : un identifiant nul ou négatif était
+/// accepté (le vrai exige `Number.isInteger(x) && x > 0`), une charge vide
+/// l'était aussi (le vrai exige `charge.length > 0`), et aucune taille
+/// n'était jamais vérifiée. Un double plus permissif que le serveur qu'il
+/// imite donne une confiance imméritée aux tests qui le pilotent — c'est
+/// exactement la classe de défaut qui a déjà failli contaminer quatre tâches
+/// de ce jalon (voir `CLAUDE.md`, « Uniformité des refus »).
 fn gerer_depot(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &str) -> (u16, String) {
     let mut e = etat.lock().expect("mutex etat faux empoisonne");
     if let Some(refus) = autoriser_appel(&mut e, jeton) {
@@ -883,15 +918,29 @@ fn gerer_depot(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &st
     let destinataire = valeur.get("destinataire_device_id").and_then(Value::as_i64);
     let charge = valeur.get("charge").and_then(Value::as_str).map(str::to_string);
 
-    let (Some(expediteur), Some(destinataire), Some(charge)) = (expediteur, destinataire, charge)
-    else {
-        return (400, json!({ "error": "Corps invalide" }).to_string());
+    let Some(expediteur) = expediteur.filter(|v| *v > 0) else {
+        return (
+            400,
+            json!({ "error": "expediteur_device_id invalide : attendu un entier positif" }).to_string(),
+        );
+    };
+    let Some(destinataire) = destinataire.filter(|v| *v > 0) else {
+        return (
+            400,
+            json!({ "error": "destinataire_device_id invalide : attendu un entier positif" }).to_string(),
+        );
+    };
+    let Some(charge) = charge.filter(|v| !v.is_empty()) else {
+        return (
+            400,
+            json!({ "error": "charge invalide : attendu une chaine base64 non vide" }).to_string(),
+        );
     };
 
-    if e.refuser_depot {
+    if octets_base64_estimes(&charge) > TAILLE_CHARGE_MAX || e.refuser_depot {
         // Refus UNIFORME et INDISTINCT — jamais de détail sur LEQUEL de
-        // pas_ami/appareil_inconnu/pas_mon_appareil s'appliquerait, même
-        // principe que POST /api/auth/native pour "Code refuse".
+        // pas_ami/appareil_inconnu/pas_mon_appareil/trop_gros s'appliquerait,
+        // même principe que POST /api/auth/native pour "Code refuse".
         return (404, json!({ "error": "Depot refuse" }).to_string());
     }
 
@@ -1235,6 +1284,106 @@ mod tests {
             assert_eq!(reponse.status(), 400, "corps testé : {corps}");
             assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Requete invalide"}"#);
         }
+    }
+
+    #[test]
+    fn depot_refuse_un_identifiant_expediteur_non_positif() {
+        // AJOUT DE LA TÂCHE 9 : avant elle, `gerer_depot` acceptait
+        // n'importe quel entier, y compris nul ou négatif. Échoue si le
+        // double redevenait plus permissif que le site
+        // (`idAppareilValide`, `envelopes/route.ts`).
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        for id in [0i64, -1] {
+            let corps =
+                json!({"expediteur_device_id": id, "destinataire_device_id": 2, "charge": "YQ=="})
+                    .to_string();
+            let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
+                .set("Authorization", &format!("Bearer {jeton}"))
+                .send_string(&corps)
+                .unwrap_err();
+            let reponse = reponse.into_response().unwrap();
+            assert_eq!(reponse.status(), 400, "identifiant testé : {id}");
+            assert_eq!(
+                reponse.into_string().unwrap(),
+                r#"{"error":"expediteur_device_id invalide : attendu un entier positif"}"#
+            );
+        }
+        assert_eq!(s.etat_mut().depots_recus, 0);
+    }
+
+    #[test]
+    fn depot_refuse_un_identifiant_destinataire_non_positif() {
+        // Même réserve que le test précédent, sur l'AUTRE champ — les deux
+        // messages sont volontairement distincts (voir la route réelle),
+        // donc les deux gardes doivent être vérifiées séparément.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        for id in [0i64, -1] {
+            let corps =
+                json!({"expediteur_device_id": 1, "destinataire_device_id": id, "charge": "YQ=="})
+                    .to_string();
+            let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
+                .set("Authorization", &format!("Bearer {jeton}"))
+                .send_string(&corps)
+                .unwrap_err();
+            let reponse = reponse.into_response().unwrap();
+            assert_eq!(reponse.status(), 400, "identifiant testé : {id}");
+            assert_eq!(
+                reponse.into_string().unwrap(),
+                r#"{"error":"destinataire_device_id invalide : attendu un entier positif"}"#
+            );
+        }
+        assert_eq!(s.etat_mut().depots_recus, 0);
+    }
+
+    #[test]
+    fn depot_refuse_une_charge_vide() {
+        // AJOUT DE LA TÂCHE 9 : avant elle, une chaîne vide décodait vers 0
+        // octet et était acceptée sans réserve — le site refuse
+        // explicitement `charge.length === 0`.
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        let corps = json!({"expediteur_device_id": 1, "destinataire_device_id": 2, "charge": ""}).to_string();
+
+        let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(&corps)
+            .unwrap_err();
+        let reponse = reponse.into_response().unwrap();
+        assert_eq!(reponse.status(), 400);
+        assert_eq!(
+            reponse.into_string().unwrap(),
+            r#"{"error":"charge invalide : attendu une chaine base64 non vide"}"#
+        );
+        assert_eq!(s.etat_mut().depots_recus, 0);
+    }
+
+    #[test]
+    fn depot_refuse_une_charge_scellee_trop_grosse_avec_le_404_uniforme() {
+        // AJOUT DE LA TÂCHE 9 : avant elle, aucune taille n'était jamais
+        // vérifiée. 4097 octets décodés dépasse `TAILLE_CHARGE_MAX` (4096)
+        // d'exactement un octet — le refus doit être le MÊME 404 uniforme
+        // que `refuser_depot`, jamais un message distinct qui dirait
+        // "trop gros" (voir le commentaire de `gerer_depot`).
+        let s = FauxServeur::demarrer();
+        let jeton = s.jeton_de_test();
+        let charge_trop_grosse = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 4097]);
+        let corps = json!({
+            "expediteur_device_id": 1,
+            "destinataire_device_id": 2,
+            "charge": charge_trop_grosse,
+        })
+        .to_string();
+
+        let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(&corps)
+            .unwrap_err();
+        let reponse = reponse.into_response().unwrap();
+        assert_eq!(reponse.status(), 404);
+        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Depot refuse"}"#);
+        assert_eq!(s.etat_mut().depots_recus, 0);
     }
 
     #[test]

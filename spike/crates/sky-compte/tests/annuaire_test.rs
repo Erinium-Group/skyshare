@@ -178,6 +178,22 @@ fn enregistrer_appareil_avec_un_octet_nul_est_refuse_sans_appel_reseau() {
     assert!(matches!(r, Err(sky_compte::ErreurCompte::Protocole(_))));
 }
 
+#[test]
+fn enregistrer_appareil_range_lidentifiant_dans_le_coffre() {
+    // AJOUT DE LA TÂCHE 9 : `deposer` (boite.rs) lit cet identifiant dans le
+    // coffre comme `expediteur_device_id` — sans cette écriture, aucun
+    // dépôt n'est jamais possible après un enregistrement pourtant réussi.
+    let s = FauxServeur::demarrer();
+    let jeton = s.jeton_de_test();
+    let coffre = Coffre::pour_test("sky-test-annuaire-enregistrer-range-id");
+    coffre.ranger_jetons(&sky_compte::Jetons { session: jeton, renouvellement: "peu-importe".to_string() }).unwrap();
+
+    let cle = [3u8; 32];
+    let id = enregistrer_appareil(&Config::vers(&s.url()), &coffre, "Mon PC", &cle).unwrap();
+
+    assert_eq!(coffre.identifiant_appareil().unwrap(), Some(id));
+}
+
 // --- ajouter_ami ----------------------------------------------------------
 
 #[test]

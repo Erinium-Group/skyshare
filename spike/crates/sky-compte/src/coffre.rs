@@ -66,6 +66,7 @@ fn verrou_trousseau() -> MutexGuard<'static, ()> {
 const SERVICE_PRODUCTION: &str = "SkyShare";
 const UTILISATEUR_IDENTITE: &str = "identite";
 const UTILISATEUR_JETONS: &str = "jetons";
+const UTILISATEUR_APPAREIL: &str = "appareil";
 
 /// Coffre-fort système pour la clé privée de l'appareil et les jetons de
 /// session.
@@ -195,6 +196,49 @@ impl Coffre {
             Err(e) => Err(erreur_coffre(e)),
         }
     }
+
+    /// Relit l'identifiant d'appareil local (ajouté à la tâche 9) — celui
+    /// que le serveur a attribué au dernier `enregistrer_appareil` réussi
+    /// (`annuaire.rs`), et que `deposer` (`boite.rs`) doit envoyer comme
+    /// `expediteur_device_id`. `None` si aucun enregistrement n'a encore
+    /// réussi sur cette machine.
+    ///
+    /// Vit À CÔTÉ de l'identité, PAS des jetons : `oublier()` (déconnexion)
+    /// ne l'efface pas — se déconnecter ne doit pas rendre `deposer`
+    /// inutilisable au prochain lancement, seulement exiger une nouvelle
+    /// authentification.
+    ///
+    /// RISQUE CONNU si un AUTRE compte Discord se connecte sur cette même
+    /// machine ensuite : cet identifiant continue de désigner l'appareil du
+    /// PREMIER compte, puisqu'il n'est pas lié aux jetons qui changent de
+    /// compte. Un dépôt tenté sous le second compte échoue alors par le 404
+    /// uniforme du serveur (« pas mon appareil ») — pas une fuite, le
+    /// serveur refuse bien — mais sans diagnostic clair tant que
+    /// `enregistrer_appareil` n'est pas rappelé pour ce second compte, ce
+    /// qui écrase cette entrée avec le nouvel identifiant.
+    pub fn identifiant_appareil(&self) -> Result<Option<i64>, ErreurCompte> {
+        let _verrou = verrou_trousseau();
+        let entree = self.entree(UTILISATEUR_APPAREIL)?;
+        match entree.get_password() {
+            Ok(valeur) => valeur.trim().parse::<i64>().map(Some).map_err(|_| {
+                ErreurCompte::Coffre("identifiant d'appareil illisible dans le coffre".to_string())
+            }),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(erreur_coffre(e)),
+        }
+    }
+
+    /// Range l'identifiant d'appareil local, en écrasant le précédent s'il y
+    /// en a un — c'est précisément le cas d'un ré-enregistrement décrit sur
+    /// `identifiant_appareil`. Appelée par `enregistrer_appareil`
+    /// (`annuaire.rs`) dès que le serveur a confirmé la création, jamais
+    /// laissée à la charge de l'appelant : voir son commentaire pour la
+    /// raison (une serrure posée que personne ne branche).
+    pub fn ranger_identifiant_appareil(&self, id: i64) -> Result<(), ErreurCompte> {
+        let _verrou = verrou_trousseau();
+        let entree = self.entree(UTILISATEUR_APPAREIL)?;
+        entree.set_password(&id.to_string()).map_err(erreur_coffre)
+    }
 }
 
 fn erreur_coffre(e: impl std::fmt::Display) -> ErreurCompte {
@@ -220,6 +264,7 @@ impl Drop for RegistreNettoyage {
         for service in &self.services {
             supprimer_silencieusement(service, UTILISATEUR_IDENTITE);
             supprimer_silencieusement(service, UTILISATEUR_JETONS);
+            supprimer_silencieusement(service, UTILISATEUR_APPAREIL);
         }
     }
 }
@@ -328,6 +373,48 @@ mod tests {
         assert_eq!(message, "échec du coffre local : jetons illisibles dans le coffre");
         assert!(!message.contains("123456789"));
         assert!(!message.contains("SECRET-DE-RENOUVELLEMENT"));
+    }
+
+    #[test]
+    fn aucun_identifiant_dappareil_au_depart() {
+        let coffre = Coffre::pour_test("sky-test-appareil-absent");
+        assert_eq!(coffre.identifiant_appareil().unwrap(), None);
+    }
+
+    #[test]
+    fn ranger_puis_relire_lidentifiant_dappareil() {
+        let coffre = Coffre::pour_test("sky-test-appareil-aller-retour");
+        coffre.ranger_identifiant_appareil(42).unwrap();
+        assert_eq!(coffre.identifiant_appareil().unwrap(), Some(42));
+    }
+
+    #[test]
+    fn ranger_ecrase_le_precedent_identifiant_dappareil() {
+        // Le cas d'un ré-enregistrement (nouveau compte, ou appareil
+        // recréé) : la valeur la plus récente doit remplacer l'ancienne,
+        // pas s'y ajouter.
+        let coffre = Coffre::pour_test("sky-test-appareil-ecrase");
+        coffre.ranger_identifiant_appareil(1).unwrap();
+        coffre.ranger_identifiant_appareil(2).unwrap();
+        assert_eq!(coffre.identifiant_appareil().unwrap(), Some(2));
+    }
+
+    #[test]
+    fn oublier_nefface_pas_lidentifiant_dappareil() {
+        // NEUTRALISATION CIBLÉE : si `identifiant_appareil` vivait sous la
+        // même entrée que les jetons (ou si `oublier` l'effaçait aussi), ce
+        // test rougirait précisément ici — une déconnexion ne doit pas
+        // rendre `deposer` inutilisable au prochain lancement.
+        let coffre = Coffre::pour_test("sky-test-appareil-survit-oubli");
+        coffre.ranger_identifiant_appareil(7).unwrap();
+        coffre
+            .ranger_jetons(&Jetons { session: "s".to_string(), renouvellement: "r".to_string() })
+            .unwrap();
+
+        coffre.oublier().unwrap();
+
+        assert_eq!(coffre.jetons().unwrap(), None);
+        assert_eq!(coffre.identifiant_appareil().unwrap(), Some(7));
     }
 
     #[test]

@@ -158,6 +158,38 @@ impl ClientHttp {
             Err(ureq::Error::Transport(transport)) => Err(ErreurCompte::Reseau(transport.to_string())),
         }
     }
+
+    /// Requête `POST` avec un corps JSON, pour une route dont le SUCCÈS ne
+    /// porte AUCUN corps de réponse (`204`, `POST /api/sky/envelopes`).
+    ///
+    /// AJOUTÉE POUR LA TÂCHE 9 : `post_json_avec_refus` (et `post_json`)
+    /// appellent `rep.into_json::<T>()` sur TOUT 2xx — sur un 204 dont le
+    /// corps est vide, ce décodage échoue toujours et transformerait un
+    /// dépôt RÉUSSI en `ErreurCompte::Protocole`, précisément quand tout a
+    /// fonctionné. Cette méthode ne décode jamais un succès : tout 2xx
+    /// devient `ReponseHttp::Succes(())`, sans lire le corps. Mêmes
+    /// garanties que `post_json_avec_refus` par ailleurs : 401 →
+    /// `Err(ErreurCompte::Refuse)` (pour que `avec_jeton_valide` continue de
+    /// renouveler dessus), échec de transport → `Err(ErreurCompte::Reseau)`,
+    /// tout autre statut → `Ok(ReponseHttp::Refus { .. })` avec le corps
+    /// rédigé par `corps_sans_en_tete`.
+    pub fn post_json_reponse_vide_avec_refus<B: Serialize>(
+        &self,
+        chemin: &str,
+        corps: &B,
+        jeton: Option<&str>,
+    ) -> Result<ReponseHttp<()>, ErreurCompte> {
+        let requete = Self::avec_jeton(self.agent.post(&self.url(chemin)), jeton);
+        match requete.send_json(corps) {
+            Ok(_reponse_2xx) => Ok(ReponseHttp::Succes(())),
+            Err(ureq::Error::Status(401, _)) => Err(ErreurCompte::Refuse),
+            Err(ureq::Error::Status(statut, rep)) => {
+                let corps = rep.into_string().unwrap_or_default();
+                Ok(ReponseHttp::Refus { statut, corps: corps_sans_en_tete(&corps).into_owned() })
+            }
+            Err(ureq::Error::Transport(transport)) => Err(ErreurCompte::Reseau(transport.to_string())),
+        }
+    }
 }
 
 #[cfg(test)]
