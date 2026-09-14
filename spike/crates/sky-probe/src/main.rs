@@ -7,6 +7,7 @@ mod cmd_encode;
 mod cmd_host;
 mod cmd_hw;
 mod cmd_view;
+mod rendez_vous;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -88,9 +89,11 @@ enum Cmd {
         #[arg(long, default_value_t = 1440)]
         height: u32,
     },
-    /// Reçoit : consomme le bloc d'offre, renvoie sa réponse, écrit le flux
-    /// reçu et mesure débit/gigue/transit (Q4, Q5)
+    /// Reçoit : demande le partage d'un ami par la boîte aux lettres, écrit
+    /// le flux reçu et mesure débit/gigue/transit (Q4, Q5)
     View {
+        /// Ami à regarder : nom Discord exact ou identifiant (voir `friends list`)
+        ami: String,
         #[arg(long, default_value_t = 30)]
         seconds: u64,
         #[arg(long, default_value = "recu.h265")]
@@ -206,7 +209,7 @@ fn main() -> anyhow::Result<()> {
             largeur_synth: width,
             hauteur_synth: height,
         }),
-        Cmd::View { seconds, out } => cmd_view::run(seconds, &out),
+        Cmd::View { ami, seconds, out } => cmd_view::run(&ami, seconds, &out),
         Cmd::Login => {
             let (config, coffre) = cmd_compte::config_et_coffre()?;
             cmd_compte::login(&config, &coffre)

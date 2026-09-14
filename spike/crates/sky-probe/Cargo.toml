@@ -24,3 +24,8 @@ features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
 ]
+
+# Les tests de `rendez_vous` fabriquent des `AppareilDAmi`, dont la clé
+# publique voyage en base64 standard — la forme que rend le site.
+[dev-dependencies]
+base64.workspace = true

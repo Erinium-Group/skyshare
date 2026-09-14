@@ -1,5 +1,10 @@
-//! Côté émetteur : produit l'offre, intègre la réponse, puis capture,
-//! encode et envoie un flux vidéo réel — la chaîne complète de la Tâche 8.
+//! Côté émetteur : attend la demande d'un ami dans la boîte aux lettres, y
+//! répond, puis capture, encode et envoie un flux vidéo réel — la chaîne
+//! complète de la Tâche 8.
+//!
+//! La négociation ne passe plus par un humain. Ce qui décide — quelle
+//! enveloppe est une offre, pour quelle clé sceller la réponse — vit dans
+//! `rendez_vous` ; ce fichier ne garde que la colle réseau.
 //!
 //! `WgcCapture::next_frame()` → `NvencEncoder::encode()` → `link.send()`,
 //! avec le débit réseau réellement piloté par `Pacer::target_bps()`. C'est
@@ -11,11 +16,14 @@ use std::io::Write;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sky_capture::wgc::WgcCapture;
+use sky_compte::{deposer, relever, synchroniser, ErreurCompte};
 use sky_crypto::Identity;
 use sky_encode::{nvenc::NvencEncoder, Codec};
 use sky_net::{LinkEvent, Pacer, PeerLink};
 
+use crate::cmd_compte::{config_et_coffre, message_utilisateur};
 use crate::cmd_encode::{Source, TextureSynthetique, FPS};
+use crate::rendez_vous::{interroger, offres_recevables, HorlogeReelle, CADENCE, FENETRE_HOTE};
 
 /// Délai maximal d'établissement, imposé par le document d'architecture (§5.5).
 /// Jamais d'attente indéfinie, jamais de roue qui tourne sans fin.
@@ -91,59 +99,107 @@ pub struct Parametres {
 }
 
 pub fn run(p: Parametres) -> anyhow::Result<()> {
-    // Le régulateur est construit AVANT l'offre, et pas au moment où il servira :
-    // il ne dépend que des deux arguments de ligne de commande, et sa validation
-    // de bornes (plancher ≤ plafond) doit échouer tout de suite. Construit plus
-    // bas, un `--floor-mbps 50 --bitrate-mbps 30` n'aurait été refusé qu'une fois
-    // la connexion établie — donc après tout l'aller-retour humain de
-    // copier-coller des blocs, pour une faute de frappe visible sans réseau.
+    // Le régulateur est construit AVANT la négociation, et pas au moment où il
+    // servira : il ne dépend que des deux arguments de ligne de commande, et sa
+    // validation de bornes (plancher ≤ plafond) doit échouer tout de suite.
+    // Construit plus bas, un `--floor-mbps 50 --bitrate-mbps 30` n'aurait été
+    // refusé qu'une fois la connexion établie — donc après une attente de
+    // spectateur pouvant durer `FENETRE_HOTE`, pour une faute de frappe visible
+    // sans réseau.
     //
     // Le Pacer part au plancher (comportement documenté de `Pacer::new`) : la
     // cadence effective démarre donc réduite et remonte vers le plafond en
     // quelques secondes — visible dans l'affichage périodique plus bas.
     let mut pacer = Pacer::new(p.floor_mbps * 1_000_000, p.bitrate_mbps * 1_000_000)?;
 
-    let (mut link, offre) = PeerLink::offrant(Identity::generate())?;
+    // Ces commandes synchronisent sans avoir l'usage des enveloppes, et le
+    // serveur efface ce qu'il livre : une demande arrivée pendant qu'elles
+    // tournent serait perdue pour ce partage, sans que rien ne le signale.
+    println!("\n  /!\\  Pendant le partage, ne lance sur cette machine ni `friends list`,");
+    println!("       ni `friends add`, ni `device list`, ni `code` : elles consomment");
+    println!("       les demandes en attente, et celle de ton ami serait perdue.\n");
 
-    println!("\n=== ÉTAPE 1 : envoie ce bloc à ton correspondant ===\n");
-    // L'exposé, ici, c'est l'opérateur — pas le correspondant, dont la réponse
-    // voyage scellée. C'est donc dans SA console que l'avertissement a sa place,
-    // et pas dans le mode d'emploi de l'ami.
-    println!("  /!\\  Ce bloc contient l'adresse publique de cette machine, en clair");
-    println!("       pour qui sait le décoder. Envoie-le en message privé, à une");
-    println!("       personne précise — jamais dans un salon ouvert ni sur un forum.\n");
-    println!("{offre}\n");
-    println!("=== ÉTAPE 2 : colle sa réponse ici puis Entrée ===\n");
+    let (config, coffre) = config_et_coffre()?;
+    // Avant tout réseau : sans appareil enregistré, personne ne peut nous
+    // adresser de demande, et `deposer` refuserait la réponse.
+    if coffre.identifiant_appareil().map_err(erreur_compte)?.is_none() {
+        anyhow::bail!(
+            "aucun appareil enregistré sur cette machine — lance d'abord \
+             `sky-probe device register <nom>`."
+        );
+    }
+    let identite = coffre.identite().map_err(erreur_compte)?;
+
+    println!(
+        "En attente de la demande d'un ami, pendant {} minutes au maximum...",
+        FENETRE_HOTE.as_secs() / 60
+    );
     std::io::stdout().flush().ok();
 
-    // Le mapping NAT du port qu'on vient d'annoncer expire en 30 a 120 s sans
-    // trafic, alors que l'echange des blocs par messagerie prend couramment
-    // plusieurs minutes. Sans ce battement, on negocie depuis un port que le
-    // correspondant ne connait pas, et ses reponses arrivent sur un port ferme.
-    println!("  Prends le temps qu'il te faut : son programme t'attend jusqu'a");
-    println!("  dix minutes sans rien consommer. Colle sa reponse quand tu l'as.");
-    println!();
-
-    let garde = link.maintenir_mapping()?;
-
-    let mut reponse = String::new();
     let debut_attente = Instant::now();
-    std::io::stdin().read_line(&mut reponse)?;
-    let attente = debut_attente.elapsed();
-    println!("
-(echange des blocs : {} s, port maintenu ouvert)", attente.as_secs());
+    let mut synchronisations = 0u32;
+    let mut horloge = HorlogeReelle::demarrer();
+    let retenue = interroger(
+        None,
+        |precedent| {
+            synchronisations += 1;
+            synchroniser(&config, &coffre, precedent)
+        },
+        |etat| {
+            // Recevable ne veut pas dire utilisable : si `repondant` refuse le
+            // SDP, on essaie l'offre suivante sans interrompre l'attente. Son
+            // message d'erreur est rédigé sans adresse (`link.rs`).
+            for offre in offres_recevables(etat, relever(etat, &identite)) {
+                match PeerLink::repondant(Identity::generate(), &offre.texte) {
+                    Ok((link, reponse)) => return Some((link, reponse, offre.destinataire)),
+                    Err(e) => println!("  Demande écartée : {e}"),
+                }
+            }
+            None
+        },
+        &mut horloge,
+        CADENCE,
+        FENETRE_HOTE,
+    )
+    .map_err(erreur_compte)?;
 
-    // La negociation produit son propre trafic : le battement n'a plus lieu d'etre.
-    drop(garde);
+    let Some((mut link, reponse, destinataire)) = retenue else {
+        println!(
+            "Aucune demande reçue en {} minutes. Relance `sky-probe host` quand ton ami est prêt.",
+            FENETRE_HOTE.as_secs() / 60
+        );
+        return Ok(());
+    };
+    println!(
+        "Demande reçue après {} s ({synchronisations} synchronisations).",
+        debut_attente.elapsed().as_secs()
+    );
 
-    link.accepter_reponse(&reponse)?;
+    // Le bloc part tel quel : `repondant` a déjà comprimé puis scellé le SDP
+    // pour la clé éphémère de l'offre. L'enveloppe, elle, est scellée par
+    // `deposer` pour la clé d'ANNUAIRE de l'appareil expéditeur — voir
+    // `rendez_vous::destinataire_de_la_reponse`.
+    let deposes = deposer(&config, &coffre, std::slice::from_ref(&destinataire), reponse.as_bytes())
+        .map_err(erreur_compte)?;
+    if deposes == 0 {
+        println!(
+            "Le serveur a refusé la réponse (appareil révoqué ou amitié retirée entre-temps) : \
+             rien n'a été envoyé."
+        );
+        return Ok(());
+    }
 
-    println!("\nNégociation en cours...");
+    println!("Réponse envoyée. Négociation en cours...");
     std::io::stdout().flush().ok();
 
+    // Côté répondant, les adresses du spectateur sont connues depuis l'offre :
+    // le battement perce notre box vers elles jusqu'à l'établissement, le temps
+    // que le spectateur relève la réponse à sa prochaine synchronisation.
+    let garde = link.maintenir_mapping()?;
     let Some(duree) = etablir(&mut link)? else {
         return Ok(());
     };
+    drop(garde);
     println!("CONNECTÉ en {:.1} s", duree.as_secs_f32());
 
     // --- Capture : écran réel, ou texture synthétique déterministe (Q4). ---
@@ -567,6 +623,13 @@ fn percentile_u64(tries: &[u64], p: usize) -> u64 {
     tries[idx]
 }
 
+/// Une erreur de compte, rédigée pour l'utilisateur : `Refuse` reçoit le
+/// message unique de `cmd_compte`, les autres leur `Display` déjà expurgé.
+/// Partagée avec `cmd_view`.
+pub(crate) fn erreur_compte(erreur: ErreurCompte) -> anyhow::Error {
+    anyhow::anyhow!(message_utilisateur(&erreur))
+}
+
 /// Boucle jusqu'à ce que le canal de données soit utilisable, ou renonce.
 ///
 /// Partagée avec `cmd_view` : les deux bords appliquent exactement le même
@@ -634,7 +697,7 @@ fn diagnostiquer(link: &PeerLink) {
         // Ces trois nombres distinguent des causes que « NAT strict » confondait.
         if emis == 0 {
             println!("Aucun paquet n'a été émis : l'agent ICE n'a pas de destination.");
-            println!("La réponse collée ne contenait donc aucune adresse exploitable.");
+            println!("Le bloc reçu ne contenait donc aucune adresse exploitable.");
             println!("C'est un défaut de notre côté, pas un problème de réseau.");
         } else if recus == 0 {
             println!("Nous avons émis sans jamais rien recevoir en retour.");
@@ -645,8 +708,7 @@ fn diagnostiquer(link: &PeerLink) {
             println!();
             println!("Si vous avez tous les deux obtenu « réseau compatible » avec");
             println!("`sky-probe netcheck`, la première cause est de loin la plus probable :");
-            println!("le programme du spectateur doit rester ouvert pendant que l'émetteur");
-            println!("colle la réponse.");
+            println!("les deux programmes doivent rester ouverts jusqu'à l'établissement.");
         } else {
             println!("Des paquets ont circulé DANS LES DEUX SENS, sans que la négociation");
             println!("aboutisse. Le réseau fait son travail : la traversée de NAT n'est pas");

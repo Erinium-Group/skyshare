@@ -1015,4 +1015,48 @@ mod tests {
         let (offrant, _) = PeerLink::offrant(Identity::generate()).unwrap();
         assert!(offrant.cibles_pair().is_empty());
     }
+
+    /// Longueur maximale admise d'un bloc réel, en caractères — autant
+    /// d'octets, le bloc étant de l'ASCII. Fixée par la mesure (tâche 11 du
+    /// jalon C2), pas devinée.
+    ///
+    /// Mesuré sur cinq négociations locales : offre de 649 à 725 caractères,
+    /// réponse de 677 à 753 (SDP de 617 octets avec un seul candidat, de 745
+    /// avec deux ; `socket_et_candidats` n'en déclare jamais plus de deux).
+    /// Compression retirée, les mêmes blocs dépassent 1 000 caractères —
+    /// chiffres exacts dans le rapport de la tâche 11.
+    ///
+    /// 900 laisse environ 20 % au-dessus du plus grand bloc mesuré et reste
+    /// sous le plus petit bloc non comprimé : c'est une garde de la
+    /// COMPRESSION. La limite de la boîte aux lettres,
+    /// `sky_compte::boite::TAILLE_MAX_CLAIR` (4 048 octets), est bien plus
+    /// haute ; elle n'est pas importée pour ne pas faire dépendre `sky-net` de
+    /// `sky-compte`.
+    const BORNE_BLOC_REEL: usize = 900;
+
+    #[test]
+    fn l_offre_reelle_tient_sous_la_borne() {
+        // Rougit seul si `offrant` cesse de comprimer son SDP.
+        let (_, offre) = PeerLink::offrant(Identity::generate()).unwrap();
+        println!("offre reelle : {} caracteres", offre.len());
+        assert!(
+            offre.len() < BORNE_BLOC_REEL,
+            "offre de {} caracteres pour une borne de {BORNE_BLOC_REEL} : le SDP n'est-il plus comprime ?",
+            offre.len()
+        );
+    }
+
+    #[test]
+    fn la_reponse_reelle_tient_sous_la_borne() {
+        // Rougit seul si `repondant` cesse de comprimer son SDP avant de le
+        // sceller. L'offre consommée est une vraie sortie d'`offrant`.
+        let (_, offre) = PeerLink::offrant(Identity::generate()).unwrap();
+        let (_, reponse) = PeerLink::repondant(Identity::generate(), &offre).unwrap();
+        println!("reponse reelle : {} caracteres", reponse.len());
+        assert!(
+            reponse.len() < BORNE_BLOC_REEL,
+            "reponse de {} caracteres pour une borne de {BORNE_BLOC_REEL} : le SDP n'est-il plus comprime ?",
+            reponse.len()
+        );
+    }
 }

@@ -1,5 +1,10 @@
-//! Côté spectateur : consomme l'offre, renvoie la réponse scellée, reçoit le
-//! flux vidéo réel et l'écrit dans `recu.h265` — la chaîne complète (Tâche 8).
+//! Côté spectateur : demande le partage d'un ami par la boîte aux lettres,
+//! intègre sa réponse, reçoit le flux vidéo réel et l'écrit dans `recu.h265`
+//! — la chaîne complète (Tâche 8).
+//!
+//! La négociation ne passe plus par un humain : l'offre est déposée pour les
+//! appareils de l'ami, la réponse relevée à la synchronisation. Ce qui décide
+//! vit dans `rendez_vous` ; ce fichier ne garde que la colle réseau.
 //!
 //! Piège documenté (Tâche 3) : les en-têtes de séquence (VPS/SPS/PPS) ne sont
 //! émis qu'une fois, au tout début du flux — GOP infini oblige. Ce spectateur
@@ -10,10 +15,15 @@ use std::fs::File;
 use std::io::Write;
 use std::time::{Duration, Instant};
 
+use sky_compte::{deposer, relever, resoudre_ami, synchroniser};
 use sky_crypto::Identity;
 use sky_net::{LinkEvent, PeerLink};
 
-use crate::cmd_host::{epoch_us, etablir, EN_TETE_MORCEAU};
+use crate::cmd_compte::config_et_coffre;
+use crate::cmd_host::{epoch_us, erreur_compte, etablir, EN_TETE_MORCEAU};
+use crate::rendez_vous::{
+    interroger, reponse_a_l_offre, session_de, HorlogeReelle, ATTENTE_SPECTATEUR, CADENCE,
+};
 
 /// Période d'émission du retour vers l'émetteur.
 ///
@@ -23,90 +33,102 @@ use crate::cmd_host::{epoch_us, etablir, EN_TETE_MORCEAU};
 /// c'est ce dont le `Pacer` de la Tâche 8 se nourrit.
 const PERIODE_RETOUR: Duration = Duration::from_millis(200);
 
-/// Combien de temps on laisse au correspondant pour coller notre réponse.
-///
-/// Ce n'est pas le délai d'établissement : tant que l'émetteur n'a rien collé,
-/// il n'y a rien à attendre. Le compte à rebours des 8 s ne démarre qu'au
-/// premier signe de vie d'en face. Cette attente-ci reste bornée elle aussi :
-/// le programme rend la main plutôt que de tourner indéfiniment.
-///
-/// Dix minutes, et non deux : entre l'affichage de la réponse et le premier
-/// paquet d'en face, il faut qu'un humain copie près de 4 000 caractères, les
-/// colle dans une messagerie, les envoie, et qu'un second humain les récupère et
-/// les colle à son tour. Une fenêtre trop courte ferait échouer le test pour une
-/// raison qui n'a rien à voir avec le réseau — et c'est un test qui mobilise
-/// deux personnes, donc coûteux à répéter.
-const ATTENTE_CORRESPONDANT: Duration = Duration::from_secs(600);
+pub fn run(ami_designe: &str, secondes: u64, sortie: &str) -> anyhow::Result<()> {
+    let lancement = Instant::now();
+    let (config, coffre) = config_et_coffre()?;
 
-/// À quelle fréquence rappeler qu'on attend toujours.
-///
-/// Un écran muet pendant dix minutes se referme.
-const PERIODE_RAPPEL: Duration = Duration::from_secs(30);
-
-pub fn run(secondes: u64, sortie: &str) -> anyhow::Result<()> {
-    println!("\n=== ÉTAPE 1 : colle ici le bloc reçu puis Entrée ===\n");
-    std::io::stdout().flush().ok();
-
-    let mut offre = String::new();
-    std::io::stdin().read_line(&mut offre)?;
-
-    let (mut link, reponse) = PeerLink::repondant(Identity::generate(), &offre)?;
-
-    println!("\n=== ÉTAPE 2 : renvoie ce bloc à ton correspondant ===\n");
-    println!("{reponse}\n");
-    println!("Renvoie ce bloc en entier, puis laisse cette fenêtre ouverte.");
-    // Le port doit rester ouvert pendant que deux humains s'echangent le bloc,
-    // sans que l'horloge de str0m ne coure : le battement n'utilise que le
-    // socket, jamais l'agent.
-    let garde = link.maintenir_mapping()?;
-
-    println!();
-    println!("  Laisse simplement cette fenetre ouverte. Rien d'autre a faire :");
-    println!("  la negociation demarre toute seule des que ton correspondant");
-    println!("  colle ton bloc, meme dans dix minutes.");
-    println!();
-    std::io::stdout().flush().ok();
-    println!(
-        "J'attends son signal pendant {} minutes au maximum.\n",
-        ATTENTE_CORRESPONDANT.as_secs() / 60
-    );
-    std::io::stdout().flush().ok();
-
-
-    let debut_attente = Instant::now();
-    if !attendre_contact(&mut link)? {
-        // Formuler ce qu'on observe, pas ce qu'on en déduit — voir Tâche 7.
-        println!(
-            "\nÉCHEC : aucun paquet ne nous est parvenu en {} s.",
-            debut_attente.elapsed().as_secs()
+    // Avant tout réseau : sans appareil enregistré, `deposer` refuserait de
+    // toute façon — mais seulement après une synchronisation et la
+    // découverte d'adresse d'`offrant`.
+    if coffre.identifiant_appareil().map_err(erreur_compte)?.is_none() {
+        anyhow::bail!(
+            "aucun appareil enregistré sur cette machine — lance d'abord \
+             `sky-probe device register <nom>`."
         );
-        let (emis, recus, erreurs) = link.trafic();
-        println!();
-        println!("  Datagrammes émis   : {emis}");
-        println!("  Datagrammes reçus  : {recus}");
-        println!("  Erreurs de socket  : {erreurs}");
-        let (prive, public) = link.destinations();
-        println!("  dont vers reseau local : {prive}");
-        println!("  dont vers internet     : {public}");
-        println!();
-        println!("Deux causes possibles, et rien de ce qu'on voit d'ici ne permet");
-        println!("de choisir entre elles :");
-        println!("  - le correspondant n'a pas encore collé notre bloc de son côté ;");
-        println!("  - il l'a fait, mais ses paquets n'ont pas franchi le réseau.");
-        println!();
-        println!("Envoie ces trois nombres à ton correspondant : confrontés aux siens,");
-        println!("ils désignent la cause. Redemande-lui un bloc et recommence, c'est");
-        println!("sans risque.");
+    }
+    // L'identité DURABLE du coffre : c'est pour sa clé d'annuaire que l'hôte
+    // scelle l'enveloppe de sa réponse. La clé de l'offre, elle, est éphémère.
+    let identite = coffre.identite().map_err(erreur_compte)?;
+
+    let etat = synchroniser(&config, &coffre, None).map_err(erreur_compte)?;
+    let ami = resoudre_ami(&etat, ami_designe).map_err(erreur_compte)?.clone();
+    if ami.appareils.is_empty() {
+        println!(
+            "{} n'a aucun appareil enregistré : personne à qui envoyer la demande.",
+            ami.discord_name
+        );
         return Ok(());
     }
 
-    // Le contact est établi : la négociation produit désormais son propre trafic.
+    let (mut link, offre) = PeerLink::offrant(Identity::generate())?;
+    let session = session_de(&offre)?;
+
+    // Le bloc part tel quel : `offrant` a déjà comprimé le SDP, et `deposer`
+    // scelle pour chaque appareil de l'ami avec sa clé d'annuaire.
+    let deposes = deposer(&config, &coffre, &ami.appareils, offre.as_bytes()).map_err(erreur_compte)?;
+    if deposes == 0 {
+        println!(
+            "Le serveur a refusé la demande pour les {} appareil(s) de {} (appareil révoqué ou \
+             amitié retirée entre-temps) : rien n'a été envoyé.",
+            ami.appareils.len(),
+            ami.discord_name
+        );
+        return Ok(());
+    }
+    println!(
+        "\nDemande envoyée à {} ({deposes} appareil(s) sur {}).",
+        ami.discord_name,
+        ami.appareils.len()
+    );
+    println!(
+        "J'attends sa réponse pendant {} s au maximum.\n",
+        ATTENTE_SPECTATEUR.as_secs()
+    );
+    std::io::stdout().flush().ok();
+
+    // Le mapping NAT du port annoncé dans l'offre doit survivre à l'attente.
+    // Le battement n'utilise que le socket : l'horloge de `str0m` ne court pas.
+    let garde = link.maintenir_mapping()?;
+
+    let mut synchronisations = 1u32; // celle qui a résolu l'ami
+    let mut horloge = HorlogeReelle::demarrer();
+    let reponse = interroger(
+        Some(etat),
+        |precedent| {
+            synchronisations += 1;
+            synchroniser(&config, &coffre, precedent)
+        },
+        |etat| reponse_a_l_offre(relever(etat, &identite), session, &ami.appareils),
+        &mut horloge,
+        CADENCE,
+        ATTENTE_SPECTATEUR,
+    )
+    .map_err(erreur_compte)?;
+
+    let Some(reponse) = reponse else {
+        println!("{} n'a pas répondu — est-il en partage ?", ami.discord_name);
+        return Ok(());
+    };
+    println!(
+        "Réponse reçue après {:.1} s ({synchronisations} synchronisations).",
+        lancement.elapsed().as_secs_f32()
+    );
+
+    // La négociation produit désormais son propre trafic.
     drop(garde);
+    link.accepter_reponse(&reponse)?;
+
+    println!("Négociation en cours...");
+    std::io::stdout().flush().ok();
 
     let Some(duree) = etablir(&mut link)? else {
         return Ok(());
     };
-    println!("CONNECTÉ en {:.1} s", duree.as_secs_f32());
+    println!(
+        "CONNECTÉ en {:.1} s ({:.1} s depuis le lancement de view)",
+        duree.as_secs_f32(),
+        lancement.elapsed().as_secs_f32()
+    );
     println!("Écriture du flux reçu dans {sortie}, dès le premier paquet.\n");
     std::io::stdout().flush().ok();
 
@@ -255,42 +277,4 @@ fn percentile_i64(tries: &[i64], p: usize) -> i64 {
     }
     let idx = (tries.len() * p / 100).min(tries.len() - 1);
     tries[idx]
-}
-
-/// Attend le premier datagramme du correspondant, sans jamais bloquer sans fin.
-///
-/// Cette boucle n'appelle **volontairement pas** `poll` : elle se contente
-/// d'observer le socket. Interroger `str0m` ferait courir ses minuteries, et sa
-/// poignée de main DTLS abandonnerait au bout d'une trentaine de secondes —
-/// bien avant que deux humains aient fini de s'échanger un bloc de 3 800
-/// caractères. Voir `PeerLink::maintenant`.
-fn attendre_contact(link: &mut PeerLink) -> anyhow::Result<bool> {
-    let debut = Instant::now();
-    let mut dernier_rappel = Instant::now();
-
-    // On guette le socket sans reveiller l'agent : tant que rien n'arrive du
-    // correspondant, aucune minuterie ne court et l'attente peut durer. Le
-    // battement de maintien, lui, garde le port ouvert.
-    while debut.elapsed() < ATTENTE_CORRESPONDANT {
-        let reste = ATTENTE_CORRESPONDANT.saturating_sub(debut.elapsed());
-        let tranche = reste.min(PERIODE_RAPPEL.saturating_sub(dernier_rappel.elapsed()));
-
-        if link.guetter_le_pair(tranche.max(Duration::from_millis(50))) {
-            println!("  Contact ! Negociation demarree.");
-            std::io::stdout().flush().ok();
-            return Ok(true);
-        }
-
-        if dernier_rappel.elapsed() >= PERIODE_RAPPEL {
-            let reste = ATTENTE_CORRESPONDANT.saturating_sub(debut.elapsed());
-            println!(
-                "  toujours en attente — encore {} min {:02} s. Ne ferme pas cette fenetre.",
-                reste.as_secs() / 60,
-                reste.as_secs() % 60
-            );
-            std::io::stdout().flush().ok();
-            dernier_rappel = Instant::now();
-        }
-    }
-    Ok(false)
 }
