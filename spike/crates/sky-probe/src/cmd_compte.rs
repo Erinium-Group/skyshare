@@ -393,15 +393,18 @@ mod tests {
         // un code qui n'existe pas, et un utilisateur qui a bloqué l'appelant.
         // Le serveur refuse délibérément de les distinguer (voir la spec) pour
         // protéger la vie privée du bloqueur. Le message affiché ici DOIT
-        // reflter cette indistinction et ne JAMAIS suggérer un blocage.
+        // refléter cette indistinction et ne JAMAIS suggérer un blocage.
         let msg = message_code_introuvable();
         let msg_minuscule = msg.to_lowercase();
-        // Tester les variations plausibles du mot "blocage"
-        assert!(
-            !msg_minuscule.contains("bloq"),
-            "Le message évoque un blocage (variante de 'bloq'). \
-             C'est une régression : le blocage doit rester indiscernable d'un code inexistant."
-        );
+        // « bloq » attrape bloqué/bloquer, « bloc » attrape blocage, « block »
+        // attrape l'anglais : une seule racine laisserait passer les autres.
+        for racine in ["bloq", "bloc", "block"] {
+            assert!(
+                !msg_minuscule.contains(racine),
+                "Le message évoque un blocage (racine « {racine} »). \
+                 C'est une régression : le blocage doit rester indiscernable d'un code inexistant."
+            );
+        }
     }
 
     #[test]
