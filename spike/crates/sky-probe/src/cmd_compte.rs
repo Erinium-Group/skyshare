@@ -18,7 +18,7 @@
 
 use sky_compte::{
     accepter_ami, ajouter_ami, enregistrer_appareil, moi, normaliser_code_ami, synchroniser,
-    Acceptation, AjoutAmi, Coffre, Config, ErreurCompte, Jetons,
+    Acceptation, Appareil, AjoutAmi, Coffre, Config, ErreurCompte, Jetons,
 };
 
 /// Construit la configuration et le coffre de production — factorisé pour
@@ -76,6 +76,23 @@ pub fn login(config: &Config, coffre: &Coffre) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Vérifie s'il faut refuser l'enregistrement d'un nouvel appareil.
+///
+/// Fonction pure : si un appareil est déjà enregistré et le drapeau `force`
+/// est absent, renvoie le message de refus. Sinon renvoie `None`.
+fn message_si_appareil_deja_enregistre(id_appareil: i64, force: bool) -> Option<String> {
+    if !force {
+        Some(
+            format!(
+                "Un appareil est déjà enregistré sur cette machine (identifiant {id_appareil}). \
+                 Relance avec --force pour en enregistrer un nouveau."
+            )
+        )
+    } else {
+        None
+    }
+}
+
 /// `device register` — refuse par défaut si un appareil est déjà enregistré
 /// sur cette machine (arbitrage T10) : chaque enregistrement crée un
 /// NOUVEL appareil côté serveur, et chaque appareil superflu reçoit ensuite
@@ -85,10 +102,9 @@ pub fn device_register(config: &Config, coffre: &Coffre, nom: &str, force: bool)
     if !force {
         match coffre.identifiant_appareil() {
             Ok(Some(id)) => {
-                println!(
-                    "Un appareil est déjà enregistré sur cette machine (identifiant {id}). \
-                     Relance avec --force pour en enregistrer un nouveau."
-                );
+                if let Some(msg) = message_si_appareil_deja_enregistre(id, force) {
+                    println!("{msg}");
+                }
                 return Ok(());
             }
             Ok(None) => {}
@@ -115,6 +131,20 @@ pub fn device_register(config: &Config, coffre: &Coffre, nom: &str, force: bool)
     Ok(())
 }
 
+/// Formate la liste des appareils avec marquage de l'appareil courant.
+///
+/// Fonction pure : prend une liste d'appareils et l'identifiant du courant
+/// (ou `None`), rend les lignes prêtes à afficher avec le marquage visuel.
+fn formater_appareils_avec_marque(appareils: &[Appareil], courant: Option<i64>) -> Vec<String> {
+    appareils
+        .iter()
+        .map(|a| {
+            let marque = if Some(a.id) == courant { " (cet appareil)" } else { "" };
+            format!("- [{}] {} ({}){marque}", a.id, a.nom, a.plateforme)
+        })
+        .collect()
+}
+
 /// `device list` — synchronise puis affiche les appareils enregistrés,
 /// en signalant l'appareil courant (voir `Coffre::identifiant_appareil`).
 ///
@@ -138,9 +168,9 @@ pub fn device_list(config: &Config, coffre: &Coffre) -> anyhow::Result<()> {
     let courant = coffre.identifiant_appareil().unwrap_or(None);
 
     println!("Appareils enregistrés :");
-    for a in &etat.appareils {
-        let marque = if Some(a.id) == courant { " (cet appareil)" } else { "" };
-        println!("- [{}] {} ({}){marque}", a.id, a.nom, a.plateforme);
+    let lignes = formater_appareils_avec_marque(&etat.appareils, courant);
+    for ligne in lignes {
+        println!("{ligne}");
     }
     Ok(())
 }
@@ -189,6 +219,16 @@ fn message_si_propre_code(code: &str, mon_code: &str) -> Option<String> {
     }
 }
 
+/// Message affiché quand AjoutAmi::CodeIntrouvable est renvoyé.
+///
+/// Couvre deux cas : un code inexistant, et un utilisateur qui a bloqué
+/// l'appelant. Le serveur refuse délibérément de les distinguer pour
+/// protéger la vie privée du bloqueur. Le message DOIT reflter cette
+/// indistinction et ne JAMAIS suggérer un blocage.
+fn message_code_introuvable() -> String {
+    "Aucun compte ne correspond à ce code ami.".to_string()
+}
+
 /// `friends add <code>` — vérifie la forme localement, refuse son propre
 /// code par comparaison à `Etat.code` (jamais par lecture d'un 400), puis
 /// envoie la demande.
@@ -224,7 +264,7 @@ pub fn friends_add(config: &Config, coffre: &Coffre, code_brut: &str) -> anyhow:
         // Couvre AUSSI, par conception, un utilisateur qui a bloqué
         // l'appelant (voir la documentation de `AjoutAmi::CodeIntrouvable`
         // côté bibliothèque) : ne JAMAIS suggérer un blocage ici.
-        Ok(AjoutAmi::CodeIntrouvable) => println!("Aucun compte ne correspond à ce code ami."),
+        Ok(AjoutAmi::CodeIntrouvable) => println!("{}", message_code_introuvable()),
         Ok(AjoutAmi::DejaDemandee) => println!("Une demande existe déjà avec ce compte."),
         Err(e) => println!("{}", message_utilisateur(&e)),
     }
@@ -345,5 +385,81 @@ mod tests {
     #[test]
     fn un_code_different_du_sien_ne_declenche_rien() {
         assert!(message_si_propre_code("ABCDEFGH", "ZZZZZZZZ").is_none());
+    }
+
+    #[test]
+    fn le_message_de_code_introuvable_n_evoque_jamais_un_blocage() {
+        // Le message pour AjoutAmi::CodeIntrouvable couvre deux cas distincts :
+        // un code qui n'existe pas, et un utilisateur qui a bloqué l'appelant.
+        // Le serveur refuse délibérément de les distinguer (voir la spec) pour
+        // protéger la vie privée du bloqueur. Le message affiché ici DOIT
+        // reflter cette indistinction et ne JAMAIS suggérer un blocage.
+        let msg = message_code_introuvable();
+        let msg_minuscule = msg.to_lowercase();
+        // Tester les variations plausibles du mot "blocage"
+        assert!(
+            !msg_minuscule.contains("bloq"),
+            "Le message évoque un blocage (variante de 'bloq'). \
+             C'est une régression : le blocage doit rester indiscernable d'un code inexistant."
+        );
+    }
+
+    #[test]
+    fn appareil_courant_est_marque() {
+        // Crée un appareil test avec id 42
+        let appareils = vec![Appareil {
+            id: 42,
+            nom: "MacBook".to_string(),
+            plateforme: "macOS".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            last_seen_at: None,
+            revoked_at: None,
+        }];
+        let lignes = formater_appareils_avec_marque(&appareils, Some(42));
+        assert_eq!(lignes.len(), 1);
+        assert!(lignes[0].contains("(cet appareil)"));
+    }
+
+    #[test]
+    fn appareil_non_courant_n_est_pas_marque() {
+        let appareils = vec![Appareil {
+            id: 42,
+            nom: "MacBook".to_string(),
+            plateforme: "macOS".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            last_seen_at: None,
+            revoked_at: None,
+        }];
+        let lignes = formater_appareils_avec_marque(&appareils, Some(99));
+        assert_eq!(lignes.len(), 1);
+        assert!(!lignes[0].contains("(cet appareil)"));
+    }
+
+    #[test]
+    fn aucun_appareil_courant_ne_marque_rien() {
+        let appareils = vec![Appareil {
+            id: 42,
+            nom: "MacBook".to_string(),
+            plateforme: "macOS".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            last_seen_at: None,
+            revoked_at: None,
+        }];
+        let lignes = formater_appareils_avec_marque(&appareils, None);
+        assert_eq!(lignes.len(), 1);
+        assert!(!lignes[0].contains("(cet appareil)"));
+    }
+
+    #[test]
+    fn appareil_deja_enregistre_refuse_sans_force() {
+        let msg = message_si_appareil_deja_enregistre(42, false);
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("déjà enregistré"));
+    }
+
+    #[test]
+    fn appareil_deja_enregistre_accepte_avec_force() {
+        let msg = message_si_appareil_deja_enregistre(42, true);
+        assert!(msg.is_none());
     }
 }
