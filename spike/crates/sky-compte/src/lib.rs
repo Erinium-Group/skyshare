@@ -13,8 +13,9 @@ pub mod identite;
 pub mod session;
 
 pub use annuaire::{
-    accepter_ami, ajouter_ami, enregistrer_appareil, normaliser_code_ami, resoudre_ami,
-    synchroniser, Acceptation, Ami, AjoutAmi, Appareil, AppareilDAmi, Demande, EnveloppeRecue, Etat,
+    accepter_ami, ajouter_ami, enregistrer_appareil, normaliser_code_ami, rattacher_appareil,
+    resoudre_ami, synchroniser, Acceptation, Ami, AjoutAmi, Appareil, AppareilDAmi, Demande,
+    EnveloppeRecue, Etat, Rattachement,
 };
 pub use boite::{deposer, relever, Message, TAILLE_MAX_CLAIR};
 pub use coffre::{Coffre, Jetons};

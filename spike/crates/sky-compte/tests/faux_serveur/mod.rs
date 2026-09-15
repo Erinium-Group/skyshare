@@ -370,29 +370,49 @@ pub struct EtatFaux {
     /// tests de boîte aux lettres des tâches suivantes.
     pub depots_recus: u64,
 
-    /// Associe un jeton d'ACCÈS à l'appareil que `POST /api/sky/devices` a
-    /// créé avec CE jeton — même lien que `devices.session_id` côté site
-    /// (`appareils.ts::enregistrerAppareil`, posé à l'enregistrement), lu
-    /// ensuite par `GET /api/sky/sync` pour résoudre `deviceIdCourant`
-    /// (`sync/route.ts` : `UPDATE devices ... WHERE session_id = $1
-    /// RETURNING id`).
+    /// MODÈLE DE SESSION — VAGUE DE CORRECTION FINALE (I1). Remplace l'ancien
+    /// `jetons_appareil` (jeton d'accès → appareil), qui liait l'appareil à la
+    /// CHAÎNE EXACTE du jeton : un simple renouvellement rompait la liaison, ce
+    /// que le site ne fait pas — le double était alors à la fois plus strict
+    /// que le site (renouvellement) et muet sur le vrai défaut (nouvelle
+    /// connexion).
     ///
-    /// RONDE DE CORRECTION 1 (IMPORTANT 2 de task-9-review.md) : avant
-    /// cette ronde, `gerer_sync` ne filtrait `enveloppes` par AUCUN
-    /// appareil — tout jeton authentifié recevait la boîte aux lettres
-    /// COMPLÈTE, y compris les enveloppes d'un autre appareil. Ce champ est
-    /// ce qui permet à `gerer_sync` de reproduire la portée réelle
-    /// (`deviceIdCourant`, `etat.ts` "RONDE DE CORRECTION 1 (§2)") : un
-    /// jeton absent d'ici (aucun `POST /api/sky/devices` réussi avec lui)
-    /// n'a, structurellement, aucun appareil courant — `enveloppes` vaut
-    /// alors toujours `[]`, jamais celles d'un autre appareil, exactement
-    /// comme une session sans application installée côté site.
+    /// Relevé du site : un jeton porte un `sessionId` ; `POST /api/auth/refresh`
+    /// réémet un jeton portant LE MÊME `sessionId` (`refresh/route.ts`) ; `POST
+    /// /api/auth/native` crée une NOUVELLE session à chaque échange
+    /// (`creerSessionNative`, `session.ts`) ; `devices.session_id` lie un
+    /// appareil à UNE session (`enregistrerAppareil`, qui détache d'abord
+    /// l'appareil portant déjà cette session) ; `GET /api/sky/sync` résout
+    /// l'appareil courant par cette session (`UPDATE devices ... WHERE
+    /// session_id = $1`), et ne livre RIEN, sans erreur, à une session qui n'en
+    /// porte aucun.
     ///
-    /// Un jeton peut réenregistrer un NOUVEL appareil (l'entrée est
-    /// écrasée, jamais cumulée) : un second `POST /api/sky/devices` avec le
-    /// même jeton fait pointer ce jeton vers le second appareil, comme un
-    /// second appel réel à `enregistrerAppareil` sur la même session.
-    pub jetons_appareil: HashMap<String, i64>,
+    /// Ici : jeton d'accès délivré → session. Un jeton injecté par un test sans
+    /// session explicite est sa propre session (`session_de_l_acces`).
+    pub session_du_jeton: HashMap<String, String>,
+    /// Jeton de renouvellement délivré → session (même règle).
+    pub session_du_renouvellement: HashMap<String, String>,
+    /// Sessions révoquées (`sessions.revoked_at`) : tout jeton d'accès ou de
+    /// renouvellement qui en porte une est refusé (`verifierSessionActive`).
+    pub sessions_revoquees: HashSet<String>,
+    /// `devices.session_id`, lu dans l'autre sens : session → appareil qu'elle
+    /// porte. Un nouvel enregistrement sur la même session ÉCRASE l'entrée —
+    /// c'est le détachement que fait `enregistrerAppareil`.
+    pub appareil_de_session: HashMap<String, i64>,
+    /// Appareils créés par `POST /api/sky/devices` → clé publique reçue. Ce sont
+    /// les appareils de « l'utilisateur » du double, les seuls que `DELETE
+    /// /api/sky/devices/{id}` peut révoquer — tout autre identifiant rend 404,
+    /// comme l'appareil d'autrui côté site.
+    pub cles_des_appareils: HashMap<i64, String>,
+    /// Appareils révoqués : retirés des appareils vus par les amis (`amisDe` :
+    /// `d.revoked_at IS NULL`).
+    pub appareils_revoques: HashSet<i64>,
+    /// Nombre de sessions créées par `POST /api/auth/native`.
+    pub sessions_creees: u64,
+    /// Fait échouer `POST /api/sky/devices` par une erreur interne (500), APRÈS
+    /// authentification et validation — pour éprouver un réenregistrement qui
+    /// échoue.
+    pub refuser_enregistrement_appareil: bool,
 
     /// `GET /api/auth/me` — utilisateur rendu sur succès. `None` par défaut :
     /// AUCUN utilisateur n'est connu tant qu'un test ne l'a pas
@@ -541,6 +561,9 @@ fn repondre(mut requete: tiny_http::Request, etat: &Arc<Mutex<EtatFaux>>) {
         (Method::Post, "/api/sky/envelopes") => gerer_depot(etat, jeton.as_deref(), &corps_brut),
         (Method::Post, "/api/sky/devices") => gerer_devices(etat, jeton.as_deref(), &corps_brut),
         (Method::Post, "/api/sky/friends") => gerer_friends(etat, jeton.as_deref(), &corps_brut),
+        (Method::Delete, chemin_appareil) if chemin_appareil.starts_with("/api/sky/devices/") => {
+            gerer_revocation_appareil(etat, jeton.as_deref(), chemin_appareil)
+        }
         (Method::Post, chemin_accept)
             if chemin_accept.starts_with("/api/sky/friends/") && chemin_accept.ends_with("/accept") =>
         {
@@ -625,11 +648,13 @@ fn extraire_jeton_bearer(requete: &tiny_http::Request) -> Option<String> {
 ///     précédent, à dessein : c'est ce qui permet à un test de vérifier
 ///     PRÉCISÉMENT laquelle des deux causes a produit le refus.
 fn autoriser_appel(etat: &mut EtatFaux, jeton: Option<&str>) -> Option<(u16, String)> {
-    let jeton_reconnu = match jeton {
-        Some(j) => etat.jetons_acceptes.contains(j),
-        None => false,
+    let Some(jeton) = jeton.filter(|j| etat.jetons_acceptes.contains(*j)) else {
+        return Some((401, json!({ "error": "Non authentifie" }).to_string()));
     };
-    if !jeton_reconnu {
+    // Session révoquée (VAGUE DE CORRECTION FINALE, I1) : même refus qu'un jeton
+    // inconnu — côté site, `getSession` ne rend aucune session quand
+    // `verifierSessionActive` échoue, et `requireAuth` lève « Non authentifie ».
+    if etat.sessions_revoquees.contains(&session_de_l_acces(etat, jeton)) {
         return Some((401, json!({ "error": "Non authentifie" }).to_string()));
     }
     if etat.refuser_tout {
@@ -652,15 +677,16 @@ fn gerer_sync(
         return refus;
     }
 
-    // RONDE DE CORRECTION 1 (IMPORTANT 2 de task-9-review.md) : l'appareil
-    // COURANT est celui que `jetons_appareil` associe à CE jeton (posé par
-    // `gerer_devices` au dernier `POST /api/sky/devices` réussi avec lui)
-    // — même résolution que `deviceIdCourant` côté site, depuis
-    // `devices.session_id`. `None` pour un jeton qui n'a jamais enregistré
-    // d'appareil (session web sans application) : structurellement, un tel
-    // jeton n'a AUCUNE enveloppe à recevoir, jamais celles d'un autre
-    // appareil — voir `EtatFaux::jetons_appareil`.
-    let appareil_courant = jeton.and_then(|j| e.jetons_appareil.get(j).copied());
+    // VAGUE DE CORRECTION FINALE (I1) : l'appareil COURANT est celui que porte
+    // la SESSION de ce jeton (`appareil_de_session`, posé par `gerer_devices`)
+    // — même résolution que `deviceIdCourant` côté site (`UPDATE devices ...
+    // WHERE session_id = $1`). Avant, la liaison portait sur la chaîne exacte du
+    // jeton, et un renouvellement la rompait. `None` pour une session qui ne
+    // porte aucun appareil (session web sans application, ou nouvelle connexion
+    // non rattachée) : AUCUNE enveloppe à recevoir, jamais celles d'un autre
+    // appareil — et aucune erreur, comme le site.
+    let appareil_courant =
+        jeton.and_then(|j| e.appareil_de_session.get(&session_de_l_acces(&e, j)).copied());
 
     // Enveloppes dont CET appareil est le destinataire — jamais toutes
     // celles de `e.enveloppes`. AVANT cette ronde, `gerer_sync` rendait
@@ -687,10 +713,22 @@ fn gerer_sync(
         return (200, json!({ "inchange": true }).to_string());
     }
 
+    // Les amis ne voient que les appareils non révoqués (`amisDe` :
+    // `d.revoked_at IS NULL`) — VAGUE DE CORRECTION FINALE (I1).
+    let amis_vus: Vec<AmiFaux> = e
+        .amis
+        .iter()
+        .cloned()
+        .map(|mut ami| {
+            ami.appareils.retain(|appareil| !e.appareils_revoques.contains(&appareil.id));
+            ami
+        })
+        .collect();
+
     let corps = json!({
         "version": e.version,
         "code": CODE_FAUX,
-        "amis": e.amis,
+        "amis": amis_vus,
         "demandes": e.demandes,
         "listes": Vec::<Value>::new(),
         "appareils": e.appareils,
@@ -771,7 +809,7 @@ fn gerer_devices(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &
     let nom = valeur.get("nom").and_then(Value::as_str);
     let plateforme = valeur.get("plateforme").and_then(Value::as_str);
 
-    let Some(_public_key) = public_key.filter(|v| cle_publique_valide(v)) else {
+    let Some(public_key) = public_key.filter(|v| cle_publique_valide(v)) else {
         return (400, json!({ "error": "publicKey invalide : attendu 32 octets en base64" }).to_string());
     };
     let Some(nom) = nom.filter(|v| nom_appareil_valide(v)) else {
@@ -785,6 +823,11 @@ fn gerer_devices(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &
                 .to_string(),
         );
     };
+    if e.refuser_enregistrement_appareil {
+        // Échec APRÈS validation, comme une erreur de base côté site
+        // (`handleAuthError` : 500 « Erreur interne »).
+        return (500, json!({ "error": "Erreur interne" }).to_string());
+    }
     e.prochain_id_appareil += 1;
     let appareil = AppareilFaux {
         id: e.prochain_id_appareil,
@@ -795,15 +838,20 @@ fn gerer_devices(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &
         revoked_at: None,
     };
 
-    // RONDE DE CORRECTION 1 (IMPORTANT 2) : c'est ICI, au succès de
-    // l'enregistrement, que le jeton présenté est lié à l'appareil qu'il
-    // vient de créer — même moment que le site (`devices.session_id` posé
-    // par `enregistrerAppareil`, `appareils.ts`). `gerer_sync` lit cette
-    // association pour ne livrer que les enveloppes de CET appareil — voir
-    // le commentaire de `EtatFaux::jetons_appareil`.
+    // C'est ICI, au succès de l'enregistrement, que la SESSION du jeton présenté
+    // est liée à l'appareil créé — même moment que le site (`devices.session_id`
+    // posé par `enregistrerAppareil`). L'insertion ÉCRASE l'appareil que cette
+    // session portait déjà : c'est le détachement que fait `enregistrerAppareil`
+    // avant d'insérer. `gerer_sync` lit ce lien pour ne livrer que les
+    // enveloppes de CET appareil (VAGUE DE CORRECTION FINALE, I1).
     if let Some(jeton) = jeton {
-        e.jetons_appareil.insert(jeton.to_string(), appareil.id);
+        let session = session_de_l_acces(&e, jeton);
+        e.appareil_de_session.insert(session, appareil.id);
     }
+    e.cles_des_appareils.insert(appareil.id, public_key.to_string());
+    // `appareilsDe` côté site rend TOUS les appareils de l'utilisateur, révoqués
+    // compris : `GET /api/sky/sync` doit donc voir celui-ci dans `appareils`.
+    e.appareils.push(appareil.clone());
 
     let corps = serde_json::to_string(&appareil).expect("AppareilFaux se sérialise toujours");
     (201, corps)
@@ -969,9 +1017,18 @@ fn gerer_auth_native(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, Str
         return (401, REFUS.to_string());
     }
 
-    let accepte = match &e.code_natif_valide {
-        Some((c, s)) => c == code && s == secret,
-        None => false,
+    // USAGE UNIQUE (VAGUE DE CORRECTION FINALE, I1) : côté site, `echangerCode`
+    // fait `DELETE FROM auth_codes WHERE code = $1 RETURNING ...` AVANT de
+    // comparer l'empreinte du secret — un code présenté avec un MAUVAIS secret
+    // est donc consommé lui aussi. Le consommer seulement au succès rendrait ce
+    // double plus permissif que le site.
+    let attendu = e.code_natif_valide.clone();
+    let accepte = match attendu {
+        Some((code_attendu, secret_attendu)) if code_attendu == code => {
+            e.code_natif_valide = None;
+            secret_attendu == secret
+        }
+        _ => false,
     };
     if !accepte {
         return (401, REFUS.to_string());
@@ -981,18 +1038,26 @@ fn gerer_auth_native(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, Str
     // ne dépend de leur contenu précis, seulement de leur capacité à
     // authentifier un appel ultérieur (voir
     // `auth_native_reussit_avec_le_code_enregistre_et_le_jeton_fonctionne_ensuite`).
-    let acces = "jeton-acces-natif".to_string();
-    let refresh = "jeton-refresh-natif".to_string();
+    //
+    // VAGUE DE CORRECTION FINALE (I1) : chaque échange crée une NOUVELLE session
+    // (`creerSessionNative`, `session.ts` côté site), que les deux jetons portent.
+    e.sessions_creees += 1;
+    let numero = e.sessions_creees;
+    let session = format!("session-native-{numero}");
+    let acces = format!("jeton-acces-natif-{numero}");
+    let refresh = format!("jeton-refresh-natif-{numero}");
     e.jetons_acceptes.insert(acces.clone());
     e.jetons_de_renouvellement_valides.insert(refresh.clone());
+    e.session_du_jeton.insert(acces.clone(), session.clone());
+    e.session_du_renouvellement.insert(refresh.clone(), session);
     (200, json!({ "acces": acces, "refresh": refresh }).to_string())
 }
 
 /// `POST /api/auth/refresh` — succès à un seul champ `acces` (jamais
 /// `refresh` en retour, forme confirmée par `api/auth/refresh/route.ts`).
-/// La valeur `"jeton-neuf"` est un CHOIX DU DOUBLE, pas une forme relevée
-/// du site : c'est la valeur que les tests de la tâche 7 attendent
-/// (demande explicite du coordinateur). Enregistrée dans
+/// La valeur `"jeton-neuf-<n>"` (n = numéro de l'appel) est un CHOIX DU
+/// DOUBLE, pas une forme relevée du site — distincte à chaque appel depuis la
+/// vague de correction finale (voir plus bas). Enregistrée dans
 /// `jetons_acceptes` au succès, pour qu'un client puisse effectivement
 /// s'en servir sur l'appel suivant — sans quoi « renouveler » ne
 /// prouverait rien.
@@ -1016,12 +1081,92 @@ fn gerer_refresh(etat: &Arc<Mutex<EtatFaux>>, corps_brut: &str) -> (u16, String)
         return (400, json!({ "error": "Requete invalide" }).to_string());
     };
 
-    if e.refuser_tout || !e.jetons_de_renouvellement_valides.contains(refresh) {
+    // Session révoquée : refusée, comme par `verifierSessionActive` côté site.
+    let session = session_du_renouvellement_de(&e, refresh);
+    if e.refuser_tout
+        || !e.jetons_de_renouvellement_valides.contains(refresh)
+        || e.sessions_revoquees.contains(&session)
+    {
         return (401, json!({ "error": "Renouvellement refuse" }).to_string());
     }
 
-    e.jetons_acceptes.insert("jeton-neuf".to_string());
-    (200, json!({ "acces": "jeton-neuf" }).to_string())
+    // VAGUE DE CORRECTION FINALE (I1) : le jeton réémis porte LA MÊME session
+    // (`refresh/route.ts` : `sessionId: charge.sessionId`) — l'appareil de cette
+    // session reste donc l'appareil courant après un renouvellement. Un jeton
+    // distinct à chaque appel : une valeur fixe, réémise pour une autre session,
+    // ferait changer de session en silence un jeton déjà délivré.
+    let acces = format!("jeton-neuf-{}", e.appels_de_renouvellement);
+    e.jetons_acceptes.insert(acces.clone());
+    e.session_du_jeton.insert(acces.clone(), session);
+    (200, json!({ "acces": acces }).to_string())
+}
+
+/// Session portée par un jeton d'ACCÈS reconnu — VAGUE DE CORRECTION FINALE
+/// (I1). Un jeton délivré par `POST /api/auth/native` ou `POST
+/// /api/auth/refresh` porte la session enregistrée dans `session_du_jeton` ; un
+/// jeton injecté par un test sans session explicite (`jeton_de_test`, insertion
+/// directe dans `jetons_acceptes`) est sa propre session, distincte de toute
+/// autre.
+fn session_de_l_acces(etat: &EtatFaux, jeton: &str) -> String {
+    etat.session_du_jeton.get(jeton).cloned().unwrap_or_else(|| format!("acces:{jeton}"))
+}
+
+/// Même règle que `session_de_l_acces`, pour un jeton de RENOUVELLEMENT.
+fn session_du_renouvellement_de(etat: &EtatFaux, refresh: &str) -> String {
+    etat.session_du_renouvellement
+        .get(refresh)
+        .cloned()
+        .unwrap_or_else(|| format!("renouvellement:{refresh}"))
+}
+
+/// `DELETE /api/sky/devices/{id}` — VAGUE DE CORRECTION FINALE (I1). Même ordre
+/// et mêmes réponses que `devices/[id]/route.ts` : authentification (401 « Non
+/// authentifie »), session partielle (403 « Verification TOTP requise »), forme
+/// de l'identifiant (400 « Identifiant invalide »), puis `revoquerAppareil` :
+/// 404 « Appareil introuvable » si l'appareil n'existe pas ou n'est pas à cet
+/// utilisateur, 204 sans corps sinon — y compris pour un appareil DÉJÀ révoqué
+/// (l'`UPDATE` du site ne filtre pas `revoked_at`).
+///
+/// La révocation révoque aussi la session que l'appareil porte encore (seconde
+/// requête de la transaction de `revoquerAppareil`) : les appels suivants avec
+/// un jeton de cette session rendent 401. Un appareil détaché de sa session
+/// (celle-ci a enregistré un autre appareil depuis) n'en porte plus aucune.
+fn gerer_revocation_appareil(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, chemin: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    if let Some(refus) = autoriser_appel(&mut e, jeton) {
+        return refus;
+    }
+    if e.session_partielle_totp {
+        return (403, json!({ "error": "Verification TOTP requise" }).to_string());
+    }
+
+    // `Number(id)` puis `Number.isInteger(x) && x > 0` côté site. Plus strict
+    // ici — entier décimal seulement : « 7.0 », que JavaScript accepte, rend
+    // 400 —, jamais plus permissif.
+    let segment = chemin.strip_prefix("/api/sky/devices/").unwrap_or_default();
+    let Some(id) = segment.parse::<i64>().ok().filter(|id| *id > 0) else {
+        return (400, json!({ "error": "Identifiant invalide" }).to_string());
+    };
+
+    // `revoquerAppareil` rend `false` au-delà de la borne INTEGER de Postgres.
+    const POSTGRES_INTEGER_MAX: i64 = 2_147_483_647;
+    if id > POSTGRES_INTEGER_MAX || !e.cles_des_appareils.contains_key(&id) {
+        return (404, json!({ "error": "Appareil introuvable" }).to_string());
+    }
+
+    e.appareils_revoques.insert(id);
+    if let Some(appareil) = e.appareils.iter_mut().find(|a| a.id == id) {
+        appareil.revoked_at = Some("2026-01-01T00:00:00.000Z".to_string());
+    }
+    let session_portee = e
+        .appareil_de_session
+        .iter()
+        .find(|(_, appareil)| **appareil == id)
+        .map(|(session, _)| session.clone());
+    if let Some(session) = session_portee {
+        e.sessions_revoquees.insert(session);
+    }
+    (204, String::new())
 }
 
 /// Taille maximale d'une charge SCELLÉE (octets décodés) — même valeur que
@@ -1122,879 +1267,5 @@ fn gerer_depot(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &st
     (204, String::new())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use base64::Engine;
-
-    // « Qu'est-ce qui, précisément, ferait échouer ce test ? » Réponse pour
-    // chacun des tests ci-dessous en commentaire, avec la neutralisation
-    // pratiquée pour le prouver — voir task-4-report.md pour le relevé
-    // complet des neutralisations et de leur rougissement.
-
-    /// Enregistre un appareil via `POST /api/sky/devices` avec `jeton`, en
-    /// HTTP brut (pas via `sky_compte`, ces tests visent le double
-    /// directement) — AJOUT DE LA RONDE DE CORRECTION 1 (IMPORTANT 2) :
-    /// plusieurs tests de ce module doivent maintenant faire correspondre
-    /// un jeton à un appareil AVANT de vérifier qu'une enveloppe le
-    /// rejoint, puisque `gerer_sync` ne livre plus qu'à l'appareil associé
-    /// (`EtatFaux::jetons_appareil`). Rend l'identifiant attribué par le
-    /// double, à utiliser comme `destinataire_device_id`.
-    fn enregistrer_appareil_http(s: &FauxServeur, jeton: &str) -> i64 {
-        let cle = base64::engine::general_purpose::STANDARD.encode([5u8; 32]);
-        let recu: serde_json::Value = ureq::post(&format!("{}/api/sky/devices", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(&format!(r#"{{"publicKey":"{cle}","nom":"Appareil de test","plateforme":"windows"}}"#))
-            .expect("enregistrement d'appareil attendu en succes dans ce test")
-            .into_json()
-            .expect("reponse JSON attendue");
-        recu["id"].as_i64().expect("id attendu comme entier")
-    }
-
-    #[test]
-    fn le_double_rend_un_tableau_vide_jamais_absent() {
-        // Échoue si `appareils` est sérialisé absent (Option::None -> champ
-        // manquant) plutôt que `[]`, ou si AmiFaux ne construit pas un
-        // tableau vide par défaut.
-        let s = FauxServeur::demarrer();
-        s.etat_mut().amis.push(AmiFaux::sans_appareil("bob"));
-        let jeton = s.jeton_de_test();
-
-        let recu: serde_json::Value = ureq::get(&format!("{}/api/sky/sync", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-
-        assert_eq!(recu["amis"][0]["appareils"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn le_double_refuse_sans_distinguer() {
-        // Les quatre causes d'echec rendent la MEME reponse, comme le vrai.
-        // Échoue si le double distingue "code inconnu" d'un autre refus, ou
-        // s'il répond autre chose que 401 / ce corps exact.
-        let s = FauxServeur::demarrer();
-        for corps in [r#"{"code":"inconnu","secret":"x"}"#, r#"{"code":"","secret":""}"#] {
-            let e = ureq::post(&format!("{}/api/auth/native", s.url()))
-                .send_string(corps)
-                .unwrap_err();
-            let reponse = match e {
-                ureq::Error::Status(_, r) => r,
-                _ => panic!("attendu 401"),
-            };
-            assert_eq!(reponse.status(), 401);
-            assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Code refuse"}"#);
-        }
-    }
-
-    #[test]
-    fn chaque_serveur_double_choisit_un_port_different() {
-        // Échoue si `demarrer()` écoutait sur un port fixe : deux instances
-        // en parallèle se disputeraient alors le même port, et l'une des
-        // deux échouerait à démarrer plutôt que de rendre une URL distincte.
-        let a = FauxServeur::demarrer();
-        let b = FauxServeur::demarrer();
-        assert_ne!(a.url(), b.url());
-    }
-
-    #[test]
-    fn refuser_le_premier_appel_ne_refuse_que_le_premier() {
-        // Échoue si le refus n'est pas consommé (tous les appels
-        // refuseraient) ou s'il est consommé trop tôt (aucun appel ne
-        // refuserait). Jeton reconnu attaché aux deux appels : le refus
-        // testé ici doit venir de `refuser_le_premier_appel`, jamais d'un
-        // jeton absent ou inconnu (voir `sync_exige_un_jeton` pour cette
-        // autre cause).
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        s.etat_mut().refuser_le_premier_appel = true;
-
-        let premier = ureq::get(&format!("{}/api/sky/sync", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call();
-        let reponse_premier = premier.unwrap_err().into_response().unwrap();
-        assert_eq!(reponse_premier.status(), 401);
-        assert_eq!(reponse_premier.into_string().unwrap(), r#"{"error":"Acces refuse"}"#);
-
-        let second = ureq::get(&format!("{}/api/sky/sync", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call();
-        assert_eq!(second.unwrap().status(), 200);
-    }
-
-    #[test]
-    fn sync_exige_un_jeton() {
-        // Échoue si `GET /api/sky/sync` répondait avec succès sans aucun
-        // en-tête `Authorization` — exactement la réserve fermée par cette
-        // ronde de correction : un client qui oublierait son jeton ne doit
-        // plus jamais passer contre ce double.
-        let s = FauxServeur::demarrer();
-        let reponse = ureq::get(&format!("{}/api/sky/sync", s.url())).call();
-        let reponse = reponse.unwrap_err().into_response().unwrap();
-        assert_eq!(reponse.status(), 401);
-        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Non authentifie"}"#);
-    }
-
-    #[test]
-    fn sync_refuse_un_jeton_inconnu() {
-        // Échoue si un jeton quelconque, jamais délivré par ce double,
-        // était accepté — distinct du test précédent (jeton ABSENT) : ici
-        // un en-tête est bien présent, mais ne correspond à rien.
-        let s = FauxServeur::demarrer();
-        let reponse = ureq::get(&format!("{}/api/sky/sync", s.url()))
-            .set("Authorization", "Bearer nimporte-quoi")
-            .call();
-        let reponse = reponse.unwrap_err().into_response().unwrap();
-        assert_eq!(reponse.status(), 401);
-        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Non authentifie"}"#);
-    }
-
-    #[test]
-    fn sync_accepte_un_jeton_reconnu() {
-        // Échoue si un jeton pourtant présent dans `jetons_acceptes`
-        // était quand même refusé — la contre-preuve des deux tests
-        // précédents : le rejet vient bien de la reconnaissance du jeton,
-        // pas d'un refus systématique de toute authentification.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let reponse = ureq::get(&format!("{}/api/sky/sync", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call();
-        assert_eq!(reponse.unwrap().status(), 200);
-    }
-
-    #[test]
-    fn refuser_tout_refuse_aussi_le_renouvellement() {
-        // Échoue si `refuser_tout` laissait passer `POST /api/auth/refresh`
-        // — exactement la distinction avec `refuser_le_premier_appel`, qui
-        // elle épargne le renouvellement. Jeton de renouvellement RECONNU
-        // attaché : le refus testé ici doit venir de `refuser_tout`, jamais
-        // d'un jeton de renouvellement inconnu (voir
-        // `refresh_refuse_un_jeton_de_renouvellement_inconnu`).
-        let s = FauxServeur::demarrer();
-        let jeton_renouvellement = s.jeton_de_renouvellement_de_test();
-        s.etat_mut().refuser_tout = true;
-
-        let reponse = ureq::post(&format!("{}/api/auth/refresh", s.url()))
-            .send_string(&format!(r#"{{"refresh":"{jeton_renouvellement}"}}"#))
-            .unwrap_err();
-        assert_eq!(reponse.into_response().unwrap().status(), 401);
-        assert_eq!(s.etat_mut().appels_de_renouvellement, 1);
-    }
-
-    #[test]
-    fn renouvellement_rend_jeton_neuf_et_compte_lappel() {
-        // Échoue si la valeur rendue n'est pas exactement "jeton-neuf" (ce
-        // que la tâche 7 attend), ou si le compteur ne progresse pas.
-        let s = FauxServeur::demarrer();
-        let jeton_renouvellement = s.jeton_de_renouvellement_de_test();
-        let recu: serde_json::Value = ureq::post(&format!("{}/api/auth/refresh", s.url()))
-            .send_string(&format!(r#"{{"refresh":"{jeton_renouvellement}"}}"#))
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(recu["acces"], "jeton-neuf");
-        assert_eq!(s.etat_mut().appels_de_renouvellement, 1);
-    }
-
-    #[test]
-    fn refresh_refuse_un_jeton_de_renouvellement_inconnu() {
-        // Échoue si un jeton de renouvellement quelconque, jamais délivré
-        // par ce double, était accepté — c'est l'angle mort signalé par le
-        // relecteur : avant cette ronde, N'IMPORTE QUELLE chaîne réussissait
-        // ici tant que `refuser_tout` n'était pas actif.
-        let s = FauxServeur::demarrer();
-        let reponse = ureq::post(&format!("{}/api/auth/refresh", s.url()))
-            .send_string(r#"{"refresh":"peu importe"}"#)
-            .unwrap_err();
-        let reponse = reponse.into_response().unwrap();
-        assert_eq!(reponse.status(), 401);
-        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Renouvellement refuse"}"#);
-    }
-
-    #[test]
-    fn refresh_400_sur_champ_manquant() {
-        // Échoue si un corps sans `refresh` (ou dont `refresh` n'est pas
-        // une chaîne) produisait autre chose qu'un 400 — même ordre que le
-        // site : la forme est vérifiée AVANT toute décision de refus.
-        let s = FauxServeur::demarrer();
-        for corps in [r#"{}"#, r#"{"refresh":42}"#, r#"pas du json"#] {
-            let reponse =
-                ureq::post(&format!("{}/api/auth/refresh", s.url())).send_string(corps).unwrap_err();
-            let reponse = reponse.into_response().unwrap();
-            assert_eq!(reponse.status(), 400, "corps testé : {corps}");
-            assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Requete invalide"}"#);
-        }
-    }
-
-    #[test]
-    fn depot_denveloppe_est_compte_et_relu_par_sync() {
-        // Échoue si `depots_recus` ne progresse pas, ou si l'enveloppe
-        // déposée ne réapparaît pas dans `GET /api/sky/sync` avec `id`
-        // typé chaîne et les deux device_id typés nombre.
-        //
-        // RONDE DE CORRECTION 1 : le jeton qui relève doit désormais avoir
-        // un appareil associé (`jetons_appareil`) — sans quoi `gerer_sync`
-        // rend `enveloppes: []` par construction. `enregistrer_appareil_http`
-        // fournit cet appareil et son identifiant réel, utilisé ci-dessous
-        // comme `destinataire_device_id` au lieu d'un `9` arbitraire.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let id_appareil = enregistrer_appareil_http(&s, &jeton);
-        let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(&format!(
-                r#"{{"expediteur_device_id":7,"destinataire_device_id":{id_appareil},"charge":"YWJj"}}"#
-            ))
-            .unwrap();
-        assert_eq!(reponse.status(), 204);
-        assert_eq!(s.etat_mut().depots_recus, 1);
-
-        let recu: serde_json::Value = ureq::get(&format!("{}/api/sky/sync", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-        let enveloppe = &recu["enveloppes"][0];
-        assert!(enveloppe["id"].is_string());
-        assert_eq!(enveloppe["expediteur_device_id"], 7);
-        assert_eq!(enveloppe["destinataire_device_id"], id_appareil);
-        assert_eq!(enveloppe["charge"], "YWJj");
-    }
-
-    #[test]
-    fn depot_denveloppe_exige_aussi_un_jeton() {
-        // Échoue si `POST /api/sky/envelopes` acceptait un dépôt sans
-        // authentification — même réserve que `sync_exige_un_jeton`, sur
-        // l'AUTRE route authentifiée du double.
-        let s = FauxServeur::demarrer();
-        let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
-            .send_string(r#"{"expediteur_device_id":1,"destinataire_device_id":2,"charge":"YQ=="}"#);
-        let reponse = reponse.unwrap_err().into_response().unwrap();
-        assert_eq!(reponse.status(), 401);
-        // Le dépôt n'a pas dû être compté : le refus d'authentification
-        // précède toute lecture du corps.
-        assert_eq!(s.etat_mut().depots_recus, 0);
-    }
-
-    #[test]
-    fn sync_rend_inchange_a_version_connue_et_complet_sinon() {
-        // Échoue si `{ inchange: true }` n'est jamais rendu, ou si il l'est
-        // pour une version qui ne correspond pas à l'état courant.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        s.etat_mut().version = 42;
-
-        let a_jour: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=42", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(a_jour, serde_json::json!({ "inchange": true }));
-
-        let perime: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=1", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(perime["version"], 42);
-    }
-
-    #[test]
-    fn auth_native_reussit_avec_le_code_enregistre_et_le_jeton_fonctionne_ensuite() {
-        // Échoue si un couple (code, secret) enregistré dans
-        // `code_natif_valide` ne produisait pas un succès, ou si le jeton
-        // d'accès reçu n'était pas ensuite reconnu par une route
-        // authentifiée — la moitié qui prouve que ce chemin de succès sert
-        // réellement à quelque chose (tâche 6 : ranger un jeton utilisable
-        // dans le coffre).
-        let s = FauxServeur::demarrer();
-        s.etat_mut().code_natif_valide =
-            Some(("CODEVALIDE".to_string(), "secret-correct".to_string()));
-
-        let recu: serde_json::Value = ureq::post(&format!("{}/api/auth/native", s.url()))
-            .send_string(r#"{"code":"CODEVALIDE","secret":"secret-correct"}"#)
-            .unwrap()
-            .into_json()
-            .unwrap();
-        let acces = recu["acces"].as_str().expect("acces attendu comme chaine").to_string();
-        assert!(!acces.is_empty());
-        assert!(recu["refresh"].is_string());
-
-        let reponse = ureq::get(&format!("{}/api/sky/sync", s.url()))
-            .set("Authorization", &format!("Bearer {acces}"))
-            .call();
-        assert_eq!(reponse.unwrap().status(), 200);
-    }
-
-    #[test]
-    fn auth_native_refuse_un_secret_incorrect_meme_code_enregistre() {
-        // Échoue si la comparaison acceptait un secret différent de celui
-        // enregistré — le couple doit correspondre EXACTEMENT, pas
-        // seulement le code.
-        let s = FauxServeur::demarrer();
-        s.etat_mut().code_natif_valide =
-            Some(("CODEVALIDE".to_string(), "secret-correct".to_string()));
-
-        let e = ureq::post(&format!("{}/api/auth/native", s.url()))
-            .send_string(r#"{"code":"CODEVALIDE","secret":"mauvais-secret"}"#)
-            .unwrap_err();
-        let reponse = match e {
-            ureq::Error::Status(_, r) => r,
-            _ => panic!("attendu 401"),
-        };
-        assert_eq!(reponse.status(), 401);
-        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Code refuse"}"#);
-    }
-
-    #[test]
-    fn auth_native_400_sur_corps_malforme() {
-        // Échoue si un corps où `code`/`secret` sont absents ou ne sont
-        // pas des chaînes produisait un 401 plutôt qu'un 400 — le vrai
-        // serveur distingue les deux (`typeof code !== "string" ...` sort
-        // en 400 AVANT tout appel à `echangerCode`), ce double doit faire
-        // pareil. Même avec `code_natif_valide` enregistré, ces corps ne
-        // doivent jamais atteindre la comparaison : sinon un attaquant qui
-        // envoie un `code` numérique apprendrait quelque chose du timing.
-        let s = FauxServeur::demarrer();
-        s.etat_mut().code_natif_valide =
-            Some(("CODEVALIDE".to_string(), "secret-correct".to_string()));
-
-        for corps in [
-            r#"{"code":42,"secret":"secret-correct"}"#,
-            r#"{"code":"CODEVALIDE","secret":42}"#,
-            r#"{"code":"CODEVALIDE"}"#,
-            r#"{}"#,
-            r#"pas du json"#,
-        ] {
-            let reponse =
-                ureq::post(&format!("{}/api/auth/native", s.url())).send_string(corps).unwrap_err();
-            let reponse = reponse.into_response().unwrap();
-            assert_eq!(reponse.status(), 400, "corps testé : {corps}");
-            assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Requete invalide"}"#);
-        }
-    }
-
-    #[test]
-    fn depot_refuse_un_identifiant_expediteur_non_positif() {
-        // AJOUT DE LA TÂCHE 9 : avant elle, `gerer_depot` acceptait
-        // n'importe quel entier, y compris nul ou négatif. Échoue si le
-        // double redevenait plus permissif que le site
-        // (`idAppareilValide`, `envelopes/route.ts`).
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        for id in [0i64, -1] {
-            let corps =
-                json!({"expediteur_device_id": id, "destinataire_device_id": 2, "charge": "YQ=="})
-                    .to_string();
-            let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
-                .set("Authorization", &format!("Bearer {jeton}"))
-                .send_string(&corps)
-                .unwrap_err();
-            let reponse = reponse.into_response().unwrap();
-            assert_eq!(reponse.status(), 400, "identifiant testé : {id}");
-            assert_eq!(
-                reponse.into_string().unwrap(),
-                r#"{"error":"expediteur_device_id invalide : attendu un entier positif"}"#
-            );
-        }
-        assert_eq!(s.etat_mut().depots_recus, 0);
-    }
-
-    #[test]
-    fn depot_refuse_un_identifiant_destinataire_non_positif() {
-        // Même réserve que le test précédent, sur l'AUTRE champ — les deux
-        // messages sont volontairement distincts (voir la route réelle),
-        // donc les deux gardes doivent être vérifiées séparément.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        for id in [0i64, -1] {
-            let corps =
-                json!({"expediteur_device_id": 1, "destinataire_device_id": id, "charge": "YQ=="})
-                    .to_string();
-            let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
-                .set("Authorization", &format!("Bearer {jeton}"))
-                .send_string(&corps)
-                .unwrap_err();
-            let reponse = reponse.into_response().unwrap();
-            assert_eq!(reponse.status(), 400, "identifiant testé : {id}");
-            assert_eq!(
-                reponse.into_string().unwrap(),
-                r#"{"error":"destinataire_device_id invalide : attendu un entier positif"}"#
-            );
-        }
-        assert_eq!(s.etat_mut().depots_recus, 0);
-    }
-
-    #[test]
-    fn depot_refuse_une_charge_vide() {
-        // AJOUT DE LA TÂCHE 9 : avant elle, une chaîne vide décodait vers 0
-        // octet et était acceptée sans réserve — le site refuse
-        // explicitement `charge.length === 0`.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let corps = json!({"expediteur_device_id": 1, "destinataire_device_id": 2, "charge": ""}).to_string();
-
-        let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(&corps)
-            .unwrap_err();
-        let reponse = reponse.into_response().unwrap();
-        assert_eq!(reponse.status(), 400);
-        assert_eq!(
-            reponse.into_string().unwrap(),
-            r#"{"error":"charge invalide : attendu une chaine base64 non vide"}"#
-        );
-        assert_eq!(s.etat_mut().depots_recus, 0);
-    }
-
-    #[test]
-    fn depot_refuse_une_charge_scellee_trop_grosse_avec_le_404_uniforme() {
-        // AJOUT DE LA TÂCHE 9 : avant elle, aucune taille n'était jamais
-        // vérifiée. 4097 octets décodés dépasse `TAILLE_CHARGE_MAX` (4096)
-        // d'exactement un octet — le refus doit être le MÊME 404 uniforme
-        // que `refuser_depot`, jamais un message distinct qui dirait
-        // "trop gros" (voir le commentaire de `gerer_depot`).
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let charge_trop_grosse = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 4097]);
-        let corps = json!({
-            "expediteur_device_id": 1,
-            "destinataire_device_id": 2,
-            "charge": charge_trop_grosse,
-        })
-        .to_string();
-
-        let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(&corps)
-            .unwrap_err();
-        let reponse = reponse.into_response().unwrap();
-        assert_eq!(reponse.status(), 404);
-        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Depot refuse"}"#);
-        assert_eq!(s.etat_mut().depots_recus, 0);
-    }
-
-    #[test]
-    fn depot_refuse_de_maniere_uniforme_quand_pilote() {
-        // Échoue si `refuser_depot` ne produisait pas le refus UNIFORME
-        // `404 {"error":"Depot refuse"}`, ou si le dépôt refusé était quand
-        // même compté dans `depots_recus` — c'était le trou signalé par le
-        // relecteur : avant cette ronde, aucun chemin ne menait à ce 404.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        s.etat_mut().refuser_depot = true;
-
-        let reponse = ureq::post(&format!("{}/api/sky/envelopes", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(r#"{"expediteur_device_id":1,"destinataire_device_id":2,"charge":"YQ=="}"#)
-            .unwrap_err();
-        let reponse = reponse.into_response().unwrap();
-        assert_eq!(reponse.status(), 404);
-        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Depot refuse"}"#);
-        assert_eq!(s.etat_mut().depots_recus, 0);
-    }
-
-    // --- AJOUTS DE LA TÂCHE 8 (extension du double, brief le permet
-    // explicitement — voir le commentaire de `EtatFaux`) -------------------
-
-    #[test]
-    fn sync_court_circuite_inchange_quand_une_enveloppe_attend() {
-        // LE PIÈGE SIGNALÉ PAR LE CAHIER DES CHARGES DE LA TÂCHE 8 : une
-        // enveloppe déposée entre deux appels à VERSION INCHANGÉE doit
-        // continuer à voyager. Échoue si `gerer_sync` répondait `inchange`
-        // dès que `version_connue == e.version`, sans regarder si une
-        // enveloppe attend encore.
-        //
-        // RONDE DE CORRECTION 1 : le jeton qui synchronise doit avoir un
-        // appareil associé — le court-circuit ne regarde désormais QUE les
-        // enveloppes de CET appareil (voir `EtatFaux::jetons_appareil`),
-        // donc l'enveloppe poussée ci-dessous vise l'identifiant que le
-        // double vient réellement d'attribuer, pas un `2` arbitraire.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let id_appareil = enregistrer_appareil_http(&s, &jeton);
-        s.etat_mut().version = 5;
-        s.etat_mut().enveloppes.push(EnveloppeFausse {
-            id: "1".to_string(),
-            expediteur_device_id: 1,
-            destinataire_device_id: id_appareil,
-            charge: "YQ==".to_string(),
-        });
-
-        let recu: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=5", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-
-        assert_ne!(recu, serde_json::json!({ "inchange": true }));
-        assert_eq!(recu["enveloppes"][0]["id"], "1");
-    }
-
-    #[test]
-    fn sync_ne_court_circuite_pas_inchange_pour_une_enveloppe_dun_autre_appareil() {
-        // NOUVEAU (RONDE DE CORRECTION 1) : symétrique du test précédent —
-        // une enveloppe qui attend un AUTRE appareil ne doit PAS empêcher
-        // `inchange`. Avant cette ronde, `gerer_sync` regardait
-        // `e.enveloppes.is_empty()` globalement : une enveloppe pour
-        // n'importe quel appareil aurait fait échouer ce test-ci en
-        // court-circuitant `inchange` à tort.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let mon_id = enregistrer_appareil_http(&s, &jeton);
-        s.etat_mut().version = 5;
-        s.etat_mut().enveloppes.push(EnveloppeFausse {
-            id: "1".to_string(),
-            expediteur_device_id: 1,
-            destinataire_device_id: mon_id + 1000, // un AUTRE appareil, jamais le mien.
-            charge: "YQ==".to_string(),
-        });
-
-        let recu: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=5", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-
-        assert_eq!(recu, serde_json::json!({ "inchange": true }));
-    }
-
-    #[test]
-    fn sync_efface_les_enveloppes_apres_livraison() {
-        // Échoue si `gerer_sync` ne vidait pas `EtatFaux::enveloppes` après
-        // les avoir servies : un second appel, à la MÊME version, verrait
-        // alors encore l'enveloppe déjà livrée — soit en la retransmettant
-        // (si le court-circuit ci-dessus manquait aussi), soit en
-        // continuant à empêcher `inchange` pour toujours.
-        //
-        // RONDE DE CORRECTION 1 : même adaptation que le test précédent —
-        // jeton associé à un appareil réel, enveloppe adressée à celui-ci.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let id_appareil = enregistrer_appareil_http(&s, &jeton);
-        s.etat_mut().version = 5;
-        s.etat_mut().enveloppes.push(EnveloppeFausse {
-            id: "1".to_string(),
-            expediteur_device_id: 1,
-            destinataire_device_id: id_appareil,
-            charge: "YQ==".to_string(),
-        });
-
-        let premier: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=5", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(premier["enveloppes"][0]["id"], "1");
-
-        let second: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=5", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(second, serde_json::json!({ "inchange": true }));
-    }
-
-    #[test]
-    fn sync_nefface_pas_les_enveloppes_dun_autre_appareil() {
-        // NOUVEAU (RONDE DE CORRECTION 1) : la consommation à la livraison
-        // ne doit effacer QUE les enveloppes livrées à CET appareil. Avant
-        // cette ronde, `e.enveloppes.clear()` videait tout — une enveloppe
-        // pour un autre appareil, jamais vue par ce jeton, disparaissait
-        // quand même.
-        let s = FauxServeur::demarrer();
-        let jeton_a = s.jeton_de_test_pour("a-nefface-pas-autrui");
-        let _id_a = enregistrer_appareil_http(&s, &jeton_a); // seul le jeton sert ici.
-        let jeton_b = s.jeton_de_test_pour("b-nefface-pas-autrui");
-        let id_b = enregistrer_appareil_http(&s, &jeton_b);
-        s.etat_mut().version = 5;
-        s.etat_mut().enveloppes.push(EnveloppeFausse {
-            id: "1".to_string(),
-            expediteur_device_id: 1,
-            destinataire_device_id: id_b,
-            charge: "YQ==".to_string(),
-        });
-
-        // A synchronise SANS `?version=` (délibérément, voir ci-dessous) :
-        // ne doit RIEN voir (l'enveloppe est pour B), et ne doit RIEN
-        // effacer.
-        //
-        // SANS `?version=` — PAS UN OUBLI : avec `?version=5` (= e.version),
-        // et aucune enveloppe pour A, le court-circuit `inchange` renvoie
-        // AVANT MÊME D'ATTEINDRE la ligne qui efface — la neutralisation
-        // visée ici (retirer le filtre de `retain`) ne serait alors JAMAIS
-        // exercée, et ce test resterait vert même cassé. Sans `?version=`,
-        // `version_connue` vaut `None`, qui ne peut jamais égaler
-        // `Some(e.version)` : la branche complète (et sa consommation) est
-        // TOUJOURS empruntée.
-        let _: serde_json::Value = ureq::get(&format!("{}/api/sky/sync", s.url()))
-            .set("Authorization", &format!("Bearer {jeton_a}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(s.etat_mut().enveloppes.len(), 1, "l'enveloppe de B doit survivre à la synchronisation de A");
-
-        // B synchronise ensuite : doit voir SON enveloppe, encore présente.
-        let recu_b: serde_json::Value = ureq::get(&format!("{}/api/sky/sync?version=5", s.url()))
-            .set("Authorization", &format!("Bearer {jeton_b}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(recu_b["enveloppes"][0]["destinataire_device_id"], id_b);
-    }
-
-    #[test]
-    fn devices_refuse_une_cle_publique_tronquee() {
-        // Échoue si le double acceptait une clé publique qui ne décode pas
-        // vers exactement 32 octets sous forme canonique — un double plus
-        // permissif que le vrai serveur (`clePubliqueValide`) donnerait une
-        // confiance imméritée aux tests des tâches suivantes.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let cle_tronquee = base64::engine::general_purpose::STANDARD.encode([1u8; 16]);
-
-        let reponse = ureq::post(&format!("{}/api/sky/devices", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(&format!(
-                r#"{{"publicKey":"{cle_tronquee}","nom":"Mon PC","plateforme":"windows"}}"#
-            ))
-            .unwrap_err();
-        let reponse = reponse.into_response().unwrap();
-        assert_eq!(reponse.status(), 400);
-    }
-
-    #[test]
-    fn devices_reussit_et_incremente_lidentifiant() {
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let cle = base64::engine::general_purpose::STANDARD.encode([2u8; 32]);
-
-        let recu: serde_json::Value = ureq::post(&format!("{}/api/sky/devices", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(&format!(r#"{{"publicKey":"{cle}","nom":"Mon PC","plateforme":"windows"}}"#))
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(recu["id"], 1);
-    }
-
-    #[test]
-    fn friends_refuse_un_code_inconnu_et_reussit_avec_le_code_enregistre() {
-        // "STRANGE9" et "BUDDY234" sont tous deux BIEN FORMÉS (8 caractères
-        // de l'alphabet réel `ABCDEFGHJKMNPQRSTUVWXYZ23456789`) — ce test
-        // vise la distinction 404 (forme correcte, inconnu) / succès, pas
-        // la validation de forme elle-même (voir
-        // `friends_refuse_un_code_mal_forme_avec_400` pour celle-ci).
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-
-        let refuse = ureq::post(&format!("{}/api/sky/friends", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(r#"{"code":"STRANGE9"}"#)
-            .unwrap_err();
-        assert_eq!(refuse.into_response().unwrap().status(), 404);
-
-        s.etat_mut().code_ami_valide = Some(("BUDDY234".to_string(), 42));
-        let recu: serde_json::Value = ureq::post(&format!("{}/api/sky/friends", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(r#"{"code":"BUDDY234"}"#)
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(recu["id"], 42);
-    }
-
-    #[test]
-    fn friends_refuse_un_code_mal_forme_avec_400() {
-        // RONDE DE CORRECTION 1, « Important 1 » : "INCONNU1" contient `I`,
-        // `O` et `1`, absents de l'alphabet réel — contre le vrai serveur
-        // ce code reçoit un 400 de forme, JAMAIS le 404 métier qu'un
-        // double moins strict rendrait. Neutralisation : retirer l'appel à
-        // `normaliser_code_ami` dans `gerer_friends` (revenir à une
-        // comparaison directe à `code_ami_valide`) fait rougir CE test
-        // précis, seul — les codes bien formés des deux tests voisins
-        // restent inchangés par une telle neutralisation.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-
-        let refuse = ureq::post(&format!("{}/api/sky/friends", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(r#"{"code":"INCONNU1"}"#)
-            .unwrap_err();
-        let reponse = refuse.into_response().unwrap();
-        assert_eq!(reponse.status(), 400);
-        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"code invalide : forme inattendue"}"#);
-    }
-
-    #[test]
-    fn devices_refuse_un_nom_avec_octet_nul() {
-        // RONDE DE CORRECTION 1, « Important 2 » : le site refuse l'octet
-        // NUL dans `nom` via `texteStockable` (400) avant que la valeur
-        // n'atteigne Postgres, qui la refuserait par un 500. Échoue si le
-        // double acceptait encore un `nom` qui le porte.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let cle = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
-        let corps = serde_json::json!({"publicKey": cle, "nom": "a\u{0}b", "plateforme": "windows"});
-
-        let reponse = ureq::post(&format!("{}/api/sky/devices", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(&corps.to_string())
-            .unwrap_err();
-        assert_eq!(reponse.into_response().unwrap().status(), 400);
-    }
-
-    #[test]
-    fn devices_mesure_la_longueur_du_nom_en_unites_utf16() {
-        // RONDE DE CORRECTION 1 : `nomValide` mesure `nom.length` — des
-        // unités de code UTF-16, pas des caractères Unicode. Un emoji
-        // (U+1F600) compte pour 2 unités UTF-16 mais pour 1 seul `char`
-        // Rust : 33 emoji, c'est 33 `chars()` (accepté par l'ANCIENNE
-        // mesure de ce double, `chars().count() <= 64`) mais 66 unités
-        // UTF-16 (refusé par la vraie mesure, > 64). Échoue si le double
-        // mesurait encore en caractères.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        let cle = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
-        let nom_trop_long: String = "😀".repeat(33);
-        assert_eq!(nom_trop_long.chars().count(), 33);
-        assert_eq!(nom_trop_long.encode_utf16().count(), 66);
-
-        let corps = serde_json::json!({"publicKey": cle, "nom": nom_trop_long, "plateforme": "windows"});
-        let reponse = ureq::post(&format!("{}/api/sky/devices", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string(&corps.to_string())
-            .unwrap_err();
-        assert_eq!(reponse.into_response().unwrap().status(), 400);
-    }
-
-    #[test]
-    fn friends_accept_refuse_un_identifiant_mal_forme_avec_400() {
-        // RONDE DE CORRECTION 1 (Mineur) : un identifiant non entier,
-        // négatif ou nul reçoit 400 côté site, pas le même 404 qu'un
-        // identifiant bien formé mais inexistant.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        s.etat_mut().amitie_acceptable = Some(7);
-
-        for id in ["0", "-3", "abc", "7.5"] {
-            let reponse = ureq::post(&format!("{}/api/sky/friends/{id}/accept", s.url()))
-                .set("Authorization", &format!("Bearer {jeton}"))
-                .send_string("{}")
-                .unwrap_err();
-            let reponse = reponse.into_response().unwrap();
-            assert_eq!(reponse.status(), 400, "identifiant testé : {id}");
-            assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Identifiant invalide"}"#);
-        }
-    }
-
-    #[test]
-    fn friends_accept_reussit_pour_lidentifiant_pilote_et_refuse_sinon() {
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        s.etat_mut().amitie_acceptable = Some(7);
-
-        let refuse = ureq::post(&format!("{}/api/sky/friends/8/accept", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string("{}")
-            .unwrap_err();
-        assert_eq!(refuse.into_response().unwrap().status(), 404);
-
-        let recu: serde_json::Value = ureq::post(&format!("{}/api/sky/friends/7/accept", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .send_string("{}")
-            .unwrap()
-            .into_json()
-            .unwrap();
-        assert_eq!(recu["ok"], true);
-    }
-
-    // --- /api/auth/me (AJOUT DE LA TÂCHE 10) --------------------------
-    //
-    // Même discipline que le reste de ce module : chaque route a ses tests
-    // HTTP directs, indépendants de `sky_compte` — ceux-là vivent dans
-    // `identite_test.rs`. Sans ceux-ci, `MoiFaux::nouveau` n'était appelée
-    // que par `identite_test.rs`, jamais par ce module : `cargo clippy`
-    // le rendait mort dans les quatre AUTRES binaires de test qui incluent
-    // ce fichier (`faux_serveur_test`, `session_test`, `boite_test`,
-    // `annuaire_test`), chacun compilant ce module séparément via `#[path]`.
-
-    #[test]
-    fn me_exige_un_jeton() {
-        // Échoue si `GET /api/auth/me` répondait sans en-tête `Authorization`
-        // — même garde que `sync_exige_un_jeton`.
-        let s = FauxServeur::demarrer();
-        let reponse = ureq::get(&format!("{}/api/auth/me", s.url())).call();
-        let reponse = reponse.unwrap_err().into_response().unwrap();
-        assert_eq!(reponse.status(), 401);
-        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Non authentifie"}"#);
-    }
-
-    #[test]
-    fn me_rend_lidentifiant_et_le_nom_discord_en_camel_case() {
-        // Échoue si `gerer_me` rendait `discord_name` (snake_case) plutôt
-        // que `discordName` — forme exacte de la réponse du site.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        s.etat_mut().moi = Some(MoiFaux::nouveau(42, "Killian"));
-
-        let recu: serde_json::Value = ureq::get(&format!("{}/api/auth/me", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap()
-            .into_json()
-            .unwrap();
-
-        assert_eq!(recu["id"], 42);
-        assert_eq!(recu["discordName"], "Killian");
-        assert!(recu.get("discord_name").is_none());
-    }
-
-    #[test]
-    fn me_sans_utilisateur_connu_rend_404() {
-        // Même principe que `code_ami_valide`/`amitie_acceptable` : aucun
-        // utilisateur n'est connu tant qu'un test ne l'a pas enregistré.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-
-        let reponse = ureq::get(&format!("{}/api/auth/me", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap_err();
-        let reponse = reponse.into_response().unwrap();
-        assert_eq!(reponse.status(), 404);
-        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"Utilisateur introuvable"}"#);
-    }
-
-    #[test]
-    fn me_avec_session_partielle_rend_403_avant_de_consulter_moi() {
-        // Échoue si `gerer_me` consultait `moi` AVANT `session_partielle_totp`
-        // — même ordre que le site (`requireAuth` puis `!totpVerified` puis
-        // `findUserById`). `moi` est enregistré pour prouver que ce n'est
-        // PAS son absence qui produit ce refus.
-        let s = FauxServeur::demarrer();
-        let jeton = s.jeton_de_test();
-        s.etat_mut().moi = Some(MoiFaux::nouveau(1, "peu importe"));
-        s.etat_mut().session_partielle_totp = true;
-
-        let reponse = ureq::get(&format!("{}/api/auth/me", s.url()))
-            .set("Authorization", &format!("Bearer {jeton}"))
-            .call()
-            .unwrap_err();
-        let reponse = reponse.into_response().unwrap();
-        assert_eq!(reponse.status(), 403);
-        assert_eq!(reponse.into_string().unwrap(), r#"{"error":"TOTP verification required"}"#);
-    }
-}
+// Les tests propres à ce double vivent dans `tests_du_double.rs`, inclus par
+// `faux_serveur_test.rs` seulement — voir l'en-tête de ce fichier pour la raison.

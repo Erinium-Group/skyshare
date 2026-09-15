@@ -1,5 +1,9 @@
 //! Tests d'intégration de la tâche 10 (`GET /api/auth/me`) qui pilotent le
 //! serveur double : `moi`.
+// `allow(dead_code)` : chaque binaire n'utilise qu'une partie du double, et ses
+// propres tests — qui en exerçaient tout — ne sont plus inclus qu'une fois, dans
+// `faux_serveur_test.rs` (revue finale, m1).
+#[allow(dead_code)]
 #[path = "faux_serveur/mod.rs"]
 mod faux_serveur;
 

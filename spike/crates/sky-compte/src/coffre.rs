@@ -8,9 +8,9 @@
 //! rien ici ne doit jamais être journalisé, affiché, ni exposé par un
 //! `Debug` qui en révèle le contenu.
 
-use std::cell::RefCell;
 use std::fmt;
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
@@ -35,8 +35,8 @@ use crate::erreur::ErreurCompte;
 /// interne au service de gestion des identifiants, limite de simultanéité,
 /// interférence d'un antivirus scrutant les binaires fraîchement compilés, ou
 /// autre) n'a donc PAS pu être identifiée avec certitude au-delà de ce qui est
-/// exclu ci-dessus (pas une collision de nom de cible, pas un bug du registre de
-/// nettoyage `NETTOYAGE_TESTS`). Ce qui est établi sans ambiguïté : le symptôme
+/// exclu ci-dessus (pas une collision de nom de cible). Ce qui est établi sans
+/// ambiguïté : le symptôme
 /// n'apparaît QUE sous exécution parallèle, jamais avec `--test-threads=1`, et
 /// disparaît quand ce verrou retire la variable qui reste sous notre contrôle —
 /// deux opérations de ce crate sur le trousseau ne peuvent plus jamais se
@@ -72,6 +72,17 @@ const UTILISATEUR_APPAREIL: &str = "appareil";
 /// session.
 pub struct Coffre {
     service: String,
+    /// Vrai pour un coffre de test (`pour_test`) : ses entrées sont
+    /// supprimées quand il est abandonné. Toujours faux en production.
+    nettoyer_a_l_abandon: bool,
+}
+
+impl Drop for Coffre {
+    fn drop(&mut self) {
+        if self.nettoyer_a_l_abandon {
+            nettoyer_service_de_test(&self.service);
+        }
+    }
 }
 
 /// Jetons de session émis par l'API de signaling.
@@ -97,6 +108,7 @@ impl Coffre {
     pub fn nouveau() -> Result<Coffre, ErreurCompte> {
         Ok(Coffre {
             service: SERVICE_PRODUCTION.to_string(),
+            nettoyer_a_l_abandon: false,
         })
     }
 
@@ -106,22 +118,23 @@ impl Coffre {
     /// utilisant le même nom de service se marcheraient dessus dans le
     /// trousseau réel de la machine, qui est partagé et persistant.
     ///
-    /// Les entrées créées sous ce préfixe sont supprimées du trousseau
-    /// quand le thread du test se termine — à la fin de la fonction de
-    /// test, que celle-ci réussisse ou panique. **Pas** à l'abandon de
-    /// chaque `Coffre` individuel : le test de persistance de l'identité
-    /// abandonne volontairement un premier `Coffre` avant d'en recréer un
-    /// second sous le même préfixe, et l'entrée doit survivre à cet
-    /// abandon-là précisément — c'est ce qu'elle prouve. Nettoyer à ce
-    /// moment-là aurait donc invalidé le test qu'il est censé protéger.
+    /// Les entrées créées sous ce préfixe sont supprimées du trousseau quand
+    /// CE `Coffre` est abandonné — à la fin de la portée du test, que celui-ci
+    /// réussisse ou panique (le déroulement de pile exécute `Drop`) — et le
+    /// nettoyage vérifie qu'elles RESTENT supprimées : voir
+    /// `nettoyer_service_de_test` pour la cause racine qui l'exige.
     ///
-    /// Si le processus est tué net (pas d'unwind, pas de retour de thread),
-    /// ce nettoyage ne s'exécute pas et les entrées restent dans le
-    /// trousseau réel de la machine.
+    /// Deux `Coffre` de test vivants sous le même préfixe ne doivent donc
+    /// jamais coexister : le premier abandonné nettoierait sous le second. Le
+    /// test de persistance de l'identité, qui doit abandonner un coffre SANS
+    /// nettoyer, en construit un sans nettoyage — comme un coffre de production.
+    ///
+    /// Si le processus est tué net (pas de déroulement de pile), ce nettoyage
+    /// ne s'exécute pas et les entrées restent dans le trousseau réel de la
+    /// machine.
     pub fn pour_test(prefixe: &str) -> Coffre {
         let service = format!("SkyShare-test-{prefixe}");
-        enregistrer_pour_nettoyage(service.clone());
-        Coffre { service }
+        Coffre { service, nettoyer_a_l_abandon: true }
     }
 
     fn entree(&self, utilisateur: &str) -> Result<Entry, ErreurCompte> {
@@ -246,26 +259,71 @@ fn erreur_coffre(e: impl std::fmt::Display) -> ErreurCompte {
 }
 
 // --- Nettoyage des coffres de test ------------------------------------
-//
-// Chaque service enregistré par `Coffre::pour_test` est supprimé du
-// trousseau quand le thread qui l'a créé se termine — normalement ou par
-// une panique (le déroulement de la pile exécute les destructeurs de
-// variables thread-locales). Le test harness de `cargo test` exécute
-// chaque fonction de test sur son propre thread : le nettoyage arrive donc
-// après la fin de CETTE fonction de test, jamais entre deux `Coffre`
-// construits à l'intérieur d'une même fonction.
 
-struct RegistreNettoyage {
-    services: Vec<String>,
+/// Intervalle entre deux relectures d'une entrée de test supprimée.
+const PAS_DE_VERIFICATION: Duration = Duration::from_millis(25);
+
+/// Durée pendant laquelle les entrées supprimées d'un coffre de test doivent
+/// RESTER absentes pour que le nettoyage soit tenu pour acquis. Mesuré (voir
+/// `nettoyer_service_de_test`) : la réapparition survenait avant la première
+/// relecture, à 50 ms ; 300 ms laisse six fois cette durée.
+const FENETRE_DE_STABILITE: Duration = Duration::from_millis(300);
+
+/// Cycles suppression + vérification au plus : borne contre une boucle sans fin
+/// si le trousseau refusait durablement la suppression.
+const CYCLES_MAX_DE_NETTOYAGE: u32 = 10;
+
+const UTILISATEURS: [&str; 3] = [UTILISATEUR_IDENTITE, UTILISATEUR_JETONS, UTILISATEUR_APPAREIL];
+
+/// Supprime les entrées d'un service de test, puis s'assure qu'elles RESTENT
+/// supprimées.
+///
+/// CAUSE RACINE, établie par mesure (vague de correction finale du jalon C2,
+/// `final-fix-report.md`) : les entrées `SkyShare-test-*` laissées dans le
+/// trousseau ne venaient PAS d'un nettoyage qui ne s'exécutait pas.
+/// - Chaque suppression s'exécutait et réussissait (`CredDeleteW` via `keyring`
+///   3.6.3, persistance `CRED_PERSIST_ENTERPRISE`), et une relecture immédiate
+///   ne trouvait plus l'entrée.
+/// - Déplacer le nettoyage du destructeur thread-local d'alors vers `Drop`, dans
+///   la portée du test, ne changeait rien : 6 exécutions sur 8 avec fuite dans
+///   les deux cas.
+/// - Mais une relecture 50 ms plus tard retrouvait l'entrée, qui restait ensuite
+///   visible par `cmdkey /list` : le gestionnaire d'identifiants de Windows fait
+///   RÉAPPARAÎTRE une entrée supprimée peu après son écriture. Son mécanisme
+///   interne n'est pas établi.
+///
+/// La suppression seule ne suffit donc pas : l'absence doit être constatée sur
+/// toute `FENETRE_DE_STABILITE`, et une réapparition relance la suppression.
+fn nettoyer_service_de_test(service: &str) {
+    for _ in 0..CYCLES_MAX_DE_NETTOYAGE {
+        for utilisateur in UTILISATEURS {
+            supprimer_silencieusement(service, utilisateur);
+        }
+        if absence_stable(service) {
+            return;
+        }
+    }
 }
 
-impl Drop for RegistreNettoyage {
-    fn drop(&mut self) {
-        for service in &self.services {
-            supprimer_silencieusement(service, UTILISATEUR_IDENTITE);
-            supprimer_silencieusement(service, UTILISATEUR_JETONS);
-            supprimer_silencieusement(service, UTILISATEUR_APPAREIL);
+/// Vrai si aucune entrée de `service` ne réapparaît pendant `FENETRE_DE_STABILITE`.
+fn absence_stable(service: &str) -> bool {
+    let debut = Instant::now();
+    while debut.elapsed() < FENETRE_DE_STABILITE {
+        std::thread::sleep(PAS_DE_VERIFICATION);
+        if UTILISATEURS.iter().any(|utilisateur| entree_presente(service, utilisateur)) {
+            return false;
         }
+    }
+    true
+}
+
+/// Présence d'une entrée, quel que soit son contenu : tout sauf « aucune entrée »
+/// compte comme présent — un contenu illisible reste une entrée à supprimer.
+fn entree_presente(service: &str, utilisateur: &str) -> bool {
+    let _verrou = verrou_trousseau();
+    match Entry::new(service, utilisateur) {
+        Ok(entree) => !matches!(entree.get_secret(), Err(keyring::Error::NoEntry)),
+        Err(_) => false,
     }
 }
 
@@ -276,19 +334,6 @@ fn supprimer_silencieusement(service: &str, utilisateur: &str) {
     }
 }
 
-thread_local! {
-    static NETTOYAGE_TESTS: RefCell<RegistreNettoyage> =
-        const { RefCell::new(RegistreNettoyage { services: Vec::new() }) };
-}
-
-fn enregistrer_pour_nettoyage(service: String) {
-    NETTOYAGE_TESTS.with(|registre| {
-        let mut registre = registre.borrow_mut();
-        if !registre.services.contains(&service) {
-            registre.services.push(service);
-        }
-    });
-}
 
 #[cfg(test)]
 mod tests {
@@ -301,12 +346,19 @@ mod tests {
         // de sky-crypto annonce depuis le jalon 0 (« au jalon 1 elle ira dans le
         // coffre-fort du systeme »). Une cle regeneree a chaque lancement
         // invaliderait toutes les enveloppes en vol.
-        let coffre = Coffre::pour_test("sky-test-identite");
-        let premiere = coffre.identite().unwrap().public_key();
-        drop(coffre);
+        //
+        // `nettoyeur` est créé EN PREMIER et vit jusqu'à la fin du test : c'est
+        // lui qui supprime les entrées, même si une assertion panique. Le coffre
+        // abandonné au milieu est construit SANS nettoyage, comme un coffre de
+        // production — son abandon simule l'arrêt de l'application, et doit
+        // laisser l'identité dans le trousseau.
+        let nettoyeur = Coffre::pour_test("sky-test-identite");
+        let lancement_precedent =
+            Coffre { service: nettoyeur.service.clone(), nettoyer_a_l_abandon: false };
+        let premiere = lancement_precedent.identite().unwrap().public_key();
+        drop(lancement_precedent);
 
-        let coffre = Coffre::pour_test("sky-test-identite");
-        assert_eq!(coffre.identite().unwrap().public_key(), premiere);
+        assert_eq!(nettoyeur.identite().unwrap().public_key(), premiere);
     }
 
     #[test]

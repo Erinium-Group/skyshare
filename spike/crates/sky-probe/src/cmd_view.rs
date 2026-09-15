@@ -19,7 +19,7 @@ use sky_compte::{deposer, relever, resoudre_ami, synchroniser};
 use sky_crypto::Identity;
 use sky_net::{LinkEvent, PeerLink};
 
-use crate::cmd_compte::config_et_coffre;
+use crate::cmd_compte::{avertissement_consommation, causes_d_un_depot_refuse, config_et_coffre};
 use crate::cmd_host::{epoch_us, erreur_compte, etablir, EN_TETE_MORCEAU};
 use crate::rendez_vous::{
     interroger, reponse_a_l_offre, session_de, HorlogeReelle, ATTENTE_SPECTATEUR, CADENCE,
@@ -68,11 +68,11 @@ pub fn run(ami_designe: &str, secondes: u64, sortie: &str) -> anyhow::Result<()>
     let deposes = deposer(&config, &coffre, &ami.appareils, offre.as_bytes()).map_err(erreur_compte)?;
     if deposes == 0 {
         println!(
-            "Le serveur a refusé la demande pour les {} appareil(s) de {} (appareil révoqué ou \
-             amitié retirée entre-temps) : rien n'a été envoyé.",
+            "Le serveur a refusé la demande pour les {} appareil(s) de {} : rien n'a été envoyé.",
             ami.appareils.len(),
             ami.discord_name
         );
+        println!("{}", causes_d_un_depot_refuse());
         return Ok(());
     }
     println!(
@@ -81,9 +81,14 @@ pub fn run(ami_designe: &str, secondes: u64, sortie: &str) -> anyhow::Result<()>
         ami.appareils.len()
     );
     println!(
-        "J'attends sa réponse pendant {} s au maximum.\n",
+        "J'attends sa réponse pendant {} s au maximum.",
         ATTENTE_SPECTATEUR.as_secs()
     );
+    // Même limite que `host` (revue finale, m3) : la réponse de l'ami arrive
+    // par une enveloppe que le serveur efface en la livrant — une autre
+    // commande qui synchronise pendant cette attente la consommerait, et ce
+    // `view` conclurait à tort « n'a pas répondu ».
+    println!("{}", avertissement_consommation("la réponse de ton ami"));
     std::io::stdout().flush().ok();
 
     // Le mapping NAT du port annoncé dans l'offre doit survivre à l'attente.

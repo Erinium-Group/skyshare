@@ -1,6 +1,10 @@
 //! Tests d'intégration de la tâche 6 (connexion native) qui pilotent le serveur
 //! double — `echanger_le_code` uniquement : `connecter` ouvre un vrai navigateur et
 //! attend une vraie requête entrante, ce n'est pas testable automatiquement.
+// `allow(dead_code)` : chaque binaire n'utilise qu'une partie du double, et ses
+// propres tests — qui en exerçaient tout — ne sont plus inclus qu'une fois, dans
+// `faux_serveur_test.rs` (revue finale, m1).
+#[allow(dead_code)]
 #[path = "faux_serveur/mod.rs"]
 mod faux_serveur;
 
@@ -37,8 +41,8 @@ fn echanger_le_code_reussit_et_les_jetons_sont_utilisables_ensuite() {
     let coffre = Coffre::pour_test("sky-test-echange-reussi");
 
     let jetons = echanger_le_code(&Config::vers(&s.url()), "CODEVALIDE", "secret-correct").unwrap();
-    assert_eq!(jetons.session, "jeton-acces-natif");
-    assert_eq!(jetons.renouvellement, "jeton-refresh-natif");
+    assert_eq!(jetons.session, "jeton-acces-natif-1");
+    assert_eq!(jetons.renouvellement, "jeton-refresh-natif-1");
 
     coffre.ranger_jetons(&jetons).unwrap();
     assert_eq!(coffre.jetons().unwrap(), Some(jetons));
@@ -102,7 +106,7 @@ fn un_401_declenche_un_renouvellement_puis_une_seule_reprise() {
 
     assert!(resultat.is_ok(), "attendu un succès après la reprise, obtenu {resultat:?}");
     assert_eq!(s.etat_mut().appels_de_renouvellement, 1, "un seul renouvellement");
-    assert_eq!(coffre.jetons().unwrap().unwrap().session, "jeton-neuf");
+    assert_eq!(coffre.jetons().unwrap().unwrap().session, "jeton-neuf-1");
 }
 
 #[test]

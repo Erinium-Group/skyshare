@@ -21,7 +21,9 @@ use sky_crypto::Identity;
 use sky_encode::{nvenc::NvencEncoder, Codec};
 use sky_net::{LinkEvent, Pacer, PeerLink};
 
-use crate::cmd_compte::{config_et_coffre, message_utilisateur};
+use crate::cmd_compte::{
+    avertissement_consommation, causes_d_un_depot_refuse, config_et_coffre, message_utilisateur,
+};
 use crate::cmd_encode::{Source, TextureSynthetique, FPS};
 use crate::rendez_vous::{
     echec_local, interroger, offres_recevables, HorlogeReelle, CADENCE, FENETRE_HOTE,
@@ -117,10 +119,7 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
     // Ces commandes synchronisent sans avoir l'usage des enveloppes, et le
     // serveur efface ce qu'il livre : une demande arrivée pendant qu'elles
     // tournent serait perdue pour ce partage, sans que rien ne le signale.
-    println!("\n  /!\\  Pendant le partage, ne lance sur cette machine ni `friends list`,");
-    println!("       ni `friends add`, ni `device list`, ni `code`, ni `view`, ni un second");
-    println!("       `host` : toute commande qui synchronise consomme les demandes en");
-    println!("       attente, et celle de ton ami serait perdue.\n");
+    println!("{}", avertissement_consommation("la demande de ton ami"));
 
     let (config, coffre) = config_et_coffre()?;
     // Avant tout réseau : sans appareil enregistré, personne ne peut nous
@@ -159,12 +158,17 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
                         let message = e.to_string();
                         if echec_local(&message) {
                             // La cause vient de CETTE machine (réseau, port UDP) —
-                            // pas de l'offre de l'ami, qui reste valide. La dire
-                            // « écartée » ferait porter à tort la faute à l'ami.
-                            println!(
-                                "  Échec local ({message}) : nouvelle tentative au \
-                                 prochain sondage."
-                            );
+                            // pas de l'offre de l'ami. La dire « écartée » ferait
+                            // porter à tort la faute à l'ami.
+                            //
+                            // Et RIEN n'est retenté : le serveur a effacé l'offre en
+                            // la livrant, `interroger` ne présente chaque état
+                            // qu'une fois, et la synchronisation suivante rend des
+                            // enveloppes vidées. Promettre une nouvelle tentative
+                            // ferait attendre les deux côtés pour rien — l'ami
+                            // lirait « n'a pas répondu » et chercherait la faute
+                            // chez lui (revue finale, I2).
+                            println!("{}", message_echec_local(&message));
                         } else {
                             println!("  Demande écartée : {message}");
                         }
@@ -198,10 +202,8 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
     let deposes = deposer(&config, &coffre, std::slice::from_ref(&destinataire), reponse.as_bytes())
         .map_err(erreur_compte)?;
     if deposes == 0 {
-        println!(
-            "Le serveur a refusé la réponse (appareil révoqué ou amitié retirée entre-temps) : \
-             rien n'a été envoyé."
-        );
+        println!("Le serveur a refusé la réponse : rien n'a été envoyé.");
+        println!("{}", causes_d_un_depot_refuse());
         return Ok(());
     }
 
@@ -639,6 +641,21 @@ fn percentile_u64(tries: &[u64], p: usize) -> u64 {
     tries[idx]
 }
 
+/// Message affiché quand `repondant` échoue pour une cause LOCALE (réseau, port
+/// UDP) — l'offre de l'ami, elle, était valide.
+///
+/// Il ne promet AUCUNE reprise (revue finale, I2) : le serveur a effacé l'offre
+/// en la livrant, `interroger` ne présente chaque état qu'une fois, et la
+/// synchronisation suivante rend des enveloppes vidées. L'ancien message
+/// annonçait « nouvelle tentative au prochain sondage » : les deux côtés
+/// attendaient alors pour rien, et l'ami lisait « n'a pas répondu ».
+pub(crate) fn message_echec_local(message: &str) -> String {
+    format!(
+        "  Échec local ({message}) : cette demande est perdue, le serveur l'a déjà \
+         livrée. Demande à ton ami de relancer `sky-probe view`."
+    )
+}
+
 /// Une erreur de compte, rédigée pour l'utilisateur : `Refuse` reçoit le
 /// message unique de `cmd_compte`, les autres leur `Display` déjà expurgé.
 /// Partagée avec `cmd_view`.
@@ -738,5 +755,24 @@ fn diagnostiquer(link: &PeerLink) {
         println!("Réserve : {erreurs} erreur(s) sur le port UDP local pendant la tentative.");
         println!("Une cause locale (pare-feu, interface qui change) n'est pas exclue :");
         println!("le diagnostic ci-dessus est à prendre avec précaution.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn l_echec_local_ne_promet_aucune_reprise_et_renvoie_a_view() {
+        // Échoue si le message reprenait une promesse de reprise : rien n'est
+        // retenté, et c'est l'ami qui doit relancer `view`.
+        let ligne = message_echec_local("port UDP indisponible");
+        assert!(ligne.contains("port UDP indisponible"), "la cause observée doit être citée");
+        assert!(ligne.contains("perdue"));
+        assert!(ligne.contains("relancer `sky-probe view`"));
+        let minuscule = ligne.to_lowercase();
+        for promesse in ["nouvelle tentative", "prochain sondage", "retent", "réessa"] {
+            assert!(!minuscule.contains(promesse), "le message promet une reprise : « {promesse} »");
+        }
     }
 }

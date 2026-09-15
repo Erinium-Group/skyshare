@@ -398,6 +398,101 @@ pub fn enregistrer_appareil(config: &Config, coffre: &Coffre, nom: &str, cle: &[
     Ok(id)
 }
 
+/// Issue d'un `rattacher_appareil` réussi.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rattachement {
+    /// Le coffre ne porte aucun identifiant d'appareil : rien à rattacher.
+    AucunAppareil,
+    /// L'appareil `ancien` figurait parmi ceux du compte : révoqué, puis
+    /// réenregistré avec la même clé et le même `nom`, sous l'identifiant
+    /// `nouveau`, rattaché à la session courante.
+    Rattache { ancien: i64, nouveau: i64, nom: String },
+    /// L'appareil `ancien` ne figure PAS parmi ceux du compte (supprimé, ou
+    /// enregistré sous un autre compte Discord sur cette machine) :
+    /// réenregistré quand même avec la même clé, sous un nom par défaut.
+    ReenregistreSousNomParDefaut { ancien: i64, nouveau: i64, nom: String },
+}
+
+/// Rattache l'appareil de cette machine à la session COURANTE.
+///
+/// POURQUOI (revue finale, I1) : le site ne connaît « l'appareil courant »
+/// que par `devices.session_id` (`sync/route.ts`), posé une seule fois, à
+/// l'enregistrement. Chaque connexion crée une NOUVELLE session
+/// (`creerSessionNative`), qui expire au plus tard sept jours après. Sans
+/// rattachement, après un nouveau `login`, `GET /api/sky/sync` ne résout
+/// aucun appareil : aucune enveloppe n'est plus jamais livrée à cette
+/// machine, sans la moindre erreur. Un renouvellement de jeton, lui, garde
+/// la même session (`refresh/route.ts`) : il ne rompt rien.
+///
+/// Déroulé : synchroniser, retrouver l'appareil de l'identifiant rangé
+/// (pour son nom), le RÉVOQUER (`DELETE /api/sky/devices/{id}` — révoque
+/// aussi l'ancienne session qu'il portait, et le retire des appareils vus
+/// par les amis, qui ne scellent donc plus rien pour lui), puis le
+/// réenregistrer avec la MÊME clé publique, ce qui le lie à la session
+/// courante et range le nouvel identifiant (`enregistrer_appareil`).
+///
+/// ORDRE : l'identifiant rangé n'est remplacé qu'APRÈS un réenregistrement
+/// réussi — c'est `enregistrer_appareil` qui le range, à son succès. Un
+/// échec entre la révocation et le réenregistrement laisse donc l'ancien
+/// identifiant (révoqué) dans le coffre : un nouvel appel refait la
+/// révocation (acceptée, 204 ou 404) puis le réenregistrement.
+///
+/// /!\ SYNCHRONISE : consomme les enveloppes en attente, comme toute
+/// synchronisation (voir `synchroniser`). Appelée juste après une
+/// connexion, quand aucune négociation n'est censée être en cours.
+pub fn rattacher_appareil(config: &Config, coffre: &Coffre) -> Result<Rattachement, ErreurCompte> {
+    let Some(ancien) = coffre.identifiant_appareil()? else {
+        return Ok(Rattachement::AucunAppareil);
+    };
+    // La MÊME clé : les enveloppes déjà scellées pour cet appareil, et la
+    // clé que ses amis connaissent, restent valables.
+    let cle = coffre.identite()?.public_key();
+
+    let etat = synchroniser(config, coffre, None)?;
+    let nom_connu = etat.appareils.iter().find(|a| a.id == ancien).map(|a| a.nom.clone());
+
+    revoquer_appareil(config, coffre, ancien)?;
+
+    match nom_connu {
+        Some(nom) => {
+            let nouveau = enregistrer_appareil(config, coffre, &nom, &cle)?;
+            Ok(Rattachement::Rattache { ancien, nouveau, nom })
+        }
+        None => {
+            let nom = nom_par_defaut();
+            let nouveau = enregistrer_appareil(config, coffre, &nom, &cle)?;
+            Ok(Rattachement::ReenregistreSousNomParDefaut { ancien, nouveau, nom })
+        }
+    }
+}
+
+/// `DELETE /api/sky/devices/{id}`. `204` (révoqué, y compris un appareil
+/// déjà révoqué) et `404` (inexistant, ou pas à ce compte) sont tous deux
+/// acceptés : dans les deux cas, cet identifiant ne désigne plus un appareil
+/// actif de ce compte, ce qui est tout ce que le rattachement exige. Tout
+/// autre refus (400 identifiant invalide, 403 session partielle, ...) est
+/// une erreur.
+fn revoquer_appareil(config: &Config, coffre: &Coffre, id: i64) -> Result<(), ErreurCompte> {
+    let client = ClientHttp::new(config);
+    let chemin = format!("/api/sky/devices/{id}");
+    avec_jeton_valide(config, coffre, |jeton| match client.delete_reponse_vide_avec_refus(&chemin, Some(jeton))? {
+        ReponseHttp::Succes(()) | ReponseHttp::Refus { statut: 404, .. } => Ok(()),
+        ReponseHttp::Refus { statut, corps } => {
+            Err(ErreurCompte::Protocole(format!("statut {statut} inattendu : {corps}")))
+        }
+    })
+}
+
+/// Nom d'un appareil réenregistré alors que l'ancien n'est plus connu du
+/// compte : le nom de la machine (`COMPUTERNAME`) s'il est acceptable par le
+/// site, sinon un nom générique.
+fn nom_par_defaut() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .filter(|nom| nom_appareil_valide(nom))
+        .unwrap_or_else(|| "Appareil SkyShare".to_string())
+}
+
 /// Alphabet réel des codes ami — même valeur que `ALPHABET` côté site
 /// (`src/lib/sky/codes.ts`) : sans `I`, `L`, `O`, `0`, `1`, pour éviter
 /// l'ambiguïté visuelle. NE JAMAIS CHANGER (invaliderait les codes déjà émis
@@ -711,6 +806,23 @@ mod tests {
         let bruitee = format!("{valide}!!!");
         assert!(cle_publique_valide(&valide));
         assert!(!cle_publique_valide(&bruitee));
+    }
+
+    #[test]
+    fn le_nom_d_appareil_se_mesure_en_unites_utf16_frontiere_64_65() {
+        // T8 (revue finale) : la garde client n'était testée que côté double.
+        // 32 emoji = 64 unités UTF-16 mais 32 `char` ; un « a » de plus = 65
+        // unités, 33 `char`. Échoue si `nom_appareil_valide` mesurait en
+        // `chars().count()` : 33 <= 64, le nom de 65 unités serait accepté
+        // alors que le site (`nom.length <= 64`) le refuse en 400.
+        let nom_64 = "😀".repeat(32);
+        assert_eq!(nom_64.encode_utf16().count(), 64);
+        assert!(nom_appareil_valide(&nom_64), "64 unités UTF-16 : accepté par le site");
+
+        let nom_65 = format!("{nom_64}a");
+        assert_eq!(nom_65.encode_utf16().count(), 65);
+        assert_eq!(nom_65.chars().count(), 33);
+        assert!(!nom_appareil_valide(&nom_65), "65 unités UTF-16 : refusé par le site");
     }
 
     // --- normaliser_code_ami -----------------------------------------

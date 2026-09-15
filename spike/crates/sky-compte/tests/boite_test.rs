@@ -4,6 +4,10 @@
 //! vivent en unité dans `boite.rs`, sauf le test bout en bout ci-dessous qui
 //! passe par un vrai dépôt pour prouver que `deposer` et `relever`
 //! s'accordent sur le même format d'enveloppe.
+// `allow(dead_code)` : chaque binaire n'utilise qu'une partie du double, et ses
+// propres tests — qui en exerçaient tout — ne sont plus inclus qu'une fois, dans
+// `faux_serveur_test.rs` (revue finale, m1).
+#[allow(dead_code)]
 #[path = "faux_serveur/mod.rs"]
 mod faux_serveur;
 
@@ -34,7 +38,7 @@ fn appareil_de(id: i64, identite: &Identity) -> AppareilDAmi {
 
 /// Prépare un coffre authentifié auprès du double, porteur d'un appareil
 /// RÉELLEMENT ENREGISTRÉ côté serveur (`POST /api/sky/devices`, donc
-/// associé à `jeton` dans `EtatFaux::jetons_appareil`) — AJOUT DE LA RONDE
+/// associé à `jeton` dans `EtatFaux::appareil_de_session`) — AJOUT DE LA RONDE
 /// DE CORRECTION 1 : `coffre_pret` (au-dessus) range l'identifiant
 /// UNIQUEMENT en local, sans jamais l'enregistrer côté serveur, donc ne
 /// suffit plus pour un test qui doit RECEVOIR une enveloppe (le double ne

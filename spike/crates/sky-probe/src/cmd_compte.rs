@@ -21,6 +21,40 @@ use sky_compte::{
     Acceptation, Appareil, AjoutAmi, Coffre, Config, ErreurCompte, Jetons,
 };
 
+/// Avertissement affiché par `host` et `view` pendant leur attente — la
+/// limite connue décrite en tête de ce module, dite à l'utilisateur au moment
+/// où elle peut le frapper. `ce_qui_serait_perdu` nomme ce que l'attente
+/// guette (« la demande de ton ami », « la réponse de ton ami »).
+///
+/// Une seule fonction pour les deux commandes (revue finale, m3) : `view`
+/// n'avertissait pas du tout, alors que sa réponse se perd exactement de la
+/// même façon. Deux copies du texte divergeraient à la première retouche.
+pub fn avertissement_consommation(ce_qui_serait_perdu: &str) -> String {
+    format!(
+        "\n  /!\\  Pendant l'attente, ne lance sur cette machine ni `friends list`, ni\n       \
+         `friends add`, ni `device list`, ni `code`, ni un autre `host` ou `view` :\n       \
+         toute commande qui synchronise consomme les enveloppes en attente, et\n       \
+         {ce_qui_serait_perdu} serait perdue.\n"
+    )
+}
+
+/// Causes possibles d'un dépôt refusé pour TOUS les destinataires (« 0
+/// dépôt ») — affichées par `host` et `view`.
+///
+/// Le 404 du serveur est UNIFORME : il recouvre aussi « l'expéditeur n'est
+/// pas mon appareil ». Accuser seulement l'ami ou l'amitié (ancien message)
+/// ferait chercher la faute au mauvais endroit quand c'est l'identifiant
+/// d'appareil rangé sur CETTE machine qui est périmé — appareil révoqué, ou
+/// enregistré sous un autre compte (revue finale, m2). Aucune de ces causes
+/// n'est discernable d'ici : le message les énumère sans en choisir une.
+pub fn causes_d_un_depot_refuse() -> String {
+    "Causes possibles, indiscernables d'ici : appareil de ton ami révoqué, amitié retirée \
+     entre-temps, ou identifiant d'appareil local périmé (appareil révoqué, ou enregistré sous \
+     un autre compte). Dans ce dernier cas : `sky-probe login` rattache l'appareil à ta session, \
+     `sky-probe device register --force` en enregistre un nouveau."
+        .to_string()
+}
+
 /// Construit la configuration et le coffre de production — factorisé pour
 /// que chaque sous-commande n'ait qu'à l'appeler une fois, sans dupliquer
 /// `Config::depuis_env()` / `Coffre::nouveau()` dans `main.rs`.
@@ -73,7 +107,40 @@ pub fn login(config: &Config, coffre: &Coffre) -> anyhow::Result<()> {
         Ok(m) => println!("{}", resume_de_connexion(&jetons, &m.discord_name)),
         Err(_) => println!("Connexion réussie, mais impossible d'afficher le nom du compte."),
     }
+    // Chaque connexion crée une NOUVELLE session côté site, et l'appareil n'est
+    // reconnu que par la session qui l'a enregistré : sans ce rattachement, cette
+    // machine ne recevrait plus aucune demande de partage, sans erreur (revue
+    // finale, I1). Seulement APRÈS une connexion réussie — `connecter` a rangé les
+    // jetons de la nouvelle session.
+    if let Some(ligne) = message_de_rattachement(&sky_compte::rattacher_appareil(config, coffre)) {
+        println!("{ligne}");
+    }
     Ok(())
+}
+
+/// Ligne affichée par `login` après le rattachement de l'appareil — `None` quand
+/// aucun appareil n'est enregistré sur cette machine : rien à rattacher, et
+/// `device register` liera le prochain à la session courante.
+///
+/// Un échec DOIT se voir : c'est précisément le défaut silencieux que le
+/// rattachement ferme (revue finale, I1).
+fn message_de_rattachement(issue: &Result<sky_compte::Rattachement, ErreurCompte>) -> Option<String> {
+    use sky_compte::Rattachement;
+    match issue {
+        Ok(Rattachement::AucunAppareil) => None,
+        Ok(Rattachement::Rattache { ancien, nouveau, nom }) => Some(format!(
+            "Appareil « {nom} » rattaché à la nouvelle session (identifiant {ancien} → {nouveau})."
+        )),
+        Ok(Rattachement::ReenregistreSousNomParDefaut { ancien, nouveau, nom }) => Some(format!(
+            "L'appareil {ancien} n'est plus connu de ce compte : réenregistré sous le nom « {nom} » \
+             (identifiant {nouveau}), rattaché à la nouvelle session."
+        )),
+        Err(e) => Some(format!(
+            "Appareil NON rattaché à la nouvelle session ({}) : cette machine ne recevra aucune \
+             demande de partage tant que ce n'est pas fait. Relance `sky-probe login`.",
+            message_utilisateur(e)
+        )),
+    }
 }
 
 /// Vérifie s'il faut refuser l'enregistrement d'un nouvel appareil.
@@ -323,6 +390,53 @@ pub fn code(config: &Config, coffre: &Coffre) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn un_rattachement_echoue_se_voit_et_renvoie_a_login() {
+        // Échoue si `login` taisait l'échec du rattachement (`None`) : c'est
+        // exactement le défaut silencieux que le rattachement ferme (I1).
+        let ligne = message_de_rattachement(&Err(ErreurCompte::Reseau("x".to_string())))
+            .expect("un échec de rattachement doit s'afficher");
+        assert!(ligne.contains("NON rattaché"));
+        assert!(ligne.contains("`sky-probe login`"));
+    }
+
+    #[test]
+    fn sans_appareil_rien_n_est_dit_et_un_rattachement_reussi_est_annonce() {
+        assert_eq!(message_de_rattachement(&Ok(sky_compte::Rattachement::AucunAppareil)), None);
+        let ligne = message_de_rattachement(&Ok(sky_compte::Rattachement::Rattache {
+            ancien: 3,
+            nouveau: 9,
+            nom: "PC".to_string(),
+        }))
+        .expect("un rattachement réussi s'annonce");
+        assert!(ligne.contains("rattaché à la nouvelle session"));
+        assert!(ligne.contains("3 → 9"));
+    }
+
+    #[test]
+    fn l_avertissement_de_consommation_nomme_chaque_commande_qui_synchronise() {
+        // Échoue si l'une des commandes qui consomment les enveloppes
+        // disparaissait de l'avertissement que `host` ET `view` affichent
+        // (revue finale, m3) — chacune, oubliée, est un moyen de perdre la
+        // négociation en cours sans que rien ne le dise.
+        let texte = avertissement_consommation("la réponse de ton ami");
+        for commande in ["`friends list`", "`friends add`", "`device list`", "`code`", "`host`", "`view`"] {
+            assert!(texte.contains(commande), "commande absente de l'avertissement : {commande}");
+        }
+        assert!(texte.contains("la réponse de ton ami"));
+    }
+
+    #[test]
+    fn un_depot_refuse_evoque_aussi_l_appareil_local_et_le_remede() {
+        // Échoue si le message « 0 dépôt » redevenait l'ancien, qui
+        // n'accusait que l'ami ou l'amitié (revue finale, m2) : le 404
+        // uniforme recouvre aussi un identifiant d'appareil local périmé.
+        let texte = causes_d_un_depot_refuse();
+        assert!(texte.contains("identifiant d'appareil local périmé"));
+        assert!(texte.contains("`sky-probe login`"));
+        assert!(texte.contains("`sky-probe device register"));
+    }
 
     #[test]
     fn le_message_d_echec_de_connexion_est_unique() {

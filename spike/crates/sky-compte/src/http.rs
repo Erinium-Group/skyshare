@@ -212,12 +212,50 @@ impl ClientHttp {
             IssueRequete::Refus { statut, corps } => Ok(ReponseHttp::Refus { statut, corps }),
         }
     }
+
+    /// Requête `DELETE` pour une route dont le SUCCÈS ne porte AUCUN corps
+    /// (`204`, `DELETE /api/sky/devices/{id}`).
+    ///
+    /// AJOUTÉE À LA VAGUE DE CORRECTION FINALE (I1) : `rattacher_appareil`
+    /// (`annuaire.rs`) révoque l'appareil de l'ancienne session par cette
+    /// route. Mêmes garanties que `post_json_reponse_vide_avec_refus` : même
+    /// délai (`DELAI`, porté par l'agent), succès 2xx jamais décodé, 401 →
+    /// `Err(ErreurCompte::Refuse)` pour que `avec_jeton_valide` renouvelle
+    /// dessus, échec de transport → `Err(ErreurCompte::Reseau)`, tout autre
+    /// statut → `Ok(ReponseHttp::Refus { .. })` avec le corps rédigé par
+    /// `corps_sans_en_tete`. `jeton` voyage dans l'en-tête `Authorization`,
+    /// jamais dans le chemin ni dans un message d'erreur.
+    pub fn delete_reponse_vide_avec_refus(
+        &self,
+        chemin: &str,
+        jeton: Option<&str>,
+    ) -> Result<ReponseHttp<()>, ErreurCompte> {
+        let requete = Self::avec_jeton(self.agent.delete(&self.url(chemin)), jeton);
+        match Self::issue_requete(requete.call())? {
+            IssueRequete::Succes(_reponse_2xx) => Ok(ReponseHttp::Succes(())),
+            IssueRequete::Refus { statut, corps } => Ok(ReponseHttp::Refus { statut, corps }),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn aucun_jeton_dans_lechec_reseau_reel_dun_delete() {
+        // Même preuve que le test suivant, sur la méthode `DELETE` ajoutée
+        // pour I1 : rougirait si elle glissait `jeton` dans le message.
+        let client = ClientHttp::new(&Config::vers("http://127.0.0.1:1"));
+        let r = client.delete_reponse_vide_avec_refus("/api/sky/devices/1", Some("SENTINEL-JETON"));
+        let erreur = match r {
+            Err(e) => e,
+            Ok(_) => panic!("attendu un échec de transport vers le port 1"),
+        };
+        assert!(matches!(erreur, ErreurCompte::Reseau(_)));
+        assert!(!erreur.to_string().contains("SENTINEL-JETON"));
+    }
 
     #[test]
     fn aucun_jeton_dans_lechec_reseau_reel() {

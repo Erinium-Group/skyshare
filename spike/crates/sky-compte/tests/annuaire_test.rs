@@ -2,6 +2,10 @@
 //! double : `synchroniser`, `enregistrer_appareil`, `ajouter_ami`,
 //! `accepter_ami`. `resoudre_ami` et la validation de clé publique sont
 //! testées en unité dans `annuaire.rs` (pas besoin du double, aucune E/S).
+// `allow(dead_code)` : chaque binaire n'utilise qu'une partie du double, et ses
+// propres tests — qui en exerçaient tout — ne sont plus inclus qu'une fois, dans
+// `faux_serveur_test.rs` (revue finale, m1).
+#[allow(dead_code)]
 #[path = "faux_serveur/mod.rs"]
 mod faux_serveur;
 
@@ -45,7 +49,7 @@ fn synchroniser_ne_jette_jamais_les_enveloppes_dune_reponse_complete() {
     //
     // RONDE DE CORRECTION 1 (IMPORTANT 2, task-9-review.md) : le double ne
     // livre plus qu'à l'appareil associé au jeton qui synchronise (voir
-    // `EtatFaux::jetons_appareil`) — ce test doit donc enregistrer un
+    // `EtatFaux::appareil_de_session`) — ce test doit donc enregistrer un
     // appareil réel avec CE jeton avant de déposer une enveloppe à son
     // intention, au lieu du `9` arbitraire d'avant cette ronde.
     let s = FauxServeur::demarrer();

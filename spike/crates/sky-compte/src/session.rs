@@ -13,7 +13,7 @@
 //!   intercepté seul ne sert donc à rien. C'est pourquoi le secret ne part jamais dans
 //!   `url_de_depart` : seule son empreinte SHA-256 y figure.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -184,7 +184,7 @@ pub fn avec_jeton_valide<T>(
 }
 
 /// Sépare `code` et `error` de la requête de redirection reçue par le serveur local
-/// (`/?code=...` ou `/?error=...`).
+/// (`/?code=...` ou `/?error=...`). Une valeur vide compte comme absente.
 fn extraire_code_ou_erreur(chemin: &str) -> (Option<String>, Option<String>) {
     let Some((_, requete)) = chemin.split_once('?') else {
         return (None, None);
@@ -192,13 +192,99 @@ fn extraire_code_ou_erreur(chemin: &str) -> (Option<String>, Option<String>) {
     let mut code = None;
     let mut erreur = None;
     for paire in requete.split('&') {
-        if let Some(valeur) = paire.strip_prefix("code=") {
+        if let Some(valeur) = paire.strip_prefix("code=").filter(|v| !v.is_empty()) {
             code = Some(valeur.to_string());
-        } else if let Some(valeur) = paire.strip_prefix("error=") {
+        } else if let Some(valeur) = paire.strip_prefix("error=").filter(|v| !v.is_empty()) {
             erreur = Some(valeur.to_string());
         }
     }
     (code, erreur)
+}
+
+/// Longueur maximale de la raison `error=` recopiée dans le terminal.
+const LONGUEUR_MAX_RAISON: usize = 64;
+
+/// Le vrai rappel du site, une fois reconnu parmi les requêtes reçues en boucle locale.
+#[derive(Debug, PartialEq, Eq)]
+enum Rappel {
+    Code(String),
+    /// Raison DÉJÀ assainie (`assainir_raison`) : jamais la valeur brute.
+    Erreur(String),
+}
+
+/// Réduit la valeur `error=` à ce qu'on peut afficher sans risque : lettres et
+/// chiffres ASCII, `_`, `-`, `.`, au plus `LONGUEUR_MAX_RAISON` caractères.
+///
+/// Cette valeur n'est pas forcément écrite par le site : n'importe quel processus
+/// local qui atteint le port peut la choisir (revue finale, m4). Recopiée brute, elle
+/// porterait caractères de contrôle et séquences d'échappement jusqu'au terminal
+/// (effacer l'écran, changer le titre, maquiller un message). Une liste blanche
+/// plutôt qu'une liste noire : aucune séquence inventée demain ne la franchit.
+fn assainir_raison(brute: &str) -> String {
+    let propre: String = brute
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        .take(LONGUEUR_MAX_RAISON)
+        .collect();
+    if propre.is_empty() {
+        "(raison illisible)".to_string()
+    } else {
+        propre
+    }
+}
+
+/// Reconnaît le rappel du site parmi les requêtes reçues : `GET` sur le chemin `/`
+/// exactement (celui de `callback/route.ts` et `totp/verify/route.ts` côté site :
+/// `http://127.0.0.1:<port>/?code=...`), portant `code` ou `error`. Toute autre
+/// requête — `/favicon.ico` demandé par le navigateur, sonde locale, préchargement —
+/// n'est PAS le rappel : `None`, et l'attente continue.
+fn classer_requete_locale(est_get: bool, url: &str) -> Option<Rappel> {
+    if !est_get {
+        return None;
+    }
+    let chemin = url.split_once('?').map_or(url, |(chemin, _)| chemin);
+    if chemin != "/" {
+        return None;
+    }
+    match extraire_code_ou_erreur(url) {
+        (_, Some(raison)) => Some(Rappel::Erreur(assainir_raison(&raison))),
+        (Some(code), None) => Some(Rappel::Code(code)),
+        (None, None) => None,
+    }
+}
+
+/// Attend le rappel du site sur `serveur` jusqu'à `echeance`. Chaque requête qui
+/// n'est pas le rappel reçoit un 404 et l'attente reprend, avec le temps qui reste —
+/// jamais un délai remis à zéro. `Ok(None)` à l'échéance.
+///
+/// Avant cette correction (revue finale, m4), la PREMIÈRE requête reçue était prise
+/// pour le rappel : un `/favicon.ico` ou une sonde locale arrivé avant la
+/// redirection faisait échouer la connexion (« redirection locale sans code ni
+/// erreur »), et le serveur fermait avant que le vrai rappel n'arrive.
+fn attendre_rappel(serveur: &tiny_http::Server, echeance: Instant) -> Result<Option<Rappel>, ErreurCompte> {
+    loop {
+        let reste = echeance.saturating_duration_since(Instant::now());
+        if reste.is_zero() {
+            return Ok(None);
+        }
+        let Some(requete) = serveur.recv_timeout(reste).map_err(|e| ErreurCompte::Reseau(e.to_string()))? else {
+            return Ok(None);
+        };
+        let est_get = *requete.method() == tiny_http::Method::Get;
+        match classer_requete_locale(est_get, requete.url()) {
+            None => {
+                let _ = requete.respond(tiny_http::Response::from_string("").with_status_code(404));
+            }
+            Some(rappel) => {
+                let reponse = tiny_http::Response::from_string(PAGE_DE_RETOUR).with_header(
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
+                        .expect("en-tete statique toujours valide"),
+                );
+                let _ = requete.respond(reponse);
+                return Ok(Some(rappel));
+            }
+        }
+    }
 }
 
 /// Ouvre le navigateur par défaut sur `url` — le projet est Windows uniquement, `cmd
@@ -233,38 +319,29 @@ pub fn connecter(config: &Config, coffre: &Coffre) -> Result<Jetons, ErreurCompt
     ouvrir_navigateur(&url_de_depart(port, &empreinte))?;
 
     // Attente BORNÉE (voir DELAI_ATTENTE_REDIRECTION) : sans délai, un utilisateur qui
-    // ferme l'onglet ou renonce laisserait ce thread bloqué pour toujours dans un
-    // `recv()` sans délai — sans message, sans moyen d'en sortir. `recv_timeout` rend
-    // `Ok(None)` à l'expiration plutôt que de bloquer indéfiniment ; une seule requête
-    // traitée sinon, qu'elle porte un code ou une erreur — le serveur ferme aussitôt
-    // après, dans les deux cas.
-    let requete = serveur
-        .recv_timeout(DELAI_ATTENTE_REDIRECTION)
-        .map_err(|e| ErreurCompte::Reseau(e.to_string()))?;
-    let Some(requete) = requete else {
-        // Sortie propre : ferme le serveur local plutôt que de le laisser écouter
-        // derrière. Le message ne nomme ni le code ni le secret — seulement qu'il
-        // faut relancer.
-        drop(serveur);
-        return Err(ErreurCompte::Reseau(
-            "aucune réponse reçue du site dans le délai imparti — rien n'est arrivé, relancez la connexion"
-                .to_string(),
-        ));
-    };
-    let (code, erreur) = extraire_code_ou_erreur(requete.url());
-    let reponse = tiny_http::Response::from_string(PAGE_DE_RETOUR).with_header(
-        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/html; charset=utf-8"[..])
-            .expect("en-tete statique toujours valide"),
-    );
-    let _ = requete.respond(reponse);
+    // ferme l'onglet ou renonce laisserait ce thread bloqué pour toujours — sans
+    // message, sans moyen d'en sortir. L'échéance est fixée UNE fois : les requêtes
+    // étrangères au rappel, qui reçoivent un 404 (voir `attendre_rappel`), ne la
+    // repoussent pas.
+    let rappel = attendre_rappel(&serveur, Instant::now() + DELAI_ATTENTE_REDIRECTION);
+    // Sortie propre dans tous les cas (rappel, erreur, délai) : le serveur local ne
+    // reste pas à écouter derrière.
     drop(serveur);
 
-    if let Some(raison) = erreur {
-        return Err(ErreurCompte::Protocole(format!("authentification refusee par le site : {raison}")));
-    }
-    let code = code.ok_or_else(|| {
-        ErreurCompte::Protocole("redirection locale sans code ni erreur".to_string())
-    })?;
+    let code = match rappel? {
+        None => {
+            // Le message ne nomme ni le code ni le secret — seulement qu'il faut relancer.
+            return Err(ErreurCompte::Reseau(
+                "aucun rappel du site reçu dans le délai imparti — relancez la connexion".to_string(),
+            ));
+        }
+        Some(Rappel::Erreur(raison)) => {
+            return Err(ErreurCompte::Protocole(format!(
+                "authentification refusee par le site : {raison}"
+            )));
+        }
+        Some(Rappel::Code(code)) => code,
+    };
 
     let jetons = echanger_le_code(config, &code, &secret)?;
     coffre.ranger_jetons(&jetons)?;
@@ -274,6 +351,103 @@ pub fn connecter(config: &Config, coffre: &Coffre) -> Result<Jetons, ErreurCompt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Serveur de boucle locale (revue finale, m4) ------------------
+
+    #[test]
+    fn le_rappel_du_site_est_reconnu_code_ou_erreur() {
+        assert_eq!(classer_requete_locale(true, "/?code=ABC123"), Some(Rappel::Code("ABC123".to_string())));
+        assert_eq!(
+            classer_requete_locale(true, "/?error=access_denied"),
+            Some(Rappel::Erreur("access_denied".to_string()))
+        );
+    }
+
+    #[test]
+    fn une_requete_hors_du_chemin_de_rappel_n_est_pas_le_rappel() {
+        // Échoue si le contrôle du chemin disparaissait : `/autre?code=...` porte bien
+        // un code, mais pas sur le chemin où le site redirige (`/`). `/favicon.ico`,
+        // `/` nu et un code vide ne portent aucun rappel exploitable.
+        assert_eq!(classer_requete_locale(true, "/autre?code=ABC123"), None);
+        assert_eq!(classer_requete_locale(true, "/favicon.ico"), None);
+        assert_eq!(classer_requete_locale(true, "/"), None);
+        assert_eq!(classer_requete_locale(true, "/?code="), None);
+    }
+
+    #[test]
+    fn une_requete_autre_que_get_n_est_pas_le_rappel() {
+        // Échoue si la méthode n'était pas vérifiée : le navigateur suit la
+        // redirection du site par un GET, rien d'autre.
+        assert_eq!(classer_requete_locale(false, "/?code=ABC123"), None);
+    }
+
+    #[test]
+    fn la_raison_d_erreur_ne_porte_ni_controle_ni_sequence_d_echappement() {
+        // Échoue si la valeur de `error=` était recopiée brute : ESC, BEL, CR/LF et les
+        // crochets d'une séquence CSI ou OSC (changer le titre, effacer l'écran)
+        // atteindraient le terminal.
+        let url = "/?error=\u{1b}]0;titre\u{7}\u{1b}[2J\r\nacces_refuse";
+        let Some(Rappel::Erreur(raison)) = classer_requete_locale(true, url) else {
+            panic!("attendu une erreur reconnue");
+        };
+        assert!(
+            raison.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')),
+            "raison non assainie : {raison:?}"
+        );
+        assert!(raison.ends_with("acces_refuse"), "raison : {raison:?}");
+    }
+
+    #[test]
+    fn la_raison_d_erreur_est_bornee_en_longueur() {
+        // Échoue si la borne disparaissait : 500 caractères valides seraient recopiés.
+        let url = format!("/?error={}", "a".repeat(500));
+        assert_eq!(
+            classer_requete_locale(true, &url),
+            Some(Rappel::Erreur("a".repeat(LONGUEUR_MAX_RAISON)))
+        );
+    }
+
+    #[test]
+    fn l_attente_repond_404_aux_requetes_etrangeres_et_continue_jusqu_au_rappel() {
+        // Vrai serveur `tiny_http` en boucle locale, vraies requêtes HTTP : ce test
+        // prouve que `attendre_rappel` BRANCHE le classement, pas seulement qu'il est
+        // juste. Échoue si la première requête reçue (`/favicon.ico`) était prise pour
+        // le rappel, si elle ne recevait pas 404, ou si l'attente s'arrêtait là.
+        let serveur = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let tiny_http::ListenAddr::IP(adresse) = serveur.server_addr();
+        let base = format!("http://{adresse}");
+        let navigateur = std::thread::spawn(move || {
+            // Délai côté client : sans lui, une attente qui ne reprendrait PAS après le
+            // 404 — le défaut même que ce test vise — laisserait la seconde requête sans
+            // réponse, et ce test se figerait au lieu de rougir. Vérifié : avec la
+            // reprise neutralisée, il rougit en 5 s.
+            let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(5)).build();
+            let statut_favicon = match agent.get(&format!("{base}/favicon.ico")).call() {
+                Ok(r) => r.status(),
+                Err(ureq::Error::Status(statut, _)) => statut,
+                Err(e) => panic!("transport inattendu : {e}"),
+            };
+            let statut_rappel = match agent.get(&format!("{base}/?code=CODE-REEL")).call() {
+                Ok(r) => r.status(),
+                Err(e) => panic!("le rappel est resté sans réponse : {e}"),
+            };
+            (statut_favicon, statut_rappel)
+        });
+
+        let rappel = attendre_rappel(&serveur, Instant::now() + Duration::from_secs(10)).unwrap();
+        let (statut_favicon, statut_rappel) = navigateur.join().unwrap();
+
+        assert_eq!(statut_favicon, 404);
+        assert_eq!(statut_rappel, 200);
+        assert_eq!(rappel, Some(Rappel::Code("CODE-REEL".to_string())));
+    }
+
+    #[test]
+    fn l_attente_rend_none_a_l_echeance() {
+        let serveur = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let echeance = Instant::now() + Duration::from_millis(50);
+        assert_eq!(attendre_rappel(&serveur, echeance).unwrap(), None);
+    }
 
     #[test]
     fn l_url_de_depart_porte_le_port_et_l_empreinte() {
