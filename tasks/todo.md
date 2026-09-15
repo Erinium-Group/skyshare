@@ -181,3 +181,36 @@ réellement, une clé fausse ferait échouer le GCM.
   changer modifierait l'entropie et invaliderait les codes déjà émis.
 - **Poids de la synchronisation : 2 929 octets** dans le cas réaliste, soit ~55 Mo/mois.
   Réglable par la cadence de sondage si nécessaire ; le budget de requêtes n'en dépend pas.
+
+---
+
+## Jalon C2 — le client de signaling — EN COURS
+
+Branche `jalon-c2-client-signaling`. Spec : `docs/superpowers/specs/2026-09-11-jalon-c2-client-signaling-design.md`
+(D1–D8). Plan : `docs/superpowers/plans/2026-09-11-jalon-c2-client-signaling.md` (11 tâches). Journal détaillé,
+avec chaque arbitrage : `.superpowers/sdd/2026-09-11-jalon-c2-client-signaling/progress.md` (hors dépôt).
+
+### État au 16/09/2026
+- [x] Tâches 1 à 11 closes, chacune relue et corrigée jusqu'à revue propre.
+  - Partie site (tâche 2, second facteur dans le flux natif) **déployée** le 13/09 (`f916dcc`).
+  - Crate `sky-compte` : connexion native, trousseau, renouvellement, annuaire, boîte aux lettres.
+  - `sky-probe host` / `view` négocient **par la boîte aux lettres**, plus aucun copier-coller.
+- [x] Revue finale de branche : avec corrections, 0 critique, 2 importants, 5 mineurs.
+- [ ] Vague de correction de la revue finale, puis re-revue ciblée.
+- [ ] **Essai réel** — deux machines, deux réseaux, **deux comptes Discord**, une deuxième personne. Le
+  jalon n'est pas clos sans lui. Relever : délai entre le lancement de `view` et l'ouverture du canal ;
+  nombre de synchronisations de chaque côté ; enveloppe restée non ouverte ou non.
+- [ ] Fin de branche — **décision au propriétaire** : `main` est resté à `97f73c5` ; la branche porte aussi
+  tout le jalon 0, jamais fusionné. Fusionner le C2 fusionne le jalon 0.
+
+### Limites connues, assumées
+- **Les enveloppes sont consommées à la livraison** : `friends list`, `friends add`, `device list`, `code`, ou
+  un autre `host`/`view` sur le même appareil pendant un partage volent les messages de la négociation.
+- **Une session vit 7 jours** et chaque `login` en crée une nouvelle ; l'appareil est lié à la session. La
+  vague de correction finale rattache l'appareil au login (révocation puis réenregistrement, même clé).
+- Un site malveillant qui substituerait une clé d'annuaire n'est pas détecté — inhérent à D2.
+- Cadences `CADENCE` 2 s, `FENETRE_HOTE` 30 min, `ATTENTE_SPECTATEUR` 60 s : **argumentées, pas mesurées**.
+
+### Reporté au jalon 2
+- Erreur typée rendue par `PeerLink::repondant` : `echec_local` classe aujourd'hui sur le texte du message.
+- Agent HTTP recréé à chaque appel : aucune connexion réutilisée, coût non mesuré.
