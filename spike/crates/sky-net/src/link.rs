@@ -323,41 +323,6 @@ impl PeerLink {
         })
     }
 
-    /// Attend un premier paquet **du pair**, sans reveiller l'agent.
-    ///
-    /// C'est la cle de la patience : l'horloge de `str0m` ne demarre qu'au
-    /// premier `poll`, et le compte a rebours de la poignee de main chiffree
-    /// avec elle. En lisant le socket nous-memes, on peut attendre aussi
-    /// longtemps qu'on veut sans qu'aucune minuterie ne court — et le battement
-    /// de maintien garde le port ouvert pendant ce temps.
-    ///
-    /// Les paquets recus sont mis de cote et injectes au premier `poll`, pour
-    /// ne rien perdre du tout premier echange.
-    ///
-    /// Rend `true` des qu'un paquet du pair est arrive.
-    pub fn guetter_le_pair(&mut self, patience: std::time::Duration) -> bool {
-        let fin = Instant::now() + patience;
-        let mut buf = vec![0u8; TAILLE_DATAGRAMME];
-
-        while Instant::now() < fin {
-            match self.socket.recv_from(&mut buf) {
-                Ok((n, source)) => {
-                    if self.serveurs_stun.contains(&source) {
-                        continue; // reponse a notre propre battement
-                    }
-                    if n == 1 && buf[0] == stun::OCTET_PERCAGE {
-                        continue; // percage du pair : il ouvre sa box, rien de plus
-                    }
-                    self.paquets_recus += 1;
-                    self.en_attente.push((buf[..n].to_vec(), source));
-                    return true;
-                }
-                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
-            }
-        }
-        false
-    }
-
     /// Compteurs de circulation sur le port UDP : émis, reçus, erreurs.
     ///
     /// Destinés au message d'échec : ils disent lequel des trois scénarios
@@ -790,8 +755,17 @@ fn interface_sortante(serveurs: &[SocketAddr]) -> anyhow::Result<std::net::IpAdd
 
 
 /// Tant qu'il vit, le port annoncé reste ouvert. Sa destruction arrête le
-/// battement — à laisser mourir dès que la négociation commence, car celle-ci
-/// produit son propre trafic.
+/// battement.
+///
+/// Usage asymétrique entre les deux bords. Le spectateur (`cmd_view`) le
+/// relâche dès qu'il tient une réponse, avant `etablir` : la négociation ICE
+/// prend alors le relais du trafic. L'hôte (`cmd_host`), lui, le garde vivant
+/// PENDANT `etablir` : il vient de répondre, mais le spectateur ne relèvera
+/// sa réponse qu'à sa prochaine synchronisation — sans ce battement, notre
+/// box se refermerait avant même que le spectateur ait pu nous joindre. Ce
+/// n'est pas un vol de paquet : le battement ne fait qu'**émettre**
+/// (`stun::battement`/`stun::percer`, aucun `recv`), et `poll` filtre déjà ce
+/// qu'il reçoit (serveurs STUN, octet de perçage) — voir `cmd_host::run`.
 pub struct GardeMapping {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,

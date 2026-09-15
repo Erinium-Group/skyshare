@@ -23,7 +23,9 @@ use sky_net::{LinkEvent, Pacer, PeerLink};
 
 use crate::cmd_compte::{config_et_coffre, message_utilisateur};
 use crate::cmd_encode::{Source, TextureSynthetique, FPS};
-use crate::rendez_vous::{interroger, offres_recevables, HorlogeReelle, CADENCE, FENETRE_HOTE};
+use crate::rendez_vous::{
+    echec_local, interroger, offres_recevables, HorlogeReelle, CADENCE, FENETRE_HOTE,
+};
 
 /// Délai maximal d'établissement, imposé par le document d'architecture (§5.5).
 /// Jamais d'attente indéfinie, jamais de roue qui tourne sans fin.
@@ -116,8 +118,9 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
     // serveur efface ce qu'il livre : une demande arrivée pendant qu'elles
     // tournent serait perdue pour ce partage, sans que rien ne le signale.
     println!("\n  /!\\  Pendant le partage, ne lance sur cette machine ni `friends list`,");
-    println!("       ni `friends add`, ni `device list`, ni `code` : elles consomment");
-    println!("       les demandes en attente, et celle de ton ami serait perdue.\n");
+    println!("       ni `friends add`, ni `device list`, ni `code`, ni `view`, ni un second");
+    println!("       `host` : toute commande qui synchronise consomme les demandes en");
+    println!("       attente, et celle de ton ami serait perdue.\n");
 
     let (config, coffre) = config_et_coffre()?;
     // Avant tout réseau : sans appareil enregistré, personne ne peut nous
@@ -152,7 +155,20 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
             for offre in offres_recevables(etat, relever(etat, &identite)) {
                 match PeerLink::repondant(Identity::generate(), &offre.texte) {
                     Ok((link, reponse)) => return Some((link, reponse, offre.destinataire)),
-                    Err(e) => println!("  Demande écartée : {e}"),
+                    Err(e) => {
+                        let message = e.to_string();
+                        if echec_local(&message) {
+                            // La cause vient de CETTE machine (réseau, port UDP) —
+                            // pas de l'offre de l'ami, qui reste valide. La dire
+                            // « écartée » ferait porter à tort la faute à l'ami.
+                            println!(
+                                "  Échec local ({message}) : nouvelle tentative au \
+                                 prochain sondage."
+                            );
+                        } else {
+                            println!("  Demande écartée : {message}");
+                        }
+                    }
                 }
             }
             None

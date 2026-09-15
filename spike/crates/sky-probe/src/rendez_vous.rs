@@ -21,7 +21,7 @@
 
 use std::time::{Duration, Instant};
 
-use sky_compte::{AppareilDAmi, Etat, Message};
+use sky_compte::{AppareilDAmi, ErreurCompte, Etat, Message};
 use sky_net::handshake::{decomprimer, Blob};
 
 /// Points de départ argumentés, PAS des mesures : 2 s est sous le seuil où
@@ -31,6 +31,28 @@ use sky_net::handshake::{decomprimer, Blob};
 pub const CADENCE: Duration = Duration::from_secs(2);
 pub const FENETRE_HOTE: Duration = Duration::from_secs(30 * 60);
 pub const ATTENTE_SPECTATEUR: Duration = Duration::from_secs(60);
+
+/// Nombre d'échecs de synchronisation consécutifs tolérés avant d'abandonner
+/// l'attente. Une coupure passagère (Wi-Fi, 5xx Vercel) ne doit pas achever
+/// une attente de 30 minutes pour autant ; un succès remet ce compteur à
+/// zéro. Une erreur fatale (voir `ErreurDeSynchronisation::est_fatale`)
+/// n'attend jamais ce seuil : elle interrompt au premier coup.
+pub const ERREURS_CONSECUTIVES_MAX: u32 = 3;
+
+/// Distingue, parmi les erreurs qu'une synchronisation peut renvoyer,
+/// celles qui n'ont aucune raison de se résoudre en réessayant.
+///
+/// Une session refusée (`ErreurCompte::Refuse`) ne redeviendra pas valide au
+/// tour suivant : la retenter ferait juste durer l'attente pour rien.
+pub trait ErreurDeSynchronisation {
+    fn est_fatale(&self) -> bool;
+}
+
+impl ErreurDeSynchronisation for ErreurCompte {
+    fn est_fatale(&self) -> bool {
+        matches!(self, ErreurCompte::Refuse)
+    }
+}
 
 /// Le temps tel que la boucle d'interrogation le voit. Injecté pour que les
 /// tests fassent avancer une horloge fictive au lieu de dormir.
@@ -76,9 +98,15 @@ impl Horloge for HorlogeReelle {
 /// `trier` a déjà écarté ce qui ne servait à rien.
 ///
 /// Rend `Ok(None)` au délai, après une dernière interrogation faite à
-/// l'échéance. Une erreur de synchronisation interrompt l'attente et remonte
-/// telle quelle.
-pub fn interroger<T, E>(
+/// l'échéance.
+///
+/// Une erreur de synchronisation isolée n'interrompt pas l'attente : elle est
+/// retentée à la `cadence` suivante, et un succès remet aussitôt le compteur
+/// d'échecs à zéro. L'attente n'abandonne qu'après `ERREURS_CONSECUTIVES_MAX`
+/// échecs d'affilée — ou immédiatement, sans attendre ce seuil, pour une
+/// erreur que `ErreurDeSynchronisation::est_fatale` désigne comme telle
+/// (une session refusée, par exemple, ne se résout pas en réessayant).
+pub fn interroger<T, E: ErreurDeSynchronisation>(
     initial: Option<Etat>,
     mut synchroniser: impl FnMut(Option<&Etat>) -> Result<Etat, E>,
     mut trier: impl FnMut(&Etat) -> Option<T>,
@@ -87,12 +115,26 @@ pub fn interroger<T, E>(
     delai: Duration,
 ) -> Result<Option<T>, E> {
     let mut precedent = initial;
+    let mut echecs_consecutifs = 0u32;
     loop {
-        let etat = synchroniser(precedent.as_ref())?;
-        if let Some(trouve) = trier(&etat) {
-            return Ok(Some(trouve));
+        match synchroniser(precedent.as_ref()) {
+            Ok(etat) => {
+                echecs_consecutifs = 0;
+                if let Some(trouve) = trier(&etat) {
+                    return Ok(Some(trouve));
+                }
+                precedent = Some(etat);
+            }
+            Err(e) => {
+                if e.est_fatale() {
+                    return Err(e);
+                }
+                echecs_consecutifs += 1;
+                if echecs_consecutifs >= ERREURS_CONSECUTIVES_MAX {
+                    return Err(e);
+                }
+            }
         }
-        precedent = Some(etat);
 
         let ecoule = horloge.ecoule();
         if ecoule >= delai {
@@ -127,8 +169,8 @@ pub struct OffreRecue {
     pub destinataire: AppareilDAmi,
 }
 
-/// Chez l'hôte : les offres recevables parmi les messages relevés, dans
-/// l'ordre d'arrivée.
+/// Chez l'hôte : les offres recevables parmi les messages relevés, une par
+/// appareil expéditeur.
 ///
 /// Écarte sans bruit — et donc sans faire échouer l'attente — un expéditeur
 /// qui n'est l'appareil d'aucun ami, un clair qui n'est pas du texte, un
@@ -138,22 +180,46 @@ pub struct OffreRecue {
 /// imposée à tout SDP) ferme la porte à un contenu chiffré qui se
 /// décomprimerait par hasard en quelques octets de texte.
 ///
+/// Quand un même appareil a déposé plusieurs offres valides — le cas d'un
+/// spectateur qui relance après un essai sans réponse — seule la DERNIÈRE
+/// (au sens de l'ordre d'arrivée dans `messages`, tel que l'`Etat` le rend)
+/// est retenue : les enveloppes du serveur ne vivent que 5 minutes et ne sont
+/// livrées qu'une fois, donc répondre à la première offre abandonnée
+/// perdrait la tentative en cours du spectateur sans qu'il y ait moyen de
+/// s'en rendre compte.
+///
 /// Recevable ne veut pas dire utilisable : `PeerLink::repondant` peut encore
 /// refuser le SDP. C'est alors à la colle d'essayer l'offre suivante.
 pub fn offres_recevables(etat: &Etat, messages: Vec<Message>) -> Vec<OffreRecue> {
-    messages
-        .into_iter()
-        .filter_map(|message| {
-            let destinataire = destinataire_de_la_reponse(etat, message.expediteur_device_id)?;
-            let texte = String::from_utf8(message.clair).ok()?;
-            let blob = Blob::from_text(&texte).ok()?;
-            let sdp = decomprimer(&blob.sealed_sdp).ok()?;
-            if !sdp.starts_with("v=0") {
-                return None;
-            }
-            Some(OffreRecue { texte, destinataire })
-        })
-        .collect()
+    let mut retenues: Vec<(i64, OffreRecue)> = Vec::new();
+    for message in messages {
+        let expediteur = message.expediteur_device_id;
+        let Some(destinataire) = destinataire_de_la_reponse(etat, expediteur) else {
+            continue;
+        };
+        let Ok(texte) = String::from_utf8(message.clair) else {
+            continue;
+        };
+        let Ok(blob) = Blob::from_text(&texte) else {
+            continue;
+        };
+        let Ok(sdp) = decomprimer(&blob.sealed_sdp) else {
+            continue;
+        };
+        if !sdp.starts_with("v=0") {
+            continue;
+        }
+        let offre = OffreRecue { texte, destinataire };
+        match retenues.iter_mut().find(|(id, _)| *id == expediteur) {
+            // La plus récente remplace la précédente du même appareil, à sa
+            // position d'origine : seul le CONTENU retenu change, pas l'ordre
+            // dans lequel la colle essaiera les offres de plusieurs appareils
+            // différents.
+            Some(existante) => existante.1 = offre,
+            None => retenues.push((expediteur, offre)),
+        }
+    }
+    retenues.into_iter().map(|(_, offre)| offre).collect()
 }
 
 /// Chez le spectateur : la réponse à SON offre en cours, s'il y en a une.
@@ -181,6 +247,20 @@ pub fn reponse_a_l_offre(
 /// L'identifiant de session d'un bloc produit par `PeerLink::offrant`.
 pub fn session_de(bloc: &str) -> anyhow::Result<[u8; 4]> {
     Ok(Blob::from_text(bloc)?.session)
+}
+
+/// Vrai si `message` — le texte d'une erreur rendue par `PeerLink::repondant`
+/// — décrit un échec survenu sur CETTE machine (accès réseau, duplication de
+/// socket) plutôt qu'un refus du bloc offert par le correspondant.
+///
+/// `repondant` ne réserve le mot « bloc » qu'aux deux refus qui portent sur
+/// le CONTENU de l'offre (« bloc illisible ou incomplet », « bloc refusé —
+/// il ne décrit pas une session utilisable ») — voir `link.rs`. Tout le
+/// reste vient d'avant que le bloc ne soit même examiné : une offre valide
+/// de l'ami est alors perdue pour une cause qui n'est pas la sienne, et la
+/// colle doit le dire au lieu d'afficher « Demande écartée ».
+pub fn echec_local(message: &str) -> bool {
+    !message.starts_with("bloc")
 }
 
 #[cfg(test)]
@@ -318,6 +398,65 @@ mod tests {
         assert_eq!(offres_recevables(&etat_hote, vec![message("1", 10, offre.as_bytes())]).len(), 1);
     }
 
+    #[test]
+    fn la_derniere_offre_valide_du_meme_appareil_est_retenue() {
+        // Le cas concret : un spectateur relance `view` après un premier
+        // essai resté sans réponse. Les deux offres sont dans la boîte à la
+        // synchronisation suivante ; seule la seconde correspond à sa
+        // tentative en cours.
+        let ami_identite = Identity::generate();
+        let etat_hote = etat(
+            vec![Ami {
+                id: 1,
+                discord_name: "alice".to_string(),
+                appareils: vec![appareil(11, &ami_identite)],
+            }],
+            Vec::new(),
+        );
+        const SESSION_ANCIENNE: [u8; 4] = [5, 5, 5, 5];
+        const SESSION_RECENTE: [u8; 4] = [6, 6, 6, 6];
+        let ancienne = bloc_offre(SESSION_ANCIENNE, Identity::generate().public_key());
+        let recente = bloc_offre(SESSION_RECENTE, Identity::generate().public_key());
+
+        let offres = offres_recevables(
+            &etat_hote,
+            vec![message("1", 11, ancienne.as_bytes()), message("2", 11, recente.as_bytes())],
+        );
+
+        assert_eq!(offres.len(), 1, "une seule offre retenue par appareil expéditeur");
+        assert_eq!(
+            offres[0].texte, recente,
+            "c'est la dernière des deux offres du même appareil qui doit être retenue, pas la première"
+        );
+    }
+
+    #[test]
+    fn un_bloc_dont_le_contenu_decomprime_n_est_pas_un_sdp_est_ecarte() {
+        // Un bloc lisible et correctement décomprimé, mais dont le contenu
+        // n'a rien d'un SDP : le contrôle `v=0` doit l'écarter, pas
+        // seulement laisser `PeerLink::repondant` échouer plus tard.
+        let ami_identite = Identity::generate();
+        let etat_hote = etat(
+            vec![Ami {
+                id: 1,
+                discord_name: "alice".to_string(),
+                appareils: vec![appareil(11, &ami_identite)],
+            }],
+            Vec::new(),
+        );
+        let pas_un_sdp = Blob {
+            session: SESSION,
+            public_key: Identity::generate().public_key(),
+            sealed_sdp: comprimer("bonjour"),
+        }
+        .to_text();
+
+        assert!(
+            offres_recevables(&etat_hote, vec![message("1", 11, pas_un_sdp.as_bytes())]).is_empty(),
+            "un bloc dont le contenu décomprimé ne commence pas par « v=0 » doit être écarté"
+        );
+    }
+
     // --- (b) la boucle d'interrogation ------------------------------------
 
     /// Horloge qui n'avance que lorsqu'on lui demande d'attendre.
@@ -341,6 +480,22 @@ mod tests {
     /// Garde contre une boucle qui ne s'arrêterait pas : un test qui pend ne
     /// rougit pas, il bloque la suite.
     const APPELS_MAX: usize = 1000;
+
+    // Les tests de la boucle générique n'ont pas besoin d'une vraie erreur de
+    // compte : `()` et `&str` suffisent, à condition de leur donner une
+    // réponse à `est_fatale` — ici, jamais fatale, pour exercer le compteur
+    // d'échecs consécutifs sans jamais court-circuiter avec la sortie fatale.
+    impl ErreurDeSynchronisation for () {
+        fn est_fatale(&self) -> bool {
+            false
+        }
+    }
+
+    impl ErreurDeSynchronisation for &str {
+        fn est_fatale(&self) -> bool {
+            false
+        }
+    }
 
     fn etat_version(version: u64) -> Etat {
         Etat { version, ..etat(Vec::new(), Vec::new()) }
@@ -418,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn une_erreur_de_synchronisation_interrompt_l_attente() {
+    fn deux_echecs_puis_un_succes_ne_rompent_pas_l_attente() {
         let mut appels = 0;
         let mut horloge = HorlogeFictive::default();
 
@@ -426,11 +581,34 @@ mod tests {
             None,
             |_| {
                 appels += 1;
-                if appels == 2 {
+                assert!(appels < APPELS_MAX, "la boucle ne s'arrête pas");
+                if appels <= 2 {
                     Err("réseau")
                 } else {
                     Ok(etat_version(1))
                 }
+            },
+            |e| (e.version == 1).then_some(()),
+            &mut horloge,
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(trouve, Ok(Some(())), "deux échecs isolés ne doivent pas faire abandonner l'attente");
+        assert_eq!(appels, 3);
+    }
+
+    #[test]
+    fn trois_echecs_d_affilee_font_abandonner_l_attente() {
+        let mut appels = 0;
+        let mut horloge = HorlogeFictive::default();
+
+        let trouve = interroger(
+            None,
+            |_| {
+                appels += 1;
+                assert!(appels < APPELS_MAX, "la boucle ne s'arrête pas");
+                Err::<Etat, _>("réseau")
             },
             |_| None::<()>,
             &mut horloge,
@@ -439,7 +617,57 @@ mod tests {
         );
 
         assert_eq!(trouve, Err("réseau"));
-        assert_eq!(appels, 2);
+        assert_eq!(appels, 3, "l'abandon doit survenir au troisième échec consécutif, ni avant ni après");
+    }
+
+    #[test]
+    fn un_succes_remet_le_compteur_d_echecs_a_zero() {
+        // échec, succès, échec, échec : sans remise à zéro après le succès, le
+        // troisième appel serait le troisième échec « consécutif » (1 + 2) et
+        // l'attente abandonnerait avant le cinquième appel, qui doit trouver.
+        let mut appels = 0;
+        let mut horloge = HorlogeFictive::default();
+
+        let trouve = interroger(
+            None,
+            |_| {
+                appels += 1;
+                assert!(appels < APPELS_MAX, "la boucle ne s'arrête pas");
+                match appels {
+                    1 | 3 | 4 => Err("réseau"),
+                    5 => Ok(etat_version(99)), // le seul état que `trier` retient
+                    _ => Ok(etat_version(2)),
+                }
+            },
+            |e| (e.version == 99).then_some(()),
+            &mut horloge,
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+        );
+
+        assert_eq!(trouve, Ok(Some(())), "le succès du 2e appel doit remettre le compteur à zéro");
+        assert_eq!(appels, 5);
+    }
+
+    #[test]
+    fn une_erreur_fatale_interrompt_l_attente_au_premier_coup() {
+        let mut appels = 0;
+        let mut horloge = HorlogeFictive::default();
+
+        let trouve = interroger(
+            None,
+            |_| {
+                appels += 1;
+                Err::<Etat, _>(ErreurCompte::Refuse)
+            },
+            |_| None::<()>,
+            &mut horloge,
+            Duration::from_secs(2),
+            Duration::from_secs(60),
+        );
+
+        assert!(matches!(trouve, Err(ErreurCompte::Refuse)));
+        assert_eq!(appels, 1, "une session refusée ne doit jamais être retentée");
     }
 
     // --- (c) le tri, dans la boucle ---------------------------------------
@@ -549,5 +777,19 @@ mod tests {
     fn la_session_lue_est_celle_du_bloc() {
         assert_eq!(session_de(&bloc_offre(SESSION, [0; 32])).unwrap(), SESSION);
         assert!(session_de("pas un bloc").is_err());
+    }
+
+    // --- échec local vs refus de contenu, côté répondant -------------------
+
+    #[test]
+    fn un_message_qui_commence_par_bloc_n_est_pas_un_echec_local() {
+        assert!(!echec_local("bloc illisible ou incomplet"));
+        assert!(!echec_local("bloc refusé — il ne décrit pas une session utilisable"));
+    }
+
+    #[test]
+    fn un_message_qui_ne_commence_pas_par_bloc_est_un_echec_local() {
+        assert!(echec_local("réseau indisponible"));
+        assert!(echec_local("duplication du port UDP impossible"));
     }
 }
