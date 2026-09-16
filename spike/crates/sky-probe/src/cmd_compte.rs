@@ -34,7 +34,10 @@ pub fn avertissement_consommation(ce_qui_serait_perdu: &str) -> String {
         "\n  /!\\  Pendant l'attente, ne lance sur cette machine ni `friends list`, ni\n       \
          `friends add`, ni `device list`, ni `code`, ni un autre `host` ou `view` :\n       \
          toute commande qui synchronise consomme les enveloppes en attente, et\n       \
-         {ce_qui_serait_perdu} serait perdue.\n"
+         {ce_qui_serait_perdu} serait perdue.\n       \
+         Ni `login` : depuis le rattachement d'appareil, il RÉVOQUE l'appareil\n       \
+         courant et en enregistre un neuf — les enveloppes adressées à l'ancien\n       \
+         ne sont alors plus jamais relevées.\n"
     )
 }
 
@@ -50,8 +53,9 @@ pub fn avertissement_consommation(ce_qui_serait_perdu: &str) -> String {
 pub fn causes_d_un_depot_refuse() -> String {
     "Causes possibles, indiscernables d'ici : appareil de ton ami révoqué, amitié retirée \
      entre-temps, ou identifiant d'appareil local périmé (appareil révoqué, ou enregistré sous \
-     un autre compte). Dans ce dernier cas : `sky-probe login` rattache l'appareil à ta session, \
-     `sky-probe device register --force` en enregistre un nouveau."
+     un autre compte). Dans ce dernier cas, une fois la négociation abandonnée (jamais pendant une \
+     attente en cours, `login` révoquant l'appareil courant) : `sky-probe login` rattache l'appareil \
+     à ta session, `sky-probe device register --force` en enregistre un nouveau."
         .to_string()
 }
 
@@ -421,7 +425,15 @@ mod tests {
         // (revue finale, m3) — chacune, oubliée, est un moyen de perdre la
         // négociation en cours sans que rien ne le dise.
         let texte = avertissement_consommation("la réponse de ton ami");
-        for commande in ["`friends list`", "`friends add`", "`device list`", "`code`", "`host`", "`view`"] {
+        for commande in [
+            "`friends list`",
+            "`friends add`",
+            "`device list`",
+            "`code`",
+            "`host`",
+            "`view`",
+            "`login`",
+        ] {
             assert!(texte.contains(commande), "commande absente de l'avertissement : {commande}");
         }
         assert!(texte.contains("la réponse de ton ami"));
