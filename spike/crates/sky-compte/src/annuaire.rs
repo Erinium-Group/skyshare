@@ -27,6 +27,7 @@ pub struct Etat {
     pub code: String,
     pub amis: Vec<Ami>,
     pub demandes: Vec<Demande>,
+    pub listes: Vec<Liste>,
     pub appareils: Vec<Appareil>,
     pub enveloppes: Vec<EnveloppeRecue>,
 }
@@ -85,6 +86,20 @@ pub struct EnveloppeRecue {
     pub charge: String,
 }
 
+/// Une liste de diffusion de l'utilisateur courant, telle que rendue par
+/// `GET /api/sky/sync` dans `listes[]` — forme `ListeAvecMembres` du site
+/// (`src/lib/sky/listes.ts`, `listesDe`, jalon 1). `membres` : identifiants
+/// d'UTILISATEURS (pas d'amitiés), triés croissants par le site.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Liste {
+    pub id: i64,
+    pub nom: String,
+    pub couleur: Option<String>,
+    pub emoji: Option<String>,
+    pub created_at: String,
+    pub membres: Vec<i64>,
+}
+
 // --- Formes brutes du contrat JSON du site ----------------------------
 //
 // Séparées des types publics ci-dessus : la forme du fil (camelCase par
@@ -133,16 +148,28 @@ struct EnveloppeBrute {
     charge: String,
 }
 
-/// Forme complète de `GET /api/sky/sync` — `listes` existe côté site mais
-/// n'est pas déclaré ici : un champ JSON inconnu d'une struct `Deserialize`
-/// est ignoré par défaut (pas de `deny_unknown_fields` sur ce type), donc
-/// pas besoin de le porter pour l'ignorer proprement.
+/// `membres` est EXIGÉ, sans valeur par défaut : un site qui ne le rendrait
+/// pas encore (tâche 1 non déployée) ferait échouer la synchronisation en
+/// erreur de protocole plutôt que d'afficher des listes faussement vides —
+/// que l'écran Listes réenregistrerait vides.
+#[derive(Debug, Deserialize)]
+struct ListeBrute {
+    id: i64,
+    nom: String,
+    couleur: Option<String>,
+    emoji: Option<String>,
+    created_at: String,
+    membres: Vec<i64>,
+}
+
+/// Forme complète de `GET /api/sky/sync`.
 #[derive(Debug, Deserialize)]
 struct EtatBrut {
     version: u64,
     code: String,
     amis: Vec<AmiBrut>,
     demandes: Vec<DemandeBrute>,
+    listes: Vec<ListeBrute>,
     appareils: Vec<AppareilBrut>,
     enveloppes: Vec<EnveloppeBrute>,
 }
@@ -217,6 +244,19 @@ fn convertir_etat(brut: EtatBrut) -> Etat {
         })
         .collect();
 
+    let listes = brut
+        .listes
+        .into_iter()
+        .map(|l| Liste {
+            id: l.id,
+            nom: l.nom,
+            couleur: l.couleur,
+            emoji: l.emoji,
+            created_at: l.created_at,
+            membres: l.membres,
+        })
+        .collect();
+
     let appareils = brut
         .appareils
         .into_iter()
@@ -241,7 +281,7 @@ fn convertir_etat(brut: EtatBrut) -> Etat {
         })
         .collect();
 
-    Etat { version: brut.version, code: brut.code, amis, demandes, appareils, enveloppes }
+    Etat { version: brut.version, code: brut.code, amis, demandes, listes, appareils, enveloppes }
 }
 
 /// Synchronise l'état du compte. `?version=` n'est envoyé que si
@@ -692,6 +732,7 @@ mod tests {
             code: "CODE1234".to_string(),
             amis,
             demandes: Vec::new(),
+            listes: Vec::new(),
             appareils: Vec::new(),
             enveloppes: Vec::new(),
         }
@@ -760,6 +801,7 @@ mod tests {
                 ],
             }],
             demandes: Vec::new(),
+            listes: Vec::new(),
             appareils: Vec::new(),
             enveloppes: Vec::new(),
         };
@@ -789,7 +831,7 @@ mod tests {
         // (conservé, lui, à l'identique) — la preuve que les deux
         // assertions discriminent des chemins de code différents.
         let precedent =
-            Etat { version: 3, code: "ANCIEN01".to_string(), amis: Vec::new(), demandes: Vec::new(), appareils: Vec::new(), enveloppes: vec![EnveloppeRecue { id: "1".to_string(), expediteur_device_id: 1, destinataire_device_id: 2, charge: "YQ==".to_string() }] };
+            Etat { version: 3, code: "ANCIEN01".to_string(), amis: Vec::new(), demandes: Vec::new(), listes: Vec::new(), appareils: Vec::new(), enveloppes: vec![EnveloppeRecue { id: "1".to_string(), expediteur_device_id: 1, destinataire_device_id: 2, charge: "YQ==".to_string() }] };
 
         let etat = resoudre_reponse_sync(ReponseSync::Inchange { inchange: true }, Some(&precedent)).unwrap();
         assert_eq!(etat.code, "ANCIEN01");

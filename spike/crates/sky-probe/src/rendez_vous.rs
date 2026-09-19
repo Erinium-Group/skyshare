@@ -293,6 +293,7 @@ mod tests {
             code: "ABCDEFGH".to_string(),
             amis,
             demandes: Vec::new(),
+            listes: Vec::new(),
             appareils: Vec::new(),
             enveloppes,
         }

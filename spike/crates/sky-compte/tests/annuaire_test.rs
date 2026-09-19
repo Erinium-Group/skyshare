@@ -16,7 +16,7 @@ use sky_compte::{
 };
 
 fn etat_vide() -> Etat {
-    Etat { version: 0, code: String::new(), amis: Vec::new(), demandes: Vec::new(), appareils: Vec::new(), enveloppes: Vec::new() }
+    Etat { version: 0, code: String::new(), amis: Vec::new(), demandes: Vec::new(), listes: Vec::new(), appareils: Vec::new(), enveloppes: Vec::new() }
 }
 
 // --- synchroniser -------------------------------------------------------
@@ -97,6 +97,7 @@ fn inchange_conserve_lami_precedent_mais_vide_les_enveloppes() {
         code: "ANCIEN01".to_string(),
         amis: vec![sky_compte::Ami { id: 1, discord_name: "alice".to_string(), appareils: Vec::new() }],
         demandes: Vec::new(),
+        listes: Vec::new(),
         appareils: Vec::new(),
         enveloppes: vec![sky_compte::EnveloppeRecue {
             id: "99".to_string(),

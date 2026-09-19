@@ -1085,4 +1085,89 @@ mod tests {
             .unwrap();
         assert_eq!(recu["amis"][0]["appareils"], json!([{ "id": id + 100, "public_key": cle }]));
     }
+
+    // --- Listes (jalon 1, tâche 2) : le double n'est jamais plus permissif
+    // que les routes `src/app/api/sky/lists/**` du site. ---------------------
+
+    /// Requête brute authentifiée, avec délai côté client (un test qui parle à
+    /// un serveur ne doit jamais pouvoir pendre).
+    fn requete_brute(s: &FauxServeur, methode: &str, chemin: &str, corps: &str) -> (u16, String) {
+        let jeton = s.jeton_de_test();
+        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(5)).build();
+        match agent
+            .request(methode, &format!("{}{chemin}", s.url()))
+            .set("Authorization", &format!("Bearer {jeton}"))
+            .send_string(corps)
+        {
+            Ok(r) => (r.status(), r.into_string().unwrap_or_default()),
+            Err(ureq::Error::Status(statut, r)) => (statut, r.into_string().unwrap_or_default()),
+            Err(e) => panic!("échec de transport inattendu : {e}"),
+        }
+    }
+
+    #[test]
+    fn le_double_refuse_un_nom_de_liste_que_le_site_refuse() {
+        // Site : `valeur.length >= 1 && valeur.length <= NOM_MAX && texteStockable`
+        // (lists/route.ts:18-25). 20 émojis = 40 unités UTF-16.
+        let s = FauxServeur::demarrer();
+        let nom_41 = format!("{}a", "😀".repeat(20));
+        for corps in [json!({"nom": nom_41}), json!({"nom": ""}), json!({"nom": "a\u{0}b"}), json!({"nom": 12})] {
+            assert_eq!(requete_brute(&s, "POST", "/api/sky/lists", &corps.to_string()).0, 400, "corps {corps}");
+        }
+        assert_eq!(requete_brute(&s, "POST", "/api/sky/lists", &json!({"nom": "😀".repeat(20)}).to_string()).0, 201);
+    }
+
+    #[test]
+    fn le_double_refuse_une_couleur_ou_un_emoji_que_le_site_refuse() {
+        // Site : `/^#[0-9A-Fa-f]{6}$/` et `Buffer.byteLength(valeur) <= 8`
+        // (lists/route.ts:37, 56). « 🇫🇷 » pèse 8 octets.
+        let s = FauxServeur::demarrer();
+        for corps in [
+            json!({"nom": "A", "couleur": "#12345G"}),
+            json!({"nom": "B", "couleur": "123456"}),
+            json!({"nom": "C", "emoji": "🇫🇷a"}),
+            json!({"nom": "D", "emoji": "\u{0}"}),
+        ] {
+            assert_eq!(requete_brute(&s, "POST", "/api/sky/lists", &corps.to_string()).0, 400, "corps {corps}");
+        }
+        let (statut, _) =
+            requete_brute(&s, "POST", "/api/sky/lists", &json!({"nom": "E", "couleur": "#a1B2c3", "emoji": "🇫🇷"}).to_string());
+        assert_eq!(statut, 201);
+    }
+
+    #[test]
+    fn le_double_refuse_les_membres_d_un_400_uniforme() {
+        // Site : un seul 400 pour « liste pas à toi » et « pas un ami accepté »
+        // (members/route.ts:69-86). Même statut ET même corps.
+        let s = FauxServeur::demarrer();
+        s.etat_mut().amis.push(AmiFaux::sans_appareil("bob"));
+        let bob = s.etat_mut().amis[0].id;
+        let (statut, corps) = requete_brute(&s, "POST", "/api/sky/lists", r#"{"nom":"L"}"#);
+        assert_eq!(statut, 201);
+        let id = serde_json::from_str::<serde_json::Value>(&corps).unwrap()["id"].as_i64().unwrap();
+
+        let non_ami = requete_brute(&s, "PUT", &format!("/api/sky/lists/{id}/members"), r#"{"membreIds":[424242]}"#);
+        let liste_inconnue =
+            requete_brute(&s, "PUT", "/api/sky/lists/999/members", &format!(r#"{{"membreIds":[{bob}]}}"#));
+        assert_eq!(non_ami.0, 400);
+        assert_eq!(non_ami, liste_inconnue, "les deux refus doivent être indiscernables");
+
+        let trop: Vec<i64> = (1..=201).collect();
+        let (statut, _) = requete_brute(&s, "PUT", &format!("/api/sky/lists/{id}/members"), &json!({"membreIds": trop}).to_string());
+        assert_eq!(statut, 400);
+        let (statut, _) = requete_brute(&s, "PUT", &format!("/api/sky/lists/{id}/members"), &format!(r#"{{"membreIds":[{bob}]}}"#));
+        assert_eq!(statut, 204);
+    }
+
+    #[test]
+    fn le_double_ne_fait_pas_progresser_la_version_sur_une_suppression_de_liste() {
+        // Site : la ligne disparaît, la version est le MAX des `updated_at`
+        // RESTANTS (etat.ts:200-209) — elle peut ne pas bouger.
+        let s = FauxServeur::demarrer();
+        let (_, corps) = requete_brute(&s, "POST", "/api/sky/lists", r#"{"nom":"L"}"#);
+        let id = serde_json::from_str::<serde_json::Value>(&corps).unwrap()["id"].as_i64().unwrap();
+        let version = s.etat_mut().version;
+        assert_eq!(requete_brute(&s, "DELETE", &format!("/api/sky/lists/{id}"), "").0, 204);
+        assert_eq!(s.etat_mut().version, version);
+    }
 }

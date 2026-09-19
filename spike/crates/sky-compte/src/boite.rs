@@ -224,7 +224,7 @@ mod tests {
     }
 
     fn etat_avec(enveloppes: Vec<EnveloppeRecue>) -> Etat {
-        Etat { version: 1, code: "X".to_string(), amis: Vec::new(), demandes: Vec::new(), appareils: Vec::new(), enveloppes }
+        Etat { version: 1, code: "X".to_string(), amis: Vec::new(), demandes: Vec::new(), listes: Vec::new(), appareils: Vec::new(), enveloppes }
     }
 
     #[test]

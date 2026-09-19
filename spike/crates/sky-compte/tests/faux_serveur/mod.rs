@@ -221,6 +221,20 @@ impl MoiFaux {
     }
 }
 
+/// Liste telle que rendue par `GET /api/sky/sync` dans `listes[]` — forme
+/// `ListeAvecMembres` du site (`src/lib/sky/listes.ts`, `listesDe`, jalon 1
+/// tâche 1). `membres` : identifiants d'utilisateurs, triés croissants
+/// (`json_agg(... ORDER BY membre_id)`), `[]` jamais absent.
+#[derive(Debug, Clone, Serialize)]
+pub struct ListeFausse {
+    pub id: i64,
+    pub nom: String,
+    pub couleur: Option<String>,
+    pub emoji: Option<String>,
+    pub created_at: String,
+    pub membres: Vec<i64>,
+}
+
 /// État piloté par les tests — les tâches suivantes du jalon (6, 7, 9)
 /// mutent ces champs via `FauxServeur::etat_mut()` pour commander les
 /// réponses du double, sans jamais toucher la production.
@@ -428,6 +442,14 @@ pub struct EtatFaux {
     /// est en anglais côté site, sans conséquence pour un client qui ne lit
     /// jamais ce texte.
     pub session_partielle_totp: bool,
+
+    /// Listes de « l'utilisateur » du double (jalon 1, tâche 2).
+    pub listes: Vec<ListeFausse>,
+    /// Prochain identifiant rendu par `POST /api/sky/lists` (premier : 1).
+    pub prochain_id_liste: i64,
+    /// Nombre de requêtes reçues sur `/api/sky/lists*`, refusées comprises —
+    /// prouve qu'une entrée invalide est refusée AVANT tout appel réseau.
+    pub appels_listes: u64,
 }
 
 /// Serveur double : un `tiny_http::Server` sur un port éphémère, dans un
@@ -546,7 +568,7 @@ fn repondre(mut requete: tiny_http::Request, etat: &Arc<Mutex<EtatFaux>>) {
     let jeton = extraire_jeton_bearer(&requete);
 
     let mut corps_brut = String::new();
-    if matches!(methode, Method::Post) {
+    if matches!(methode, Method::Post | Method::Put | Method::Patch) {
         // Meilleur effort : un corps illisible devient une chaîne vide,
         // que chaque gestionnaire refuse alors comme un JSON invalide —
         // jamais de panique sur une requête malformée.
@@ -568,6 +590,18 @@ fn repondre(mut requete: tiny_http::Request, etat: &Arc<Mutex<EtatFaux>>) {
             if chemin_accept.starts_with("/api/sky/friends/") && chemin_accept.ends_with("/accept") =>
         {
             gerer_accepter_ami(etat, jeton.as_deref(), chemin_accept)
+        }
+        (Method::Post, "/api/sky/lists") => gerer_creer_liste(etat, jeton.as_deref(), &corps_brut),
+        (Method::Put, chemin_membres)
+            if chemin_membres.starts_with("/api/sky/lists/") && chemin_membres.ends_with("/members") =>
+        {
+            gerer_definir_membres(etat, jeton.as_deref(), chemin_membres, &corps_brut)
+        }
+        (Method::Patch, chemin_liste) if chemin_liste.starts_with("/api/sky/lists/") => {
+            gerer_modifier_liste(etat, jeton.as_deref(), chemin_liste, &corps_brut)
+        }
+        (Method::Delete, chemin_liste) if chemin_liste.starts_with("/api/sky/lists/") => {
+            gerer_supprimer_liste(etat, jeton.as_deref(), chemin_liste)
         }
         _ => (404u16, json!({ "error": "route inconnue du double" }).to_string()),
     };
@@ -730,7 +764,7 @@ fn gerer_sync(
         "code": CODE_FAUX,
         "amis": amis_vus,
         "demandes": e.demandes,
-        "listes": Vec::<Value>::new(),
+        "listes": e.listes,
         "appareils": e.appareils,
         "enveloppes": enveloppes_pour_cet_appareil,
     });
@@ -1264,6 +1298,245 @@ fn gerer_depot(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &st
         charge,
     });
 
+    (204, String::new())
+}
+
+// --- Listes (jalon 1, tâche 2) ------------------------------------------
+//
+// Chaque règle est celle d'une ligne des routes `src/app/api/sky/lists/**`
+// du site, relevée dans le plan du jalon 1 (tâche 2, tableau des bornes).
+// Recopiée, pas importée : ce double ne dépend d'aucun code du site, ni de
+// `sky_compte::listes` (il imiterait alors le client au lieu du site).
+
+/// Borne d'un `INTEGER` Postgres — `POSTGRES_INTEGER_MAX` de `listes.ts`.
+const INTEGER_POSTGRES_MAX: i64 = 2_147_483_647;
+const NOM_LISTE_MAX: usize = 40;
+const EMOJI_LISTE_OCTETS_MAX: usize = 8;
+const MEMBRES_LISTE_MAX: usize = 200;
+const REFUS_MEMBRES: &str =
+    "Liste introuvable ou un ou plusieurs identifiants ne sont pas des amis acceptes";
+
+/// Identifiant entier strictement positif entre `prefixe` et `suffixe` —
+/// `Number(id)` puis `Number.isInteger(x) && x > 0` côté site. Plus strict
+/// que le site (« 7.0 » refusé ici), jamais plus permissif.
+fn identifiant_de_chemin(chemin: &str, prefixe: &str, suffixe: &str) -> Option<i64> {
+    chemin.strip_prefix(prefixe)?.strip_suffix(suffixe)?.parse::<i64>().ok().filter(|id| *id > 0)
+}
+
+/// `nomValide` (lists/route.ts:18-25) : chaîne, 1 à 40 unités UTF-16, sans NUL.
+fn nom_de_liste(valeur: &Value) -> Option<&str> {
+    let nom = valeur.as_str()?;
+    let unites = nom.encode_utf16().count();
+    ((1..=NOM_LISTE_MAX).contains(&unites) && !nom.contains('\0')).then_some(nom)
+}
+
+/// `couleurValide` (lists/route.ts:35-38) : absente ou `null`, sinon `#RRGGBB`.
+fn couleur_de_liste(valeur: Option<&Value>) -> Result<Option<String>, ()> {
+    match valeur {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(c))
+            if c.len() == 7 && c.starts_with('#') && c[1..].bytes().all(|o| o.is_ascii_hexdigit()) =>
+        {
+            Ok(Some(c.clone()))
+        }
+        _ => Err(()),
+    }
+}
+
+/// `emojiValide` (lists/route.ts:52-59) : absent ou `null`, sinon 8 octets
+/// UTF-8 au plus, sans NUL.
+fn emoji_de_liste(valeur: Option<&Value>) -> Result<Option<String>, ()> {
+    match valeur {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(e)) if e.len() <= EMOJI_LISTE_OCTETS_MAX && !e.contains('\0') => Ok(Some(e.clone())),
+        _ => Err(()),
+    }
+}
+
+fn refus(statut: u16, message: &str) -> (u16, String) {
+    (statut, json!({ "error": message }).to_string())
+}
+
+/// `POST /api/sky/lists` — 201 avec les colonnes publiques SANS `membres`
+/// (`creerListe` : `RETURNING COLONNES_LISTE`), 400 sur forme, 409 sur nom
+/// déjà pris. La version progresse (`updated_at` posé à l'insertion).
+fn gerer_creer_liste(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    e.appels_listes += 1;
+    if let Some(r) = autoriser_appel(&mut e, jeton) {
+        return r;
+    }
+    if e.session_partielle_totp {
+        return refus(403, "Verification TOTP requise");
+    }
+    let corps: Value = match serde_json::from_str(corps_brut) {
+        Ok(v @ Value::Object(_)) => v,
+        _ => return refus(400, "Corps JSON invalide"),
+    };
+    let Some(nom) = corps.get("nom").and_then(nom_de_liste) else {
+        return refus(400, "nom invalide : attendu 1 a 40 caracteres");
+    };
+    let Ok(couleur) = couleur_de_liste(corps.get("couleur")) else {
+        return refus(400, "couleur invalide : attendu #RRGGBB ou null");
+    };
+    let Ok(emoji) = emoji_de_liste(corps.get("emoji")) else {
+        return refus(400, "emoji invalide : attendu au plus 8 octets ou null");
+    };
+    if e.listes.iter().any(|l| l.nom == nom) {
+        return refus(409, "Nom de liste deja utilise");
+    }
+    e.prochain_id_liste += 1;
+    let liste = ListeFausse {
+        id: e.prochain_id_liste,
+        nom: nom.to_string(),
+        couleur,
+        emoji,
+        created_at: "2026-01-01T00:00:00.000Z".to_string(),
+        membres: Vec::new(),
+    };
+    e.listes.push(liste.clone());
+    e.version += 1;
+    let reponse = json!({
+        "id": liste.id, "nom": liste.nom, "couleur": liste.couleur,
+        "emoji": liste.emoji, "created_at": liste.created_at,
+    });
+    (201, reponse.to_string())
+}
+
+/// `PATCH /api/sky/lists/{id}` — mise à jour PARTIELLE : seules les clés
+/// présentes sont validées et écrites (`"cle" in donnees`) ; `null` remet
+/// couleur ou émoji à rien. Aucune clé : 400. Liste inconnue : 404.
+fn gerer_modifier_liste(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, chemin: &str, corps_brut: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    e.appels_listes += 1;
+    if let Some(r) = autoriser_appel(&mut e, jeton) {
+        return r;
+    }
+    if e.session_partielle_totp {
+        return refus(403, "Verification TOTP requise");
+    }
+    let Some(id) = identifiant_de_chemin(chemin, "/api/sky/lists/", "") else {
+        return refus(400, "Identifiant invalide");
+    };
+    let objet = match serde_json::from_str::<Value>(corps_brut) {
+        Ok(Value::Object(o)) => o,
+        _ => return refus(400, "Corps JSON invalide"),
+    };
+    let mut nom = None;
+    let mut couleur = None;
+    let mut emoji = None;
+    if let Some(v) = objet.get("nom") {
+        match nom_de_liste(v) {
+            Some(n) => nom = Some(n.to_string()),
+            None => return refus(400, "nom invalide : attendu 1 a 40 caracteres"),
+        }
+    }
+    if objet.contains_key("couleur") {
+        match couleur_de_liste(objet.get("couleur")) {
+            Ok(c) => couleur = Some(c),
+            Err(()) => return refus(400, "couleur invalide : attendu #RRGGBB ou null"),
+        }
+    }
+    if objet.contains_key("emoji") {
+        match emoji_de_liste(objet.get("emoji")) {
+            Ok(em) => emoji = Some(em),
+            Err(()) => return refus(400, "emoji invalide : attendu au plus 8 octets ou null"),
+        }
+    }
+    if nom.is_none() && couleur.is_none() && emoji.is_none() {
+        return refus(400, "Aucun champ a modifier");
+    }
+    let Some(index) = e.listes.iter().position(|l| l.id == id) else {
+        return refus(404, "Liste introuvable");
+    };
+    if let Some(n) = &nom {
+        if e.listes.iter().any(|l| l.id != id && &l.nom == n) {
+            return refus(409, "Nom de liste deja utilise");
+        }
+    }
+    let liste = &mut e.listes[index];
+    if let Some(n) = nom {
+        liste.nom = n;
+    }
+    if let Some(c) = couleur {
+        liste.couleur = c;
+    }
+    if let Some(em) = emoji {
+        liste.emoji = em;
+    }
+    e.version += 1;
+    (204, String::new())
+}
+
+/// `DELETE /api/sky/lists/{id}` — 204, ou 404 « Liste introuvable ». NE fait
+/// PAS progresser `version` : voir le plan du jalon 1, tâche 2.
+fn gerer_supprimer_liste(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, chemin: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    e.appels_listes += 1;
+    if let Some(r) = autoriser_appel(&mut e, jeton) {
+        return r;
+    }
+    if e.session_partielle_totp {
+        return refus(403, "Verification TOTP requise");
+    }
+    let Some(id) = identifiant_de_chemin(chemin, "/api/sky/lists/", "") else {
+        return refus(400, "Identifiant invalide");
+    };
+    let avant = e.listes.len();
+    e.listes.retain(|l| l.id != id);
+    if e.listes.len() == avant {
+        return refus(404, "Liste introuvable");
+    }
+    (204, String::new())
+}
+
+/// `PUT /api/sky/lists/{id}/members` — `membreIds` : tableau d'au plus 200
+/// entiers > 0 (400 sinon) ; puis `definirMembres` : borne INTEGER, liste à
+/// l'appelant, TOUS amis acceptés, sinon 400 UNIFORME ; succès : ensemble
+/// dédoublonné, trié, version qui progresse.
+fn gerer_definir_membres(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, chemin: &str, corps_brut: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    e.appels_listes += 1;
+    if let Some(r) = autoriser_appel(&mut e, jeton) {
+        return r;
+    }
+    if e.session_partielle_totp {
+        return refus(403, "Verification TOTP requise");
+    }
+    let Some(id) = identifiant_de_chemin(chemin, "/api/sky/lists/", "/members") else {
+        return refus(400, "Identifiant invalide");
+    };
+    let corps: Value = match serde_json::from_str(corps_brut) {
+        Ok(v @ Value::Object(_)) => v,
+        _ => return refus(400, "Corps JSON invalide"),
+    };
+    let invalide = "membreIds invalide : attendu un tableau d'au plus 200 identifiants entiers positifs";
+    let Some(bruts) = corps.get("membreIds").and_then(Value::as_array) else {
+        return refus(400, invalide);
+    };
+    if bruts.len() > MEMBRES_LISTE_MAX {
+        return refus(400, invalide);
+    }
+    let mut membres = Vec::with_capacity(bruts.len());
+    for v in bruts {
+        match v.as_i64() {
+            Some(m) if m > 0 => membres.push(m),
+            _ => return refus(400, invalide),
+        }
+    }
+    if id > INTEGER_POSTGRES_MAX || membres.iter().any(|m| *m > INTEGER_POSTGRES_MAX) {
+        return refus(400, REFUS_MEMBRES);
+    }
+    let Some(index) = e.listes.iter().position(|l| l.id == id) else {
+        return refus(400, REFUS_MEMBRES);
+    };
+    membres.sort_unstable();
+    membres.dedup();
+    if !membres.iter().all(|m| e.amis.iter().any(|a| a.id == *m)) {
+        return refus(400, REFUS_MEMBRES);
+    }
+    e.listes[index].membres = membres;
+    e.version += 1;
     (204, String::new())
 }
 

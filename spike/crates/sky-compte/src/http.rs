@@ -236,6 +236,27 @@ impl ClientHttp {
             IssueRequete::Refus { statut, corps } => Ok(ReponseHttp::Refus { statut, corps }),
         }
     }
+
+    /// Requête à méthode explicite (`PATCH`, `PUT`) avec un corps JSON, pour une
+    /// route dont le SUCCÈS ne porte aucun corps (`204`) — AJOUTÉE AU JALON 1
+    /// pour les listes (`PATCH /api/sky/lists/{id}`, `PUT
+    /// /api/sky/lists/{id}/members`). Mêmes garanties que
+    /// `post_json_reponse_vide_avec_refus` : délai de l'agent, succès jamais
+    /// décodé, 401 → `Err(Refuse)` pour que `avec_jeton_valide` renouvelle,
+    /// transport → `Err(Reseau)`, autre statut → `Ok(Refus)` au corps rédigé.
+    pub fn envoyer_json_reponse_vide_avec_refus<B: Serialize>(
+        &self,
+        methode: &str,
+        chemin: &str,
+        corps: &B,
+        jeton: Option<&str>,
+    ) -> Result<ReponseHttp<()>, ErreurCompte> {
+        let requete = Self::avec_jeton(self.agent.request(methode, &self.url(chemin)), jeton);
+        match Self::issue_requete(requete.send_json(corps))? {
+            IssueRequete::Succes(_reponse_2xx) => Ok(ReponseHttp::Succes(())),
+            IssueRequete::Refus { statut, corps } => Ok(ReponseHttp::Refus { statut, corps }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -249,6 +270,25 @@ mod tests {
         // pour I1 : rougirait si elle glissait `jeton` dans le message.
         let client = ClientHttp::new(&Config::vers("http://127.0.0.1:1"));
         let r = client.delete_reponse_vide_avec_refus("/api/sky/devices/1", Some("SENTINEL-JETON"));
+        let erreur = match r {
+            Err(e) => e,
+            Ok(_) => panic!("attendu un échec de transport vers le port 1"),
+        };
+        assert!(matches!(erreur, ErreurCompte::Reseau(_)));
+        assert!(!erreur.to_string().contains("SENTINEL-JETON"));
+    }
+
+    #[test]
+    fn aucun_jeton_dans_lechec_reseau_reel_d_un_envoi_sans_corps_de_reponse() {
+        // Même preuve que pour `DELETE` : rougirait si la méthode ajoutée au
+        // jalon 1 glissait `jeton` dans le message d'erreur.
+        let client = ClientHttp::new(&Config::vers("http://127.0.0.1:1"));
+        let r = client.envoyer_json_reponse_vide_avec_refus(
+            "PATCH",
+            "/api/sky/lists/1",
+            &serde_json::json!({ "nom": "x" }),
+            Some("SENTINEL-JETON"),
+        );
         let erreur = match r {
             Err(e) => e,
             Ok(_) => panic!("attendu un échec de transport vers le port 1"),
