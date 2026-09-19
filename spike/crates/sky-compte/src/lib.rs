@@ -14,9 +14,10 @@ pub mod listes;
 pub mod session;
 
 pub use annuaire::{
-    accepter_ami, ajouter_ami, enregistrer_appareil, normaliser_code_ami, rattacher_appareil,
-    resoudre_ami, synchroniser, Acceptation, Ami, AjoutAmi, Appareil, AppareilDAmi, Demande,
-    EnveloppeRecue, Etat, Liste, Rattachement,
+    accepter_ami, ajouter_ami, bloquer_ami, enregistrer_appareil, nom_appareil_valide,
+    normaliser_code_ami, rattacher_appareil, regenerer_code, resoudre_ami, retirer_ami,
+    revoquer_appareil, synchroniser, Acceptation, Ami, AjoutAmi, Appareil, AppareilDAmi, Blocage,
+    Demande, EnveloppeRecue, Etat, Liste, Rattachement, Retrait,
 };
 pub use boite::{deposer, relever, Message, TAILLE_MAX_CLAIR};
 pub use coffre::{Coffre, Jetons};

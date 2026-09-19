@@ -95,7 +95,7 @@ fn inchange_conserve_lami_precedent_mais_vide_les_enveloppes() {
     let precedent = Etat {
         version: 3,
         code: "ANCIEN01".to_string(),
-        amis: vec![sky_compte::Ami { id: 1, discord_name: "alice".to_string(), appareils: Vec::new() }],
+        amis: vec![sky_compte::Ami { id: 1, friendship_id: 1, discord_name: "alice".to_string(), appareils: Vec::new() }],
         demandes: Vec::new(),
         listes: Vec::new(),
         appareils: Vec::new(),

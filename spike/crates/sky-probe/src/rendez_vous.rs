@@ -351,6 +351,7 @@ mod tests {
             vec![
                 Ami {
                     id: 1,
+                    friendship_id: 1,
                     discord_name: "alice".to_string(),
                     appareils: vec![
                         appareil(10, &autre_appareil_de_l_ami),
@@ -359,6 +360,7 @@ mod tests {
                 },
                 Ami {
                     id: 2,
+                    friendship_id: 2,
                     discord_name: "bob".to_string(),
                     appareils: vec![appareil(20, &appareil_d_un_autre_ami)],
                 },
@@ -391,7 +393,7 @@ mod tests {
     fn une_offre_d_un_appareil_qui_n_est_pas_celui_d_un_ami_est_ecartee() {
         let ami = Identity::generate();
         let etat_hote = etat(
-            vec![Ami { id: 1, discord_name: "alice".to_string(), appareils: vec![appareil(10, &ami)] }],
+            vec![Ami { id: 1, friendship_id: 1, discord_name: "alice".to_string(), appareils: vec![appareil(10, &ami)] }],
             Vec::new(),
         );
         let offre = bloc_offre(SESSION, Identity::generate().public_key());
@@ -409,6 +411,7 @@ mod tests {
         let etat_hote = etat(
             vec![Ami {
                 id: 1,
+                friendship_id: 1,
                 discord_name: "alice".to_string(),
                 appareils: vec![appareil(11, &ami_identite)],
             }],
@@ -440,6 +443,7 @@ mod tests {
         let etat_hote = etat(
             vec![Ami {
                 id: 1,
+                friendship_id: 1,
                 discord_name: "alice".to_string(),
                 appareils: vec![appareil(11, &ami_identite)],
             }],
@@ -685,6 +689,7 @@ mod tests {
         let appareil_spectateur = appareil(11, &spectateur);
         let amis = vec![Ami {
             id: 5,
+            friendship_id: 5,
             discord_name: "alice".to_string(),
             appareils: vec![appareil_spectateur.clone()],
         }];

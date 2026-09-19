@@ -37,6 +37,9 @@ pub struct Etat {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ami {
     pub id: i64,
+    /// Identifiant de l'AMITIÉ (`friendshipId`), celui que lisent les routes
+    /// `friends/{id}` — distinct de `id`, qui désigne l'utilisateur.
+    pub friendship_id: i64,
     pub discord_name: String,
     pub appareils: Vec<AppareilDAmi>,
 }
@@ -115,6 +118,8 @@ struct AppareilDAmiBrut {
 #[derive(Debug, Deserialize)]
 struct AmiBrut {
     id: i64,
+    #[serde(rename = "friendshipId")]
+    friendship_id: i64,
     discord_name: String,
     appareils: Vec<AppareilDAmiBrut>,
 }
@@ -222,6 +227,7 @@ fn convertir_etat(brut: EtatBrut) -> Etat {
         .into_iter()
         .map(|a| Ami {
             id: a.id,
+            friendship_id: a.friendship_id,
             discord_name: a.discord_name,
             appareils: a
                 .appareils
@@ -378,7 +384,7 @@ struct ReponseAppareil {
 /// valide et ne peut structurellement pas porter une telle valeur (il n'y
 /// a aucune séquence UTF-8 pour un substitut isolé). Seuls l'octet NUL et
 /// la longueur restent donc à vérifier côté client.
-fn nom_appareil_valide(nom: &str) -> bool {
+pub fn nom_appareil_valide(nom: &str) -> bool {
     let longueur_utf16 = nom.encode_utf16().count();
     (1..=64).contains(&longueur_utf16) && !nom.contains('\0')
 }
@@ -512,7 +518,10 @@ pub fn rattacher_appareil(config: &Config, coffre: &Coffre) -> Result<Rattacheme
 /// actif de ce compte, ce qui est tout ce que le rattachement exige. Tout
 /// autre refus (400 identifiant invalide, 403 session partielle, ...) est
 /// une erreur.
-fn revoquer_appareil(config: &Config, coffre: &Coffre, id: i64) -> Result<(), ErreurCompte> {
+///
+/// Publique depuis le jalon 1 : l'écran Mon compte révoque un autre
+/// appareil par elle.
+pub fn revoquer_appareil(config: &Config, coffre: &Coffre, id: i64) -> Result<(), ErreurCompte> {
     let client = ClientHttp::new(config);
     let chemin = format!("/api/sky/devices/{id}");
     avec_jeton_valide(config, coffre, |jeton| match client.delete_reponse_vide_avec_refus(&chemin, Some(jeton))? {
@@ -677,6 +686,88 @@ pub fn accepter_ami(config: &Config, coffre: &Coffre, friendship_id: i64) -> Res
     })
 }
 
+/// Borne des routes `friends/{id}` : `Number.isInteger(x) && x > 0`, sinon 400
+/// (`friends/[id]/route.ts:18`, `block/route.ts:18`). Refusé ici avant tout
+/// réseau.
+fn identifiant_d_amitie_valide(friendship_id: i64) -> bool {
+    friendship_id > 0
+}
+
+/// Issue d'un `retirer_ami`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retrait {
+    /// 204.
+    Retire,
+    /// 404 « Amitié introuvable » : inexistante, d'autrui, ou bloquée par
+    /// l'autre partie — indiscernables à dessein côté site.
+    Introuvable,
+}
+
+/// `DELETE /api/sky/friends/{friendship_id}` — retire un ami ou une demande.
+///
+/// Le site SUPPRIME la ligne : la version de synchronisation peut ne pas
+/// progresser. Pour voir le retrait, resynchroniser SANS précédent.
+pub fn retirer_ami(config: &Config, coffre: &Coffre, friendship_id: i64) -> Result<Retrait, ErreurCompte> {
+    if !identifiant_d_amitie_valide(friendship_id) {
+        return Err(ErreurCompte::Protocole(format!("identifiant d'amitié invalide : {friendship_id}")));
+    }
+    let client = ClientHttp::new(config);
+    let chemin = format!("/api/sky/friends/{friendship_id}");
+    avec_jeton_valide(config, coffre, |jeton| match client.delete_reponse_vide_avec_refus(&chemin, Some(jeton))? {
+        ReponseHttp::Succes(()) => Ok(Retrait::Retire),
+        ReponseHttp::Refus { statut: 404, .. } => Ok(Retrait::Introuvable),
+        ReponseHttp::Refus { statut, corps } => {
+            Err(ErreurCompte::Protocole(format!("statut {statut} inattendu : {corps}")))
+        }
+    })
+}
+
+/// Issue d'un `bloquer_ami`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Blocage {
+    /// 200 `{ ok: true }`.
+    Bloque,
+    /// 404, même recouvrement que `Retrait::Introuvable`.
+    Introuvable,
+}
+
+/// `POST /api/sky/friends/{friendship_id}/block` — la route ne lit aucun
+/// corps : un objet vide est envoyé.
+pub fn bloquer_ami(config: &Config, coffre: &Coffre, friendship_id: i64) -> Result<Blocage, ErreurCompte> {
+    if !identifiant_d_amitie_valide(friendship_id) {
+        return Err(ErreurCompte::Protocole(format!("identifiant d'amitié invalide : {friendship_id}")));
+    }
+    let client = ClientHttp::new(config);
+    let chemin = format!("/api/sky/friends/{friendship_id}/block");
+    let corps_vide = serde_json::json!({});
+    avec_jeton_valide(config, coffre, |jeton| {
+        let issue: ReponseHttp<ReponseAcceptation> = client.post_json_avec_refus(&chemin, &corps_vide, Some(jeton))?;
+        match issue {
+            ReponseHttp::Succes(_) => Ok(Blocage::Bloque),
+            ReponseHttp::Refus { statut: 404, .. } => Ok(Blocage::Introuvable),
+            ReponseHttp::Refus { statut, corps } => {
+                Err(ErreurCompte::Protocole(format!("statut {statut} inattendu : {corps}")))
+            }
+        }
+    })
+}
+
+#[derive(Deserialize)]
+struct ReponseCode {
+    code: String,
+}
+
+/// `POST /api/sky/friend-code` — tire un nouveau code ami et le rend.
+/// L'ancien cesse aussitôt de fonctionner. Le code n'entre pas dans la
+/// version de synchronisation : pour le relire, resynchroniser SANS précédent.
+pub fn regenerer_code(config: &Config, coffre: &Coffre) -> Result<String, ErreurCompte> {
+    let client = ClientHttp::new(config);
+    let corps_vide = serde_json::json!({});
+    let reponse: ReponseCode =
+        avec_jeton_valide(config, coffre, |jeton| client.post_json("/api/sky/friend-code", &corps_vide, Some(jeton)))?;
+    Ok(reponse.code)
+}
+
 /// Résout une désignation (nom Discord exact, ou identifiant numérique) en
 /// un ami unique de `etat`.
 ///
@@ -712,7 +803,7 @@ mod tests {
     use super::*;
 
     fn ami_avec_appareils(id: i64, nom: &str, appareils: Vec<AppareilDAmi>) -> Ami {
-        Ami { id, discord_name: nom.to_string(), appareils }
+        Ami { id, friendship_id: id, discord_name: nom.to_string(), appareils }
     }
 
     /// Clé publique X25519 de test, valide (32 octets, base64 canonique).
@@ -794,6 +885,7 @@ mod tests {
             code: "CODE1234".to_string(),
             amis: vec![AmiBrut {
                 id: 1,
+                friendship_id: 1,
                 discord_name: "bob".to_string(),
                 appareils: vec![
                     AppareilDAmiBrut { id: 10, public_key: tronquee },

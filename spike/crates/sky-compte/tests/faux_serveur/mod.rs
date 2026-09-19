@@ -450,6 +450,15 @@ pub struct EtatFaux {
     /// Nombre de requêtes reçues sur `/api/sky/lists*`, refusées comprises —
     /// prouve qu'une entrée invalide est refusée AVANT tout appel réseau.
     pub appels_listes: u64,
+
+    /// Code ami rendu par `GET /api/sky/sync` ; `None` : `CODE_FAUX`.
+    /// Remplacé par `POST /api/sky/friend-code` (jalon 1, tâche 3).
+    pub code_ami: Option<String>,
+    /// Nombre de régénérations du code ami.
+    pub codes_regeneres: u64,
+    /// Requêtes reçues sur `/api/sky/friends*` (ajout, acceptation, retrait,
+    /// blocage), refusées comprises.
+    pub appels_amis: u64,
 }
 
 /// Serveur double : un `tiny_http::Server` sur un port éphémère, dans un
@@ -602,6 +611,15 @@ fn repondre(mut requete: tiny_http::Request, etat: &Arc<Mutex<EtatFaux>>) {
         }
         (Method::Delete, chemin_liste) if chemin_liste.starts_with("/api/sky/lists/") => {
             gerer_supprimer_liste(etat, jeton.as_deref(), chemin_liste)
+        }
+        (Method::Post, "/api/sky/friend-code") => gerer_regenerer_code(etat, jeton.as_deref()),
+        (Method::Post, chemin_bloc)
+            if chemin_bloc.starts_with("/api/sky/friends/") && chemin_bloc.ends_with("/block") =>
+        {
+            gerer_bloquer_ami(etat, jeton.as_deref(), chemin_bloc)
+        }
+        (Method::Delete, chemin_ami) if chemin_ami.starts_with("/api/sky/friends/") => {
+            gerer_retirer_ami(etat, jeton.as_deref(), chemin_ami)
         }
         _ => (404u16, json!({ "error": "route inconnue du double" }).to_string()),
     };
@@ -761,7 +779,7 @@ fn gerer_sync(
 
     let corps = json!({
         "version": e.version,
-        "code": CODE_FAUX,
+        "code": e.code_ami.clone().unwrap_or_else(|| CODE_FAUX.to_string()),
         "amis": amis_vus,
         "demandes": e.demandes,
         "listes": e.listes,
@@ -946,6 +964,7 @@ fn cle_publique_valide(valeur: &str) -> bool {
 /// entre succès (`201`) et conflit (`409`). AJOUT DE LA TÂCHE 8.
 fn gerer_friends(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &str) -> (u16, String) {
     let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    e.appels_amis += 1;
     if let Some(refus) = autoriser_appel(&mut e, jeton) {
         return refus;
     }
@@ -992,6 +1011,7 @@ fn gerer_friends(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, corps_brut: &
 /// task-8-review.md, « Mineur 3 ».
 fn gerer_accepter_ami(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, chemin: &str) -> (u16, String) {
     let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    e.appels_amis += 1;
     if let Some(refus) = autoriser_appel(&mut e, jeton) {
         return refus;
     }
@@ -1538,6 +1558,76 @@ fn gerer_definir_membres(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, chemi
     e.listes[index].membres = membres;
     e.version += 1;
     (204, String::new())
+}
+
+// --- Amis et compte (jalon 1, tâche 3) ------------------------------------
+
+/// `DELETE /api/sky/friends/{id}` — `retirerAmi` (amis.ts:288-300) SUPPRIME la
+/// ligne `friendships`, amitié acceptée OU demande en attente : 204, sinon 404
+/// « Amitié introuvable ». La version NE progresse PAS : le site peut rendre
+/// `inchange` après un retrait (voir le plan du jalon 1, tâche 3).
+fn gerer_retirer_ami(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, chemin: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    e.appels_amis += 1;
+    if let Some(r) = autoriser_appel(&mut e, jeton) {
+        return r;
+    }
+    if e.session_partielle_totp {
+        return refus(403, "Verification TOTP requise");
+    }
+    let Some(id) = identifiant_de_chemin(chemin, "/api/sky/friends/", "") else {
+        return refus(400, "Identifiant invalide");
+    };
+    let avant = e.amis.len() + e.demandes.len();
+    e.amis.retain(|a| a.friendship_id != id);
+    e.demandes.retain(|d| d.friendship_id != id);
+    if e.amis.len() + e.demandes.len() == avant {
+        return refus(404, "Amitié introuvable");
+    }
+    (204, String::new())
+}
+
+/// `POST /api/sky/friends/{id}/block` — `bloquerAmi` (amis.ts:345-358) : la
+/// ligne passe en `bloquee` (elle quitte `amisDe` et `demandesDe`) avec
+/// `updated_at = NOW()` : la version progresse. 200 `{ ok: true }` ou 404.
+fn gerer_bloquer_ami(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>, chemin: &str) -> (u16, String) {
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    e.appels_amis += 1;
+    if let Some(r) = autoriser_appel(&mut e, jeton) {
+        return r;
+    }
+    if e.session_partielle_totp {
+        return refus(403, "Verification TOTP requise");
+    }
+    let Some(id) = identifiant_de_chemin(chemin, "/api/sky/friends/", "/block") else {
+        return refus(400, "Identifiant invalide");
+    };
+    let avant = e.amis.len() + e.demandes.len();
+    e.amis.retain(|a| a.friendship_id != id);
+    e.demandes.retain(|d| d.friendship_id != id);
+    if e.amis.len() + e.demandes.len() == avant {
+        return refus(404, "Amitié introuvable");
+    }
+    e.version += 1;
+    (200, json!({ "ok": true }).to_string())
+}
+
+/// `POST /api/sky/friend-code` — `regenererCode` (codes.ts:81) : 200
+/// `{ code }`. Écrit `users.friend_code`, absent du calcul de version : la
+/// version NE progresse PAS. Codes tirés dans l'alphabet réel.
+fn gerer_regenerer_code(etat: &Arc<Mutex<EtatFaux>>, jeton: Option<&str>) -> (u16, String) {
+    const CODES: [&str; 3] = ["REGENAA2", "REGENBB3", "REGENCC4"];
+    let mut e = etat.lock().expect("mutex etat faux empoisonne");
+    if let Some(r) = autoriser_appel(&mut e, jeton) {
+        return r;
+    }
+    if e.session_partielle_totp {
+        return refus(403, "Verification TOTP requise");
+    }
+    let code = CODES[(e.codes_regeneres % 3) as usize];
+    e.codes_regeneres += 1;
+    e.code_ami = Some(code.to_string());
+    (200, json!({ "code": code }).to_string())
 }
 
 // Les tests propres à ce double vivent dans `tests_du_double.rs`, inclus par
