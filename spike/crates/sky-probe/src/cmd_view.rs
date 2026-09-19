@@ -21,7 +21,7 @@ use sky_net::{LinkEvent, PeerLink};
 
 use crate::cmd_compte::{avertissement_consommation, causes_d_un_depot_refuse, config_et_coffre};
 use crate::cmd_host::{epoch_us, erreur_compte, etablir, EN_TETE_MORCEAU};
-use crate::rendez_vous::{
+use sky_partage::rendez_vous::{
     interroger, reponse_a_l_offre, session_de, HorlogeReelle, ATTENTE_SPECTATEUR, CADENCE,
 };
 

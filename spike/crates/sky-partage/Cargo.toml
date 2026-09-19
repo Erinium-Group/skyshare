@@ -1,0 +1,17 @@
+[package]
+name = "sky-partage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+sky-compte = { version = "0.0.0", path = "../sky-compte" }
+sky-net = { version = "0.0.0", path = "../sky-net" }
+sky-crypto = { version = "0.0.0", path = "../sky-crypto" }
+
+# Les tests du rendez-vous fabriquent des `AppareilDAmi`, dont la clé
+# publique voyage en base64 standard — la forme que rend le site.
+[dev-dependencies]
+base64.workspace = true

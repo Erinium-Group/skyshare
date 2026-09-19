@@ -13,6 +13,7 @@ sky-encode = { version = "0.0.0", path = "../sky-encode" }
 sky-net = { version = "0.0.0", path = "../sky-net" }
 sky-crypto = { version = "0.0.0", path = "../sky-crypto" }
 sky-compte = { version = "0.0.0", path = "../sky-compte" }
+sky-partage = { version = "0.0.0", path = "../sky-partage" }
 
 # Nécessaire à la source d'images synthétique (texture D3D11 animée) et à
 # l'identification de l'adaptateur derrière le device de capture.
@@ -25,7 +26,3 @@ features = [
     "Win32_Graphics_Dxgi_Common",
 ]
 
-# Les tests de `rendez_vous` fabriquent des `AppareilDAmi`, dont la clé
-# publique voyage en base64 standard — la forme que rend le site.
-[dev-dependencies]
-base64.workspace = true

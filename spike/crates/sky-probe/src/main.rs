@@ -7,7 +7,6 @@ mod cmd_encode;
 mod cmd_host;
 mod cmd_hw;
 mod cmd_view;
-mod rendez_vous;
 
 use clap::{Args, Parser, Subcommand};
 

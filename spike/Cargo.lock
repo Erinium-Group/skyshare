@@ -1374,17 +1374,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "sky-probe"
+name = "sky-partage"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64",
+ "sky-compte",
+ "sky-crypto",
+ "sky-net",
+]
+
+[[package]]
+name = "sky-probe"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
  "clap",
  "sky-capture",
  "sky-compte",
  "sky-crypto",
  "sky-encode",
  "sky-net",
+ "sky-partage",
  "windows",
 ]
 
