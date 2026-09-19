@@ -197,9 +197,18 @@ avec chaque arbitrage : `.superpowers/sdd/2026-09-11-jalon-c2-client-signaling/p
   - `sky-probe host` / `view` négocient **par la boîte aux lettres**, plus aucun copier-coller.
 - [x] Revue finale de branche : avec corrections, 0 critique, 2 importants, 5 mineurs.
 - [ ] Vague de correction de la revue finale, puis re-revue ciblée.
-- [ ] **Essai réel** — deux machines, deux réseaux, **deux comptes Discord**, une deuxième personne. Le
-  jalon n'est pas clos sans lui. Relever : délai entre le lancement de `view` et l'ouverture du canal ;
-  nombre de synchronisations de chaque côté ; enveloppe restée non ouverte ou non.
+- [x] **Essai réel — RÉUSSI le 19/09/2026.** PC fixe (RTX 4060, box) en `host`, portable sur un autre réseau
+  avec un second compte Discord en `view`. Réponse reçue **6,1 s** après le lancement de `view` (3
+  synchronisations), canal ouvert en **0,6 s**, **7,1 s** au total ; aucune enveloppe restée non ouverte ; aucun
+  relais. Deux bugs de `login` trouvés et corrigés en route (`cmd` qui coupait l'URL au `&` ; `natif=1` absent),
+  invisibles à tout test car aucun n'ouvre de navigateur.
+  - La vidéo a ensuite échoué (tampon d'émission saturé, RTT 330 ms, plancher 10 Mbps) : **écart 7**, jalon 2,
+    hors périmètre du C2.
+- [ ] **Défaut du site, trouvé pendant l'essai** : `creerSessionNative` (`src/lib/session.ts:176`) refuse tout
+  compte à double authentification, alors que la tâche 2 leur fait traverser le TOTP puis émet un code. Aucun
+  compte TOTP ne peut finir un login natif. Correctif = déploiement → accord du propriétaire.
+- [ ] Ergonomie : `view` sur un nom inconnu pourrait lister les amis disponibles (l'essai a d'abord tenté le nom
+  de l'appareil).
 - [ ] Fin de branche — **décision au propriétaire** : `main` est resté à `97f73c5` ; la branche porte aussi
   tout le jalon 0, jamais fusionné. Fusionner le C2 fusionne le jalon 0.
 
