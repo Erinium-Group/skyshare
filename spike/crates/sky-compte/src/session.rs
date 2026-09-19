@@ -71,9 +71,15 @@ pub fn empreinte_du_secret(secret: &str) -> String {
 /// résout sa cible de la même façon que le reste du produit — `SKY_API_URL` si posée,
 /// sinon la production. `echanger_le_code`, lui, reçoit le `Config` de l'appelant :
 /// c'est par là que les tests redirigent l'échange du code vers le double.
+///
+/// `natif=1` est ce qui fait signer au site un state NATIF portant le port et
+/// l'empreinte (`api/auth/discord/route.ts`, `parametres.get("natif") === "1"`).
+/// Sans lui, le site ignore `port` et `empreinte`, signe un state web ordinaire, et le
+/// retour de Discord ne redirige jamais vers la boucle locale : `login` attend
+/// indéfiniment. Trouvé au premier essai réel, 19/09/2026.
 pub fn url_de_depart(port: u16, empreinte: &str) -> String {
     let base = Config::depuis_env().base_url;
-    format!("{base}/api/auth/discord?port={port}&empreinte={empreinte}")
+    format!("{base}/api/auth/discord?natif=1&port={port}&empreinte={empreinte}")
 }
 
 #[derive(Serialize)]
@@ -492,8 +498,15 @@ mod tests {
     fn l_url_de_depart_porte_le_port_et_l_empreinte() {
         // Échoue si le port ou l'empreinte n'apparaissent pas tels quels dans l'URL —
         // c'est ce que le site signe ensuite dans le `state`.
+        // Échoue aussi si `natif=1` manque : le site signerait alors un state web
+        // et ne renverrait jamais vers la boucle locale (essai réel, 19/09/2026).
         let u = url_de_depart(47821, &"a".repeat(64));
         assert!(u.contains("/api/auth/discord?"));
+        let parametres = u.split_once('?').map_or("", |(_, p)| p);
+        assert!(
+            parametres.split('&').any(|p| p == "natif=1"),
+            "sans `natif=1`, le site ignore le port et l'empreinte"
+        );
         assert!(u.contains("port=47821"));
         assert!(u.contains(&format!("empreinte={}", "a".repeat(64))));
     }
