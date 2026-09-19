@@ -287,11 +287,29 @@ fn attendre_rappel(serveur: &tiny_http::Server, echeance: Instant) -> Result<Opt
     }
 }
 
-/// Ouvre le navigateur par défaut sur `url` — le projet est Windows uniquement, `cmd
-/// /C start` suffit sans dépendance supplémentaire.
+/// Programme et arguments qui ouvrent `url` dans le navigateur par défaut.
+///
+/// JAMAIS `cmd /C start` : `cmd` réinterprète sa ligne de commande, et le `&` qui
+/// sépare les paramètres de l'URL (`?port=…&empreinte=…`) y devient un séparateur de
+/// commandes — le navigateur recevait une URL tronquée au premier `&`, et `cmd`
+/// tentait d'exécuter `empreinte=…`. Trouvé au premier essai réel, 19/09/2026 :
+/// aucun test n'ouvrait de navigateur. `rundll32 url.dll,FileProtocolHandler` reçoit
+/// l'URL comme UN argument, sans interpréteur de commandes entre les deux.
+fn commande_du_navigateur(url: &str) -> (&'static str, [&str; 2]) {
+    ("rundll32", ["url.dll,FileProtocolHandler", url])
+}
+
+/// Ouvre le navigateur par défaut sur `url` (le projet est Windows uniquement), et
+/// affiche l'adresse en secours si le navigateur ne s'ouvre pas.
+///
+/// Afficher cette adresse est sans risque : elle porte le port local et l'EMPREINTE
+/// du secret, jamais le secret lui-même, sans lequel le code rendu par le site ne
+/// s'échange contre rien (`POST /api/auth/native`).
 fn ouvrir_navigateur(url: &str) -> Result<(), ErreurCompte> {
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
+    eprintln!("Si le navigateur ne s'ouvre pas, colle cette adresse dans ton navigateur :\n{url}\n");
+    let (programme, arguments) = commande_du_navigateur(url);
+    std::process::Command::new(programme)
+        .args(arguments)
         .spawn()
         .map(|_| ())
         .map_err(|e| ErreurCompte::Reseau(format!("impossible d'ouvrir le navigateur : {e}")))
@@ -351,6 +369,27 @@ pub fn connecter(config: &Config, coffre: &Coffre) -> Result<Jetons, ErreurCompt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- Ouverture du navigateur (essai réel, 19/09/2026) ---------------
+
+    #[test]
+    fn l_url_de_depart_passe_au_navigateur_en_un_seul_argument_intact() {
+        // Échoue si l'ouverture repassait par `cmd` (qui coupe au premier `&`
+        // et exécute la suite), ou si l'URL était découpée en plusieurs
+        // arguments : le site recevrait un `state` sans son empreinte.
+        let url = url_de_depart(51234, "empreinte-de-test");
+        assert!(url.contains('&'), "le test n'a de sens que si l'URL porte un `&`");
+        let (programme, arguments) = commande_du_navigateur(&url);
+        assert!(
+            !programme.eq_ignore_ascii_case("cmd") && !programme.eq_ignore_ascii_case("cmd.exe"),
+            "`cmd` réinterprète `&` comme séparateur de commandes"
+        );
+        assert_eq!(
+            arguments.iter().filter(|a| **a == url).count(),
+            1,
+            "l'URL doit être transmise en un seul argument, intacte"
+        );
+    }
 
     // --- Serveur de boucle locale (revue finale, m4) ------------------
 
