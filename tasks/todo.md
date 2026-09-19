@@ -184,7 +184,7 @@ réellement, une clé fausse ferait échouer le GCM.
 
 ---
 
-## Jalon C2 — le client de signaling — EN COURS
+## Jalon C2 — le client de signaling — TERMINÉ le 19/09/2026
 
 Branche `jalon-c2-client-signaling`. Spec : `docs/superpowers/specs/2026-09-11-jalon-c2-client-signaling-design.md`
 (D1–D8). Plan : `docs/superpowers/plans/2026-09-11-jalon-c2-client-signaling.md` (11 tâches). Journal détaillé,
@@ -196,7 +196,7 @@ avec chaque arbitrage : `.superpowers/sdd/2026-09-11-jalon-c2-client-signaling/p
   - Crate `sky-compte` : connexion native, trousseau, renouvellement, annuaire, boîte aux lettres.
   - `sky-probe host` / `view` négocient **par la boîte aux lettres**, plus aucun copier-coller.
 - [x] Revue finale de branche : avec corrections, 0 critique, 2 importants, 5 mineurs.
-- [ ] Vague de correction de la revue finale, puis re-revue ciblée.
+- [x] Vague de correction de la revue finale, puis re-revue ciblée (N1 corrigé par le contrôleur).
 - [x] **Essai réel — RÉUSSI le 19/09/2026.** PC fixe (RTX 4060, box) en `host`, portable sur un autre réseau
   avec un second compte Discord en `view`. Réponse reçue **6,1 s** après le lancement de `view` (3
   synchronisations), canal ouvert en **0,6 s**, **7,1 s** au total ; aucune enveloppe restée non ouverte ; aucun
@@ -204,13 +204,16 @@ avec chaque arbitrage : `.superpowers/sdd/2026-09-11-jalon-c2-client-signaling/p
   invisibles à tout test car aucun n'ouvre de navigateur.
   - La vidéo a ensuite échoué (tampon d'émission saturé, RTT 330 ms, plancher 10 Mbps) : **écart 7**, jalon 2,
     hors périmètre du C2.
-- [ ] **Défaut du site, trouvé pendant l'essai** : `creerSessionNative` (`src/lib/session.ts:176`) refuse tout
-  compte à double authentification, alors que la tâche 2 leur fait traverser le TOTP puis émet un code. Aucun
-  compte TOTP ne peut finir un login natif. Correctif = déploiement → accord du propriétaire.
+- [x] **Défaut du site, trouvé pendant l'essai — corrigé et déployé le 19/09/2026** (`54fd093`, statut Vercel
+  `success`, route vérifiée en production) : `creerSessionNative` refusait tout compte à double
+  authentification, alors que la tâche 2 leur fait traverser le TOTP puis émet un code. Le code émis par
+  `totp/verify` porte désormais `auth_codes.totp_verifie = TRUE` ; celui du callback reste `FALSE`, ce qui garde
+  la protection contre un TOTP activé entre l'émission et l'échange. Test de chaîne ajouté (vérification TOTP
+  en flux natif, puis échange du code émis). 360 tests. Relu : aucun constat critique ni important.
 - [ ] Ergonomie : `view` sur un nom inconnu pourrait lister les amis disponibles (l'essai a d'abord tenté le nom
   de l'appareil).
-- [ ] Fin de branche — **décision au propriétaire** : `main` est resté à `97f73c5` ; la branche porte aussi
-  tout le jalon 0, jamais fusionné. Fusionner le C2 fusionne le jalon 0.
+- [x] Fin de branche : fusionnée dans `main` le 19/09/2026 (avance rapide `97f73c5..9ea7cc5`), jalon 0 compris,
+  sur décision du propriétaire.
 
 ### Limites connues, assumées
 - **Les enveloppes sont consommées à la livraison** : `friends list`, `friends add`, `device list`, `code`, ou

@@ -54,10 +54,13 @@ Jalons 1 à 7 restent à faire (voir `tasks/todo.md`).
 - **Jalon A — socle** : terminé, en production (bilingue fr/en, connexion Discord, DA sombre).
 - **Jalon C1 — API de signaling** : terminé, fusionné dans `main` (`89161ff`), **déployé et
   vérifié en production** le 04/09/2026. 12 routes `/api/sky/*`, 17 tables, **338 tests**.
-- **Jalon C2 — le client de signaling** : spécifié et planifié le 11/09/2026, en cours sur
-  la branche `jalon-c2-client-signaling`. Sa partie site — le second facteur dans le flux
-  natif — est **déployée en production** depuis le 13/09/2026 (`f916dcc`, 355 tests).
-  L'avancement tâche par tâche est dans le journal local
+- **Jalon C2 — le client de signaling** : **TERMINÉ le 19/09/2026.** Essai réel réussi (deux
+  machines, deux réseaux, deux comptes Discord : canal ouvert **7,1 s** après le lancement de
+  `view`, sans relais). Application fusionnée dans `main` de `D:\skyshare` (`9ea7cc5`) — ce
+  qui y a aussi amené le jalon 0, jusque-là jamais fusionné. Partie site en production :
+  second facteur dans le flux natif (`f916dcc`), puis correctif permettant à un compte à
+  double authentification de finir une connexion native (`54fd093`, colonne
+  `auth_codes.totp_verifie`, **360 tests**). Journal détaillé, avec chaque arbitrage :
   `.superpowers/sdd/2026-09-11-jalon-c2-client-signaling/progress.md` (ignoré par git).
 
 ---
