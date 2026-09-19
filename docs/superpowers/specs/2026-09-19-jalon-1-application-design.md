@@ -110,8 +110,9 @@ notification par l'API intégrée de Tauri.
 
 **Connexion** (premier lancement, ou session expirée) : un bouton « Se connecter avec Discord ».
 Le navigateur s'ouvre ; l'application se met à jour seule au retour. Premier lancement après la
-connexion : si aucun appareil n'est enregistré, l'application l'enregistre elle-même (nom par
-défaut : le nom de la machine, modifiable dans Mon compte).
+connexion : si aucun appareil n'est enregistré, l'application l'enregistre elle-même, sous le nom de
+la machine. **Pas de renommage** à ce jalon : aucune route du site ne le permet, et §5 limite le
+jalon à une seule modification du site (arbitrage du 19/09, relevé à l'écriture du plan).
 
 **Amis** : champ « code ami » + Ajouter ; demandes reçues avec Accepter ; amis avec le nombre
 d'appareils, un bouton **Regarder** (actif seulement si l'ami a au moins un appareil) et un
@@ -133,8 +134,9 @@ désactivé et le dit (pas de repli logiciel — question ouverte du projet).
 **Regarder** : attente jusqu'à 60 s, puis soit « Connecté en X s · connexion directe, sans
 relais » avec débit reçu, images/s, gigue, durée et Arrêter, soit un échec.
 
-**Échecs, tous en clair** : « X n'est pas en partage » ; « Ton réseau bloque la connexion
-directe » ; « La connexion était trop lente pour la vidéo » (tampon d'émission saturé — limite
+**Échecs, tous en clair** : « X n'est pas en partage » ; « Aucune connexion directe n'a pu
+s'établir entre vos deux réseaux » (un constat, pas une cause supposée : rien ne mesure lequel des
+deux réseaux bloque) ; « La connexion était trop lente pour la vidéo » (tampon d'émission saturé — limite
 connue du transport actuel, corrigée au jalon 2) ; « Session expirée — reconnecte-toi ».
 
 ## 5. Changement côté site
@@ -203,4 +205,5 @@ portable ; on réinstalle à chaque nouvelle version jusqu'au jalon 6.
   disponibilité. Comportement à observer à l'essai réel avant de décider s'il faut l'empêcher.
 - **Nom par défaut de l'appareil** : le nom de la machine peut contenir des caractères que le
   site refuse ; il sera validé côté client par la règle déjà suivie par `sky-compte`, avec repli
-  sur « PC ».
+  sur « Appareil SkyShare » — le repli que `sky-compte` utilise déjà, pour qu'un seul nom générique
+  existe dans le produit.
