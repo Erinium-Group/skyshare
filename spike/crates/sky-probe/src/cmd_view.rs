@@ -1,285 +1,149 @@
-//! Côté spectateur : demande le partage d'un ami par la boîte aux lettres,
-//! intègre sa réponse, reçoit le flux vidéo réel et l'écrit dans `recu.h265`
-//! — la chaîne complète (Tâche 8).
-//!
-//! La négociation ne passe plus par un humain : l'offre est déposée pour les
-//! appareils de l'ami, la réponse relevée à la synchronisation. Ce qui décide
-//! vit dans `rendez_vous` ; ce fichier ne garde que la colle réseau.
-//!
-//! Piège documenté (Tâche 3) : les en-têtes de séquence (VPS/SPS/PPS) ne sont
-//! émis qu'une fois, au tout début du flux — GOP infini oblige. Ce spectateur
-//! écrit donc depuis le tout premier paquet reçu après connexion : il n'existe
-//! aucun chemin de code ici qui commencerait à enregistrer en cours de route.
+//! `sky-probe view` : un affichage de `sky_partage::regarder` (jalon 1,
+//! tâche 5). Le flux reçu est écrit dans `sortie` dès le premier paquet —
+//! `sky-partage` le jetterait ; c'est ce fichier qui lui fournit le puits.
 
 use std::fs::File;
-use std::io::Write;
 use std::time::{Duration, Instant};
 
-use sky_compte::{deposer, relever, resoudre_ami, synchroniser};
-use sky_crypto::Identity;
-use sky_net::{LinkEvent, PeerLink};
-
-use crate::cmd_compte::{avertissement_consommation, causes_d_un_depot_refuse, config_et_coffre};
-use crate::cmd_host::{epoch_us, erreur_compte, etablir, EN_TETE_MORCEAU};
-use sky_partage::rendez_vous::{
-    interroger, reponse_a_l_offre, session_de, HorlogeReelle, ATTENTE_SPECTATEUR, CADENCE,
+use sky_compte::synchroniser;
+use sky_partage::{
+    regarder, Arret, Bilan, BilanReception, Designation, Evenement, Fin, Mesures, ParametresSpectateur, Puits,
 };
 
-/// Période d'émission du retour vers l'émetteur.
-///
-/// Le retour ne prouve plus seulement que le canal fonctionne dans les deux
-/// sens (Tâche 7) : il porte désormais l'horodatage du dernier paquet vidéo
-/// reçu, ce qui permet à l'émetteur de calculer un aller-retour (RTT) réel —
-/// c'est ce dont le `Pacer` de la Tâche 8 se nourrit.
-const PERIODE_RETOUR: Duration = Duration::from_millis(200);
+use crate::cmd_compte::{avertissement_consommation, causes_d_un_depot_refuse, config_et_coffre};
+use crate::cmd_host::{afficher, afficher_diagnostic, erreur_partage};
 
 pub fn run(ami_designe: &str, secondes: u64, sortie: &str) -> anyhow::Result<()> {
+    // Pris AVANT le coffre, comme au C2 : c'est d'ici que se mesurent
+    // « Réponse reçue après » et « depuis le lancement de view ».
     let lancement = Instant::now();
     let (config, coffre) = config_et_coffre()?;
+    // Jamais demandé : `view` s'arrête à `--seconds`, comme au C2.
+    let arret = Arret::nouveau();
+    let fin = regarder(
+        &config,
+        &coffre,
+        |precedent| synchroniser(&config, &coffre, precedent),
+        ParametresSpectateur {
+            ami: Designation::Texte(ami_designe),
+            duree_max: Some(Duration::from_secs(secondes)),
+            lancement,
+        },
+        || Ok(Some(Box::new(File::create(sortie)?) as Puits)),
+        &arret,
+        &mut |evenement| afficher(&lignes_spectateur(&evenement, sortie)),
+    )
+    .map_err(erreur_partage)?;
+    afficher_fin(fin, sortie)
+}
 
-    // Avant tout réseau : sans appareil enregistré, `deposer` refuserait de
-    // toute façon — mais seulement après une synchronisation et la
-    // découverte d'adresse d'`offrant`.
-    if coffre.identifiant_appareil().map_err(erreur_compte)?.is_none() {
-        anyhow::bail!(
+/// Les lignes du C2, pour chaque événement du spectateur.
+fn lignes_spectateur(evenement: &Evenement, sortie: &str) -> Vec<String> {
+    match evenement {
+        Evenement::DemandeEnvoyee { nom, deposes, appareils, attente } => vec![
+            format!("\nDemande envoyée à {nom} ({deposes} appareil(s) sur {appareils})."),
+            format!("J'attends sa réponse pendant {} s au maximum.", attente.as_secs()),
+            avertissement_consommation("la réponse de ton ami"),
+        ],
+        Evenement::ReponseRecue { apres, synchronisations } => vec![format!(
+            "Réponse reçue après {:.1} s ({synchronisations} synchronisations).",
+            apres.as_secs_f32()
+        )],
+        Evenement::Negociation => vec!["Négociation en cours...".to_string()],
+        Evenement::Connecte { en, depuis_le_lancement } => vec![
+            format!(
+                "CONNECTÉ en {:.1} s ({:.1} s depuis le lancement de view)",
+                en.as_secs_f32(),
+                depuis_le_lancement.unwrap_or_default().as_secs_f32()
+            ),
+            format!("Écriture du flux reçu dans {sortie}, dès le premier paquet.\n"),
+        ],
+        Evenement::Mesures(Mesures::Reception { debit_mbps, images_par_s, gigue_ms }) => {
+            vec![format!("  {debit_mbps:.1} Mbps | {images_par_s} images/s | gigue {gigue_ms:.2} ms")]
+        }
+        // Événements de l'hôte : `regarder` ne les émet jamais.
+        Evenement::Pret
+        | Evenement::Disponible { .. }
+        | Evenement::DemandeEcartee { .. }
+        | Evenement::EchecLocal { .. }
+        | Evenement::DemandeRecue { .. }
+        | Evenement::Diffusion { .. }
+        | Evenement::Mesures(Mesures::Envoi { .. }) => Vec::new(),
+    }
+}
+
+fn afficher_fin(fin: Fin, sortie: &str) -> anyhow::Result<()> {
+    match fin {
+        Fin::AucunAppareilLocal => anyhow::bail!(
             "aucun appareil enregistré sur cette machine — lance d'abord \
              `sky-probe device register <nom>`."
-        );
-    }
-    // L'identité DURABLE du coffre : c'est pour sa clé d'annuaire que l'hôte
-    // scelle l'enveloppe de sa réponse. La clé de l'offre, elle, est éphémère.
-    let identite = coffre.identite().map_err(erreur_compte)?;
-
-    let etat = synchroniser(&config, &coffre, None).map_err(erreur_compte)?;
-    let ami = resoudre_ami(&etat, ami_designe).map_err(erreur_compte)?.clone();
-    if ami.appareils.is_empty() {
-        println!(
-            "{} n'a aucun appareil enregistré : personne à qui envoyer la demande.",
-            ami.discord_name
-        );
-        return Ok(());
-    }
-
-    let (mut link, offre) = PeerLink::offrant(Identity::generate())?;
-    let session = session_de(&offre)?;
-
-    // Le bloc part tel quel : `offrant` a déjà comprimé le SDP, et `deposer`
-    // scelle pour chaque appareil de l'ami avec sa clé d'annuaire.
-    let deposes = deposer(&config, &coffre, &ami.appareils, offre.as_bytes()).map_err(erreur_compte)?;
-    if deposes == 0 {
-        println!(
-            "Le serveur a refusé la demande pour les {} appareil(s) de {} : rien n'a été envoyé.",
-            ami.appareils.len(),
-            ami.discord_name
-        );
-        println!("{}", causes_d_un_depot_refuse());
-        return Ok(());
-    }
-    println!(
-        "\nDemande envoyée à {} ({deposes} appareil(s) sur {}).",
-        ami.discord_name,
-        ami.appareils.len()
-    );
-    println!(
-        "J'attends sa réponse pendant {} s au maximum.",
-        ATTENTE_SPECTATEUR.as_secs()
-    );
-    // Même limite que `host` (revue finale, m3) : la réponse de l'ami arrive
-    // par une enveloppe que le serveur efface en la livrant — une autre
-    // commande qui synchronise pendant cette attente la consommerait, et ce
-    // `view` conclurait à tort « n'a pas répondu ».
-    println!("{}", avertissement_consommation("la réponse de ton ami"));
-    std::io::stdout().flush().ok();
-
-    // Le mapping NAT du port annoncé dans l'offre doit survivre à l'attente.
-    // Le battement n'utilise que le socket : l'horloge de `str0m` ne court pas.
-    let garde = link.maintenir_mapping()?;
-
-    let mut synchronisations = 1u32; // celle qui a résolu l'ami
-    let mut horloge = HorlogeReelle::demarrer();
-    let reponse = interroger(
-        Some(etat),
-        |precedent| {
-            synchronisations += 1;
-            synchroniser(&config, &coffre, precedent)
-        },
-        |etat| reponse_a_l_offre(relever(etat, &identite), session, &ami.appareils),
-        &mut horloge,
-        CADENCE,
-        ATTENTE_SPECTATEUR,
-    )
-    .map_err(erreur_compte)?;
-
-    let Some(reponse) = reponse else {
-        println!("{} n'a pas répondu — est-il en partage ?", ami.discord_name);
-        return Ok(());
-    };
-    println!(
-        "Réponse reçue après {:.1} s ({synchronisations} synchronisations).",
-        lancement.elapsed().as_secs_f32()
-    );
-
-    // La négociation produit désormais son propre trafic.
-    drop(garde);
-    link.accepter_reponse(&reponse)?;
-
-    println!("Négociation en cours...");
-    std::io::stdout().flush().ok();
-
-    let Some(duree) = etablir(&mut link)? else {
-        return Ok(());
-    };
-    println!(
-        "CONNECTÉ en {:.1} s ({:.1} s depuis le lancement de view)",
-        duree.as_secs_f32(),
-        lancement.elapsed().as_secs_f32()
-    );
-    println!("Écriture du flux reçu dans {sortie}, dès le premier paquet.\n");
-    std::io::stdout().flush().ok();
-
-    let mut fichier = File::create(sortie)?;
-
-    let mut recus_octets = 0u64;
-    let mut images = 0u64;
-    // Dernier horodatage d'ÉMISSION vu (celui embarqué par l'hôte dans le
-    // paquet), et dernier instant d'ARRIVÉE — les deux sur la même horloge
-    // système (les deux processus tournent sur la même machine dans ce
-    // spike). C'est ce qui permet un calcul de gigue conforme à RFC 3550,
-    // plutôt qu'une simple variation d'intervalle d'affichage.
-    let mut dernier_horodatage_emission: Option<u64> = None;
-    let mut dernier_horodatage_arrivee: Option<u64> = None;
-    let mut gigue_us: f64 = 0.0;
-    let mut transit_echantillons_us: Vec<i64> = Vec::new();
-
-    let t0 = Instant::now();
-    let mut dernier_affichage = Instant::now();
-    let mut dernier_retour = Instant::now();
-    let mut recus_precedent = 0u64;
-    let mut images_precedent = 0u64;
-
-    while t0.elapsed() < Duration::from_secs(secondes) {
-        match link.poll()? {
-            LinkEvent::Data(d) => {
-                if d.len() > EN_TETE_MORCEAU {
-                    // En-tête de morceau (voir `cmd_host::EN_TETE_MORCEAU`) :
-                    // 8 octets d'horodatage d'émission, 1 octet drapeau (non
-                    // nul = premier morceau de l'image). Un paquet NVENC peut
-                    // être redécoupé en plusieurs morceaux ; seul le premier
-                    // porte les statistiques par IMAGE (transit, gigue,
-                    // compteur) — la charge utile de chacun est de toute façon
-                    // recollée dans l'ordre d'arrivée.
-                    let horodatage_emission = u64::from_le_bytes(d[..8].try_into().unwrap());
-                    let premier_morceau = d[8] != 0;
-                    let charge_utile = &d[EN_TETE_MORCEAU..];
-
-                    if premier_morceau {
-                        let horodatage_arrivee = epoch_us();
-
-                        // Temps de transit sur le lien : arrivée moins
-                        // émission, même horloge système. Composante de la
-                        // latence de bout en bout distincte de la durée
-                        // d'encodage (déjà comptée par NVENC avant
-                        // l'horodatage) — voir le rapport.
-                        transit_echantillons_us
-                            .push(horodatage_arrivee as i64 - horodatage_emission as i64);
-
-                        // Gigue RFC 3550 : écart entre la variation d'arrivée
-                        // et la variation d'émission, lissé sur une fenêtre
-                        // glissante, calculée IMAGE à IMAGE (pas morceau à
-                        // morceau, ce qui mesurerait notre propre découpage).
-                        if let (Some(prec_emis), Some(prec_arr)) =
-                            (dernier_horodatage_emission, dernier_horodatage_arrivee)
-                        {
-                            let delta_emission = horodatage_emission as i64 - prec_emis as i64;
-                            let delta_arrivee = horodatage_arrivee as i64 - prec_arr as i64;
-                            let dev = ((delta_arrivee - delta_emission).unsigned_abs()) as f64;
-                            gigue_us += (dev - gigue_us) / 16.0;
-                        }
-                        dernier_horodatage_emission = Some(horodatage_emission);
-                        dernier_horodatage_arrivee = Some(horodatage_arrivee);
-                        images += 1;
-                    }
-
-                    fichier.write_all(charge_utile)?;
-                    recus_octets += charge_utile.len() as u64;
-                }
-                // Un message trop court pour porter un en-tête complet est
-                // ignoré plutôt que d'écrire un fragment d'en-tête dans le
-                // fichier.
-            }
-            LinkEvent::Failed(raison) => {
-                println!("\nÉCHEC : {raison}");
-                fichier.flush().ok();
-                return Ok(());
-            }
-            _ => {}
+        ),
+        Fin::AucunAppareilChezLAmi { nom } => {
+            println!("{nom} n'a aucun appareil enregistré : personne à qui envoyer la demande.")
         }
-
-        if dernier_retour.elapsed() >= PERIODE_RETOUR {
-            // Le retour porte l'horodatage d'émission du dernier paquet vidéo
-            // reçu, tel quel : c'est ce qui permet à l'hôte de calculer un RTT
-            // réel. Rien à renvoyer tant qu'aucun paquet n'est encore arrivé.
-            if let Some(h) = dernier_horodatage_emission {
-                let _ = link.send(&h.to_le_bytes());
+        Fin::DemandeRefusee { nom, appareils } => {
+            println!("Le serveur a refusé la demande pour les {appareils} appareil(s) de {nom} : rien n'a été envoyé.");
+            println!("{}", causes_d_un_depot_refuse());
+        }
+        Fin::PasDeReponse { nom } => println!("{nom} n'a pas répondu — est-il en partage ?"),
+        Fin::NegociationRompue(raison) => println!("ÉCHEC : {raison}"),
+        Fin::EtablissementEchoue(diagnostic) => afficher_diagnostic(&diagnostic),
+        Fin::LienTombe(raison) => println!("\nÉCHEC : {raison}"),
+        Fin::DureeEcoulee(bilan) => {
+            if let Bilan::Reception(b) = *bilan {
+                afficher_bilan(&b, sortie);
             }
-            dernier_retour = Instant::now();
         }
-
-        if dernier_affichage.elapsed() >= Duration::from_secs(1) {
-            let delta_octets = recus_octets - recus_precedent;
-            let delta_images = images - images_precedent;
-            let ecoule = dernier_affichage.elapsed().as_secs_f64();
-            println!(
-                "  {:.1} Mbps | {delta_images} images/s | gigue {:.2} ms",
-                delta_octets as f64 * 8.0 / ecoule / 1e6,
-                gigue_us / 1000.0
-            );
-            std::io::stdout().flush().ok();
-            recus_precedent = recus_octets;
-            images_precedent = images;
-            dernier_affichage = Instant::now();
-        }
-    }
-
-    fichier.flush()?;
-
-    let ecoule = t0.elapsed().as_secs_f64();
-    transit_echantillons_us.sort_unstable();
-
-    println!(
-        "\nDébit moyen reçu : {:.1} Mbps sur {ecoule:.0} s ({images} images, {} Mo)",
-        recus_octets as f64 * 8.0 / ecoule / 1e6,
-        recus_octets / 1_000_000
-    );
-    println!("Fichier écrit    : {sortie}");
-    if transit_echantillons_us.is_empty() {
-        println!("Transit sur le lien : non mesuré (aucune image reçue)");
-    } else {
-        println!(
-            "Transit sur le lien (médian / p99) : {:.2} ms / {:.2} ms  ({} échantillons)",
-            percentile_i64(&transit_echantillons_us, 50) as f64 / 1000.0,
-            percentile_i64(&transit_echantillons_us, 99) as f64 / 1000.0,
-            transit_echantillons_us.len()
-        );
-    }
-    println!(
-        "Gigue finale (RFC 3550, lissée) : {:.2} ms",
-        gigue_us / 1000.0
-    );
-    let (_, vers_internet) = link.destinations();
-    if vers_internet == 0 {
-        println!("Rappel : aucun paquet n'est parti vers internet — lien local.");
-    } else {
-        println!("Lien reseau reel : {vers_internet} paquets emis vers internet.");
-        println!("Ces mesures sont celles d'une vraie liaison entre deux machines.");
+        // `view` ne demande jamais l'arrêt ; les autres fins sont celles de l'hôte.
+        Fin::Arrete | Fin::AucuneDemande | Fin::ReponseRefusee | Fin::TamponSature { .. } => {}
     }
     Ok(())
 }
 
-fn percentile_i64(tries: &[i64], p: usize) -> i64 {
-    if tries.is_empty() {
-        return 0;
+fn afficher_bilan(b: &BilanReception, sortie: &str) {
+    println!(
+        "\nDébit moyen reçu : {:.1} Mbps sur {:.0} s ({} images, {} Mo)",
+        b.octets as f64 * 8.0 / b.duree_s / 1e6,
+        b.duree_s,
+        b.images,
+        b.octets / 1_000_000
+    );
+    println!("Fichier écrit    : {sortie}");
+    match &b.transit_ms {
+        None => println!("Transit sur le lien : non mesuré (aucune image reçue)"),
+        Some(q) => println!(
+            "Transit sur le lien (médian / p99) : {:.2} ms / {:.2} ms  ({} échantillons)",
+            q.p50, q.p99, q.echantillons
+        ),
     }
-    let idx = (tries.len() * p / 100).min(tries.len() - 1);
-    tries[idx]
+    println!("Gigue finale (RFC 3550, lissée) : {:.2} ms", b.gigue_ms);
+    if b.vers_internet == 0 {
+        println!("Rappel : aucun paquet n'est parti vers internet — lien local.");
+    } else {
+        println!("Lien reseau reel : {} paquets emis vers internet.", b.vers_internet);
+        println!("Ces mesures sont celles d'une vraie liaison entre deux machines.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn la_ligne_connecte_du_spectateur_est_celle_du_c2() {
+        let lignes = lignes_spectateur(
+            &Evenement::Connecte {
+                en: Duration::from_millis(600),
+                depuis_le_lancement: Some(Duration::from_millis(7_100)),
+            },
+            "recu.h265",
+        );
+        assert_eq!(
+            lignes,
+            vec![
+                "CONNECTÉ en 0.6 s (7.1 s depuis le lancement de view)".to_string(),
+                "Écriture du flux reçu dans recu.h265, dès le premier paquet.\n".to_string(),
+            ]
+        );
+    }
 }

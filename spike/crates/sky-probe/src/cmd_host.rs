@@ -1,96 +1,24 @@
-//! Côté émetteur : attend la demande d'un ami dans la boîte aux lettres, y
-//! répond, puis capture, encode et envoie un flux vidéo réel — la chaîne
-//! complète de la Tâche 8.
-//!
-//! La négociation ne passe plus par un humain. Ce qui décide — quelle
-//! enveloppe est une offre, pour quelle clé sceller la réponse — vit dans
-//! `rendez_vous` ; ce fichier ne garde que la colle réseau.
-//!
-//! `WgcCapture::next_frame()` → `NvencEncoder::encode()` → `link.send()`,
-//! avec le débit réseau réellement piloté par `Pacer::target_bps()`. C'est
-//! ici, et seulement ici, que le `Pacer` entre en jeu : la Tâche 7 avait
-//! interdiction de le câbler, le pilotage du débit appartient à la commande,
-//! pas à `PeerLink`.
+//! `sky-probe host` : un affichage de `sky_partage::heberger` (jalon 1,
+//! tâche 5). La négociation et la diffusion vivent dans `sky-partage` ; ce
+//! fichier ne garde que les textes du terminal, inchangés depuis le C2.
 
 use std::io::Write;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use sky_capture::wgc::WgcCapture;
-use sky_compte::{deposer, relever, synchroniser, ErreurCompte};
-use sky_crypto::Identity;
-use sky_encode::{nvenc::NvencEncoder, Codec};
-use sky_net::{LinkEvent, Pacer, PeerLink};
-
-use crate::cmd_compte::{
-    avertissement_consommation, causes_d_un_depot_refuse, config_et_coffre, message_utilisateur,
+use sky_compte::{synchroniser, ErreurCompte};
+use sky_encode::Codec;
+use sky_partage::hote::BUDGET_RETRY_ENVOI;
+use sky_partage::rendez_vous::FENETRE_HOTE;
+use sky_partage::{
+    heberger, Arret, Bilan, BilanEnvoi, Diagnostic, ErreurPartage, Evenement, Fin, Images, Mesures,
+    ParametresHote, SourceImages,
 };
-use crate::cmd_encode::{Source, TextureSynthetique, FPS};
-use sky_partage::rendez_vous::{
-    echec_local, interroger, offres_recevables, HorlogeReelle, CADENCE, FENETRE_HOTE,
-};
+use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 
-/// Délai maximal d'établissement, imposé par le document d'architecture (§5.5).
-/// Jamais d'attente indéfinie, jamais de roue qui tourne sans fin.
-pub const DELAI_ETABLISSEMENT: Duration = Duration::from_secs(25);
+use crate::cmd_compte::{avertissement_consommation, causes_d_un_depot_refuse, config_et_coffre, message_utilisateur};
+use crate::cmd_encode::{Source, TextureSynthetique};
 
-/// En-tête préfixé à chaque MORCEAU de message envoyé : 8 octets
-/// d'horodatage (microsecondes depuis l'époque Unix, horloge **système** —
-/// pas `Instant`, propre à un seul processus) puis 1 octet drapeau (non nul
-/// = premier morceau d'une image encodée).
-///
-/// Les deux bords tournent sur la même machine pendant ce spike, donc
-/// l'horloge système est directement comparable entre eux — c'est ce qui
-/// permet au spectateur de mesurer un temps de transit, et à nous de calculer
-/// un RTT quand il nous renvoie l'horodatage tel quel dans son retour.
-///
-/// Ce préfixe ne quitte jamais le processus spectateur : `cmd_view` l'ôte
-/// avant d'écrire quoi que ce soit dans `recu.h265`, qui reste un flux HEVC
-/// brut, structurellement valide pour `ffprobe` — le découpage en morceaux
-/// est un détail de transport, invisible dans le fichier écrit.
-pub(crate) const EN_TETE_MORCEAU: usize = 9;
-
-/// Taille maximale de la charge utile d'un morceau — reprend la taille de
-/// message (1200 octets) avec laquelle la Tâche 7 a mesuré un débit soutenu
-/// de 182 à 246 Mbps en boucle locale. Découverte de ce banc de test :
-/// envoyer un paquet NVENC entier en un seul message (jusqu'à ~40 Ko à
-/// 20 Mbps/60 i/s, plafonné par le tampon VBV d'une image) sature le tampon
-/// d'émission de `str0m` de façon soutenue et fait échouer des envois — alors
-/// que des messages de cette taille-ci s'écoulent sans accroc. Chaque paquet
-/// NVENC est donc redécoupé ici ; le spectateur ne fait que recoller les
-/// morceaux dans l'ordre, le flux Annex B écrit sur disque est identique.
-pub(crate) const TAILLE_MORCEAU_PAYLOAD: usize = 1200 - EN_TETE_MORCEAU;
-
-/// Granularité à laquelle le lien est servi pendant les attentes de la
-/// boucle principale (cadence FPS, capture écran, relance d'un envoi en
-/// échec). Découverte de banc de test : un seul sommeil de ~16 ms entre deux
-/// trames (première version de cette boucle) laisse `str0m` sans service
-/// pendant tout ce temps. `str0m` est sans-IO : ses accusés de réception ne
-/// sont traités que lorsqu'on l'interroge, et son contrôle de flux SCTP a
-/// besoin d'un service bien plus fréquent que 60 Hz pour garder sa fenêtre
-/// ouverte. Mesuré avant correction : RTT médian ~1,1 s et ~27 % d'échecs
-/// d'envoi à 20 Mbps en boucle locale — un artefact du banc de test, pas du
-/// réseau. Avec un service toutes les millisecondes, ces deux chiffres
-/// retombent à des valeurs de boucle locale plausibles (voir le rapport).
-const GRANULARITE_SERVICE_RESEAU: Duration = Duration::from_millis(1);
-
-/// Budget de relance pour un morceau déjà encodé qui échoue à partir — voir
-/// `envoyer_ou_abandonner`. Généreux par rapport aux quelques millisecondes
-/// de résorption observées en boucle locale une fois les morceaux réduits à
-/// `TAILLE_MORCEAU_PAYLOAD` : ce budget n'est atteint qu'en cas de congestion
-/// soutenue et anormale.
-const BUDGET_RETRY_ENVOI: Duration = Duration::from_millis(300);
-
-pub(crate) fn epoch_us() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64
-}
-
-/// Paramètres de la chaîne complète. Regroupés dans une struct plutôt qu'une
-/// longue liste d'arguments positionnels — `run` n'est appelée que depuis
-/// `main.rs`, mais sept `u32`/`usize` à la file seraient une source d'erreur
-/// silencieuse à l'appel.
+/// Paramètres de la chaîne complète (inchangés depuis le C2).
 pub struct Parametres {
     pub secondes: u64,
     pub codec: Codec,
@@ -102,543 +30,165 @@ pub struct Parametres {
     pub hauteur_synth: u32,
 }
 
+impl Images for TextureSynthetique {
+    fn prochaine_image(&mut self) -> anyhow::Result<sky_capture::CapturedFrame> {
+        TextureSynthetique::prochaine_image(self)
+    }
+}
+
+fn fabrique_synthetique(device: &ID3D11Device, largeur: u32, hauteur: u32) -> anyhow::Result<Box<dyn Images>> {
+    Ok(Box::new(TextureSynthetique::new(device, largeur, hauteur)?))
+}
+
 pub fn run(p: Parametres) -> anyhow::Result<()> {
-    // Le régulateur est construit AVANT la négociation, et pas au moment où il
-    // servira : il ne dépend que des deux arguments de ligne de commande, et sa
-    // validation de bornes (plancher ≤ plafond) doit échouer tout de suite.
-    // Construit plus bas, un `--floor-mbps 50 --bitrate-mbps 30` n'aurait été
-    // refusé qu'une fois la connexion établie — donc après une attente de
-    // spectateur pouvant durer `FENETRE_HOTE`, pour une faute de frappe visible
-    // sans réseau.
-    //
-    // Le Pacer part au plancher (comportement documenté de `Pacer::new`) : la
-    // cadence effective démarre donc réduite et remonte vers le plafond en
-    // quelques secondes — visible dans l'affichage périodique plus bas.
-    let mut pacer = Pacer::new(p.floor_mbps * 1_000_000, p.bitrate_mbps * 1_000_000)?;
-
-    // Ces commandes synchronisent sans avoir l'usage des enveloppes, et le
-    // serveur efface ce qu'il livre : une demande arrivée pendant qu'elles
-    // tournent serait perdue pour ce partage, sans que rien ne le signale.
-    println!("{}", avertissement_consommation("la demande de ton ami"));
-
     let (config, coffre) = config_et_coffre()?;
-    // Avant tout réseau : sans appareil enregistré, personne ne peut nous
-    // adresser de demande, et `deposer` refuserait la réponse.
-    if coffre.identifiant_appareil().map_err(erreur_compte)?.is_none() {
-        anyhow::bail!(
+    let source = match p.source {
+        Source::Ecran => SourceImages::Ecran,
+        Source::Synthetique => SourceImages::Synthetique {
+            largeur: p.largeur_synth,
+            hauteur: p.hauteur_synth,
+            fabrique: fabrique_synthetique,
+        },
+    };
+    let parametres = ParametresHote {
+        codec: p.codec,
+        plafond_mbps: p.bitrate_mbps,
+        plancher_mbps: p.floor_mbps,
+        moniteur: p.monitor,
+        source,
+        duree_max: Some(Duration::from_secs(p.secondes)),
+    };
+    // Jamais demandé : `host` s'arrête à `--seconds`, comme au C2.
+    let arret = Arret::nouveau();
+    let fin = heberger(
+        &config,
+        &coffre,
+        |precedent| synchroniser(&config, &coffre, precedent),
+        parametres,
+        &arret,
+        &mut |evenement| afficher(&lignes_hote(&evenement)),
+    )
+    .map_err(erreur_partage)?;
+    afficher_fin(fin, p.floor_mbps, p.bitrate_mbps)
+}
+
+pub(crate) fn afficher(lignes: &[String]) {
+    for ligne in lignes {
+        println!("{ligne}");
+    }
+    std::io::stdout().flush().ok();
+}
+
+/// Les lignes du C2, pour chaque événement de l'hôte.
+pub(crate) fn lignes_hote(evenement: &Evenement) -> Vec<String> {
+    match evenement {
+        // `Pret` suit la validation des bornes du Pacer, comme l'avertissement
+        // au C2. `config_et_coffre`, appelé avant, ne peut pas échouer
+        // (`Config::depuis_env`, `Coffre::nouveau`) : l'ordre affiché est
+        // celui du C2 dans tous les cas.
+        Evenement::Pret => vec![avertissement_consommation("la demande de ton ami")],
+        Evenement::Disponible { fenetre } => vec![format!(
+            "En attente de la demande d'un ami, pendant {} minutes au maximum...",
+            fenetre.as_secs() / 60
+        )],
+        Evenement::EchecLocal { raison } => vec![message_echec_local(raison)],
+        Evenement::DemandeEcartee { raison } => vec![format!("  Demande écartée : {raison}")],
+        Evenement::DemandeRecue { apres, synchronisations, .. } => vec![format!(
+            "Demande reçue après {} s ({synchronisations} synchronisations).",
+            apres.as_secs()
+        )],
+        Evenement::Negociation => vec!["Réponse envoyée. Négociation en cours...".to_string()],
+        Evenement::Connecte { en, .. } => vec![format!("CONNECTÉ en {:.1} s", en.as_secs_f32())],
+        Evenement::Diffusion { largeur, hauteur, codec, plancher_mbps, plafond_mbps } => vec![format!(
+            "\nRésolution {largeur}x{hauteur}, {}, plancher {plancher_mbps} Mbps, plafond {plafond_mbps} Mbps.\n",
+            codec.label()
+        )],
+        Evenement::Mesures(Mesures::Envoi { debit_mbps, cible_mbps, images_sautees, rtt_ms }) => vec![format!(
+            "  {debit_mbps:.1} Mbps envoyés | cible pacer {cible_mbps:.1} Mbps | {images_sautees} images sautées cumulées | RTT {rtt_ms:.1} ms"
+        )],
+        // Événements du spectateur : `heberger` ne les émet jamais.
+        Evenement::DemandeEnvoyee { .. } | Evenement::ReponseRecue { .. } | Evenement::Mesures(Mesures::Reception { .. }) => {
+            Vec::new()
+        }
+    }
+}
+
+fn afficher_fin(fin: Fin, plancher: u32, plafond: u32) -> anyhow::Result<()> {
+    match fin {
+        Fin::AucunAppareilLocal => anyhow::bail!(
             "aucun appareil enregistré sur cette machine — lance d'abord \
              `sky-probe device register <nom>`."
-        );
-    }
-    let identite = coffre.identite().map_err(erreur_compte)?;
-
-    println!(
-        "En attente de la demande d'un ami, pendant {} minutes au maximum...",
-        FENETRE_HOTE.as_secs() / 60
-    );
-    std::io::stdout().flush().ok();
-
-    let debut_attente = Instant::now();
-    let mut synchronisations = 0u32;
-    let mut horloge = HorlogeReelle::demarrer();
-    let retenue = interroger(
-        None,
-        |precedent| {
-            synchronisations += 1;
-            synchroniser(&config, &coffre, precedent)
-        },
-        |etat| {
-            // Recevable ne veut pas dire utilisable : si `repondant` refuse le
-            // SDP, on essaie l'offre suivante sans interrompre l'attente. Son
-            // message d'erreur est rédigé sans adresse (`link.rs`).
-            for offre in offres_recevables(etat, relever(etat, &identite)) {
-                match PeerLink::repondant(Identity::generate(), &offre.texte) {
-                    Ok((link, reponse)) => return Some((link, reponse, offre.destinataire)),
-                    Err(e) => {
-                        let message = e.to_string();
-                        if echec_local(&message) {
-                            // La cause vient de CETTE machine (réseau, port UDP) —
-                            // pas de l'offre de l'ami. La dire « écartée » ferait
-                            // porter à tort la faute à l'ami.
-                            //
-                            // Et RIEN n'est retenté : le serveur a effacé l'offre en
-                            // la livrant, `interroger` ne présente chaque état
-                            // qu'une fois, et la synchronisation suivante rend des
-                            // enveloppes vidées. Promettre une nouvelle tentative
-                            // ferait attendre les deux côtés pour rien — l'ami
-                            // lirait « n'a pas répondu » et chercherait la faute
-                            // chez lui (revue finale, I2).
-                            println!("{}", message_echec_local(&message));
-                        } else {
-                            println!("  Demande écartée : {message}");
-                        }
-                    }
-                }
-            }
-            None
-        },
-        &mut horloge,
-        CADENCE,
-        FENETRE_HOTE,
-    )
-    .map_err(erreur_compte)?;
-
-    let Some((mut link, reponse, destinataire)) = retenue else {
-        println!(
+        ),
+        Fin::AucuneDemande => println!(
             "Aucune demande reçue en {} minutes. Relance `sky-probe host` quand ton ami est prêt.",
             FENETRE_HOTE.as_secs() / 60
-        );
-        return Ok(());
-    };
-    println!(
-        "Demande reçue après {} s ({synchronisations} synchronisations).",
-        debut_attente.elapsed().as_secs()
-    );
-
-    // Le bloc part tel quel : `repondant` a déjà comprimé puis scellé le SDP
-    // pour la clé éphémère de l'offre. L'enveloppe, elle, est scellée par
-    // `deposer` pour la clé d'ANNUAIRE de l'appareil expéditeur — voir
-    // `rendez_vous::destinataire_de_la_reponse`.
-    let deposes = deposer(&config, &coffre, std::slice::from_ref(&destinataire), reponse.as_bytes())
-        .map_err(erreur_compte)?;
-    if deposes == 0 {
-        println!("Le serveur a refusé la réponse : rien n'a été envoyé.");
-        println!("{}", causes_d_un_depot_refuse());
-        return Ok(());
+        ),
+        Fin::ReponseRefusee => {
+            println!("Le serveur a refusé la réponse : rien n'a été envoyé.");
+            println!("{}", causes_d_un_depot_refuse());
+        }
+        Fin::NegociationRompue(raison) => println!("ÉCHEC : {raison}"),
+        Fin::EtablissementEchoue(diagnostic) => afficher_diagnostic(&diagnostic),
+        Fin::LienTombe(raison) => println!("\nÉCHEC : {raison}"),
+        Fin::TamponSature { morceau, morceaux } => println!(
+            "\nÉCHEC : tampon d'émission saturé plus de {} ms \
+             (morceau {morceau}/{morceaux}) — arrêt pour ne pas \
+             produire un flux corrompu.",
+            BUDGET_RETRY_ENVOI.as_millis(),
+        ),
+        Fin::DureeEcoulee(bilan) => {
+            if let Bilan::Envoi(b) = *bilan {
+                afficher_bilan(&b, plancher, plafond);
+            }
+        }
+        // `host` ne demande jamais l'arrêt ; les autres fins sont celles du spectateur.
+        Fin::Arrete | Fin::AucunAppareilChezLAmi { .. } | Fin::DemandeRefusee { .. } | Fin::PasDeReponse { .. } => {}
     }
+    Ok(())
+}
 
-    println!("Réponse envoyée. Négociation en cours...");
-    std::io::stdout().flush().ok();
-
-    // Côté répondant, les adresses du spectateur sont connues depuis l'offre :
-    // le battement perce notre box vers elles jusqu'à l'établissement, le temps
-    // que le spectateur relève la réponse à sa prochaine synchronisation.
-    let garde = link.maintenir_mapping()?;
-    let Some(duree) = etablir(&mut link)? else {
-        return Ok(());
-    };
-    drop(garde);
-    println!("CONNECTÉ en {:.1} s", duree.as_secs_f32());
-
-    // --- Capture : écran réel, ou texture synthétique déterministe (Q4). ---
-    // La texture synthétique est celle de la Tâche 3/cmd_encode : construite
-    // sur le même device D3D11 que la capture, NVENC n'y voit aucune
-    // différence avec une vraie image. Sur un écran figé, WGC ne livre presque
-    // aucune image et la mesure de charge serait flatteuse sans être fausse —
-    // d'où le choix de mesurer Q4 sur cette source, documenté dans le rapport.
-    let mut cap = WgcCapture::new(p.monitor, None)?;
-    let (largeur, hauteur, mut synth) = match p.source {
-        Source::Ecran => {
-            let attente_max = Instant::now() + Duration::from_secs(5);
-            let premiere = loop {
-                if let Some(f) = cap.next_frame(Duration::from_millis(200))? {
-                    break f;
-                }
-                if Instant::now() >= attente_max {
-                    anyhow::bail!("aucune image capturée en 5 s — l'écran est-il figé ?");
-                }
-            };
-            (premiere.width, premiere.height, None)
-        }
-        Source::Synthetique => {
-            let s = TextureSynthetique::new(cap.d3d_device(), p.largeur_synth, p.hauteur_synth)?;
-            (p.largeur_synth, p.hauteur_synth, Some(s))
-        }
-    };
-
-    let mut enc = NvencEncoder::new(
-        cap.d3d_device(),
-        p.codec,
-        largeur,
-        hauteur,
-        FPS,
-        p.bitrate_mbps * 1_000_000,
-    )?;
-
-    println!(
-        "\nRésolution {largeur}x{hauteur}, {}, plancher {} Mbps, plafond {} Mbps.\n",
-        p.codec.label(),
-        p.floor_mbps,
-        p.bitrate_mbps
-    );
-    std::io::stdout().flush().ok();
-
-    let t0 = Instant::now();
-    let fin = t0 + Duration::from_secs(p.secondes);
-    let periode = Duration::from_micros(1_000_000 / FPS as u64);
-    let mut prochaine_image = Instant::now();
-
-    // Jetons du régulateur de débit, en octets. Rechargés à chaque tour au
-    // rythme de `pacer.target_bps()`, jamais dépensés par un paquet déjà
-    // produit : voir le commentaire dans la boucle.
-    let mut budget_octets = 0.0f64;
-    let mut dernier_budget = Instant::now();
-
-    let mut envoyes_octets = 0u64;
-    let mut images_encodees = 0u64;
-    let mut images_sautees = 0u64;
-    let mut retours = 0u64;
-    let mut echecs_send = 0u64;
-    let mut tentatives_send = 0u64;
-    // Durée de chaque appel à `NvencEncoder::encode` (mesurée par la Tâche 3,
-    // couvre enregistrement/mappage/encodage/démappage/désenregistrement) :
-    // composante de la latence de bout en bout, rapportée en médiane/p99.
-    let mut echantillons_encode_us: Vec<u64> = Vec::new();
-
-    let mut dernier_rtt_ms: f64 = 0.0;
-    let mut echantillons_rtt: Vec<f64> = Vec::new();
-
-    let mut dernier_feedback = Instant::now();
-    let mut fenetre_tentatives = 0u64;
-    let mut fenetre_echecs = 0u64;
-
-    let mut dernier_affichage = Instant::now();
-    let mut octets_precedent = 0u64;
-
-    while Instant::now() < fin {
-        // 1. Recharger le budget, plafonné à 250 ms de crédit : une pause ne
-        //    doit pas ensuite autoriser une rafale qui viderait le plancher.
-        let maintenant = Instant::now();
-        let dt = maintenant.duration_since(dernier_budget).as_secs_f64();
-        dernier_budget = maintenant;
-        budget_octets += dt * pacer.target_bps() as f64 / 8.0;
-        budget_octets = budget_octets.min(pacer.target_bps() as f64 / 8.0 * 0.25);
-
-        // 2. Image suivante : rythmée à FPS pour la source synthétique ;
-        //    WGC ne livre une image que si le contenu de l'écran a changé.
-        //    Le lien est servi PENDANT l'attente, pas seulement après.
-        let image = match &mut synth {
-            Some(s) => {
-                loop {
-                    let m = Instant::now();
-                    if m >= prochaine_image {
-                        break;
-                    }
-                    if let Some(raison) = servir_reseau(
-                        &mut link,
-                        &mut retours,
-                        &mut dernier_rtt_ms,
-                        &mut echantillons_rtt,
-                    )? {
-                        println!("\nÉCHEC : {raison}");
-                        return Ok(());
-                    }
-                    std::thread::sleep(
-                        GRANULARITE_SERVICE_RESEAU
-                            .min(prochaine_image.saturating_duration_since(m)),
-                    );
-                }
-                prochaine_image += periode;
-                Some(s.prochaine_image()?)
-            }
-            None => {
-                let mut trouvee = None;
-                let echeance = Instant::now() + Duration::from_millis(50);
-                while Instant::now() < echeance {
-                    if let Some(raison) = servir_reseau(
-                        &mut link,
-                        &mut retours,
-                        &mut dernier_rtt_ms,
-                        &mut echantillons_rtt,
-                    )? {
-                        println!("\nÉCHEC : {raison}");
-                        return Ok(());
-                    }
-                    if let Some(f) = cap.next_frame(GRANULARITE_SERVICE_RESEAU)? {
-                        trouvee = Some(f);
-                        break;
-                    }
-                }
-                trouvee
-            }
-        };
-
-        if let Some(image) = image {
-            if budget_octets < 0.0 {
-                // Budget épuisé : on saute la CAPTURE→ENCODAGE, jamais un
-                // paquet déjà produit. NVENC chaîne ses images P sur la
-                // dernière qu'il a réellement encodée (GOP infini,
-                // frameIntervalP = 1) ; jeter un paquet après coup casserait
-                // cette chaîne et rendrait indécodable tout ce qui suit.
-                // Sauter l'image en amont laisse le flux envoyé parfaitement
-                // cohérent — seule la cadence baisse.
-                images_sautees += 1;
-            } else if let Some(pkt) = enc.encode(&image)? {
-                images_encodees += 1;
-                budget_octets -= pkt.data.len() as f64;
-                echantillons_encode_us.push(pkt.encode_us);
-
-                // Redécoupé en morceaux de ≤ TAILLE_MORCEAU_PAYLOAD (voir la
-                // doc de la constante) : un seul message pour tout le paquet
-                // NVENC sature le tampon d'émission de `str0m` à ce débit.
-                let horodatage = epoch_us();
-                let nb_morceaux = pkt.data.chunks(TAILLE_MORCEAU_PAYLOAD).count().max(1);
-                for (i, morceau) in pkt.data.chunks(TAILLE_MORCEAU_PAYLOAD).enumerate() {
-                    let mut charge = Vec::with_capacity(EN_TETE_MORCEAU + morceau.len());
-                    charge.extend_from_slice(&horodatage.to_le_bytes());
-                    charge.push(if i == 0 { 1 } else { 0 });
-                    charge.extend_from_slice(morceau);
-
-                    tentatives_send += 1;
-                    match envoyer_ou_abandonner(
-                        &mut link,
-                        &charge,
-                        &mut envoyes_octets,
-                        &mut echecs_send,
-                        &mut fenetre_tentatives,
-                        &mut fenetre_echecs,
-                        &mut retours,
-                        &mut dernier_rtt_ms,
-                        &mut echantillons_rtt,
-                    )? {
-                        ResultatEnvoi::Envoye => {}
-                        ResultatEnvoi::Abandonne => {
-                            println!(
-                                "\nÉCHEC : tampon d'émission saturé plus de {} ms \
-                                 (morceau {}/{nb_morceaux}) — arrêt pour ne pas \
-                                 produire un flux corrompu.",
-                                BUDGET_RETRY_ENVOI.as_millis(),
-                                i + 1,
-                            );
-                            return Ok(());
-                        }
-                        ResultatEnvoi::LienTombe(raison) => {
-                            println!("\nÉCHEC : {raison}");
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Un dernier service réseau après l'encodage/envoi : capte au plus
-        //    tôt le retour que notre propre envoi vient de déclencher. Voir
-        //    `servir_reseau` — c'est elle qui prouve le sens inverse et tire
-        //    un RTT réel de l'horodatage renvoyé par le spectateur.
-        if let Some(raison) = servir_reseau(
-            &mut link,
-            &mut retours,
-            &mut dernier_rtt_ms,
-            &mut echantillons_rtt,
-        )? {
-            println!("\nÉCHEC : {raison}");
-            return Ok(());
-        }
-
-        // 4. Nourrir le régulateur de débit à ~10 Hz.
-        if dernier_feedback.elapsed() >= Duration::from_millis(100) {
-            let perte_pct = if fenetre_tentatives > 0 {
-                fenetre_echecs as f32 / fenetre_tentatives as f32 * 100.0
-            } else {
-                0.0
-            };
-            pacer.on_feedback(
-                perte_pct,
-                dernier_rtt_ms.round() as u32,
-                dernier_feedback.elapsed(),
-            );
-            fenetre_tentatives = 0;
-            fenetre_echecs = 0;
-            dernier_feedback = Instant::now();
-        }
-
-        // 5. Affichage périodique — utile pour observer la remontée du
-        //    plancher vers le plafond en l'absence de congestion.
-        if dernier_affichage.elapsed() >= Duration::from_secs(1) {
-            let delta = envoyes_octets - octets_precedent;
-            let ecoule = dernier_affichage.elapsed().as_secs_f64();
-            println!(
-                "  {:.1} Mbps envoyés | cible pacer {:.1} Mbps | {images_sautees} images sautées cumulées | RTT {dernier_rtt_ms:.1} ms",
-                delta as f64 * 8.0 / ecoule / 1e6,
-                pacer.target_bps() as f64 / 1e6,
-            );
-            std::io::stdout().flush().ok();
-            octets_precedent = envoyes_octets;
-            dernier_affichage = Instant::now();
-        }
-    }
-
-    let ecoule = t0.elapsed().as_secs_f64();
-    echantillons_rtt.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    echantillons_encode_us.sort_unstable();
-
+/// Le résumé de fin de `run` au C2, lu dans le bilan de `heberger`.
+fn afficher_bilan(b: &BilanEnvoi, plancher: u32, plafond: u32) {
     println!("\n--- Résumé de la chaîne complète (Q4) ---");
-    println!("Durée              : {ecoule:.1} s");
-    println!("Images encodées    : {images_encodees}");
-    println!("Images sautées     : {images_sautees} (régulation du débit)");
-    if !echantillons_encode_us.is_empty() {
-        println!(
-            "Encodage médian/p99: {:.2} ms / {:.2} ms  ({} échantillons)",
-            percentile_u64(&echantillons_encode_us, 50) as f64 / 1000.0,
-            percentile_u64(&echantillons_encode_us, 99) as f64 / 1000.0,
-            echantillons_encode_us.len()
-        );
+    println!("Durée              : {:.1} s", b.duree_s);
+    println!("Images encodées    : {}", b.images_encodees);
+    println!("Images sautées     : {} (régulation du débit)", b.images_sautees);
+    if let Some(q) = &b.encodage_ms {
+        println!("Encodage médian/p99: {:.2} ms / {:.2} ms  ({} échantillons)", q.p50, q.p99, q.echantillons);
     }
     println!(
         "Débit soutenu      : {:.1} Mbps ({} Mo envoyés)",
-        envoyes_octets as f64 * 8.0 / ecoule / 1e6,
-        envoyes_octets / 1_000_000
+        b.envoyes_octets as f64 * 8.0 / b.duree_s / 1e6,
+        b.envoyes_octets / 1_000_000
     );
     println!(
         "Cible finale pacer : {:.1} Mbps (plancher {}, plafond {})",
-        pacer.target_bps() as f64 / 1e6,
-        p.floor_mbps,
-        p.bitrate_mbps
+        b.cible_finale_bps as f64 / 1e6,
+        plancher,
+        plafond
     );
-    println!("Retours reçus      : {retours}");
-    println!("Échecs d'envoi     : {echecs_send} / {tentatives_send}");
-    if echantillons_rtt.is_empty() {
-        println!("RTT                : non mesuré (aucun retour reçu)");
-    } else {
-        println!(
+    println!("Retours reçus      : {}", b.retours);
+    println!("Échecs d'envoi     : {} / {}", b.echecs_envoi, b.tentatives_envoi);
+    match &b.rtt_ms {
+        None => println!("RTT                : non mesuré (aucun retour reçu)"),
+        Some(q) => println!(
             "RTT médian / p99   : {:.2} ms / {:.2} ms  ({} échantillons)",
-            percentile_f64(&echantillons_rtt, 50),
-            percentile_f64(&echantillons_rtt, 99),
-            echantillons_rtt.len()
-        );
+            q.p50, q.p99, q.echantillons
+        ),
     }
     // Ce rappel s'affichait systematiquement, y compris pendant un vrai test
     // entre deux machines. Il faisait passer des mesures reseau reelles pour des
     // mesures en memoire — exactement le genre d'affirmation non verifiee qui
     // fait chercher au mauvais endroit. On regarde desormais si le pair a ete
     // joint par une adresse publique.
-    let (_, vers_internet) = link.destinations();
-    if vers_internet == 0 {
+    if b.vers_internet == 0 {
         println!("Rappel : aucun paquet n'est parti vers internet — lien local.");
         println!("Ce debit et ce RTT mesurent le chiffrement et le transport en");
         println!("memoire, pas un reseau.");
     } else {
-        println!("Lien reseau reel : {vers_internet} paquets emis vers internet.");
+        println!("Lien reseau reel : {} paquets emis vers internet.", b.vers_internet);
         println!("Ce debit et ce RTT sont ceux d'une vraie liaison entre deux machines.");
     }
-    Ok(())
-}
-
-/// Un tour de service réseau : vide un événement de `link`, compte les
-/// retours et met à jour l'échantillon de RTT (l'horodatage que le
-/// spectateur renvoie tel quel). Factorisée parce qu'elle est appelée à
-/// plusieurs points de la boucle principale — voir `GRANULARITE_SERVICE_RESEAU`
-/// pour pourquoi la fréquence d'appel compte ici.
-///
-/// Rend `Some(raison)` si le lien est tombé ; l'appelant doit alors arrêter.
-fn servir_reseau(
-    link: &mut PeerLink,
-    retours: &mut u64,
-    dernier_rtt_ms: &mut f64,
-    echantillons_rtt: &mut Vec<f64>,
-) -> anyhow::Result<Option<String>> {
-    match link.poll()? {
-        LinkEvent::Data(d) => {
-            *retours += 1;
-            if let Ok(brut) = <[u8; 8]>::try_from(d.as_slice()) {
-                let echo = u64::from_le_bytes(brut);
-                let maintenant_us = epoch_us();
-                if maintenant_us >= echo {
-                    let rtt_ms = (maintenant_us - echo) as f64 / 1000.0;
-                    *dernier_rtt_ms = rtt_ms;
-                    echantillons_rtt.push(rtt_ms);
-                }
-            }
-            Ok(None)
-        }
-        LinkEvent::Failed(raison) => Ok(Some(raison)),
-        _ => Ok(None),
-    }
-}
-
-/// Issue d'une tentative d'envoi d'un morceau déjà encodé.
-enum ResultatEnvoi {
-    /// Parti — au premier coup ou après relance.
-    Envoye,
-    /// Le tampon d'émission est resté plein au-delà de `BUDGET_RETRY_ENVOI`.
-    Abandonne,
-    /// Le lien est tombé pendant l'attente ; raison déjà rédigée pour
-    /// l'utilisateur, sans adresse.
-    LienTombe(String),
-}
-
-/// Envoie un morceau déjà découpé, en relançant tant que le tampon
-/// d'émission est plein, jusqu'à `BUDGET_RETRY_ENVOI`. Sert le lien entre
-/// chaque tentative (`servir_reseau`) : c'est ce service qui vide le tampon
-/// en traitant les accusés de réception de `str0m`.
-///
-/// Un morceau déjà encodé DOIT partir : NVENC vient de chaîner l'image dont
-/// il fait partie sur la dernière qu'il a réellement encodée (GOP infini,
-/// frameIntervalP = 1), et sous ce régime aucune image de référence ne
-/// revient jamais. L'abandonner silencieusement casserait cette chaîne pour
-/// tout le reste du flux — c'est précisément ce qu'a révélé un premier essai
-/// de ce banc de test : ffprobe rapportait des « ref POC introuvable » en
-/// cascade dès le premier échec d'envoi ignoré. D'où la relance, et l'arrêt
-/// propre plutôt qu'une mesure sur un flux qu'on sait corrompu.
-#[allow(clippy::too_many_arguments)]
-fn envoyer_ou_abandonner(
-    link: &mut PeerLink,
-    charge: &[u8],
-    envoyes_octets: &mut u64,
-    echecs_send: &mut u64,
-    fenetre_tentatives: &mut u64,
-    fenetre_echecs: &mut u64,
-    retours: &mut u64,
-    dernier_rtt_ms: &mut f64,
-    echantillons_rtt: &mut Vec<f64>,
-) -> anyhow::Result<ResultatEnvoi> {
-    let debut = Instant::now();
-    let mut retente = false;
-    loop {
-        match link.send(charge) {
-            Ok(()) => {
-                *envoyes_octets += charge.len() as u64;
-                if retente {
-                    // Congestion réelle, résorbée : signal légitime pour le
-                    // Pacer, même si le morceau est finalement parti.
-                    *echecs_send += 1;
-                    *fenetre_echecs += 1;
-                }
-                *fenetre_tentatives += 1;
-                // `link.send` ne fait que déposer le morceau dans le tampon
-                // interne de `str0m` : les octets ne partent réellement sur
-                // le socket que pendant `poll()`. Découverte de banc de test :
-                // sans ce drainage après CHAQUE morceau, une rafale de
-                // plusieurs dizaines de morceaux d'une même image s'empile
-                // sans jamais être poussée sur le fil, jusqu'à saturer le
-                // tampon — RTT en centaines de ms puis échec, en boucle
-                // locale. Un morceau parti selon `str0m` n'est pas encore un
-                // morceau émis sur le réseau.
-                if let Some(raison) =
-                    servir_reseau(link, retours, dernier_rtt_ms, echantillons_rtt)?
-                {
-                    return Ok(ResultatEnvoi::LienTombe(raison));
-                }
-                return Ok(ResultatEnvoi::Envoye);
-            }
-            Err(_) if debut.elapsed() < BUDGET_RETRY_ENVOI => {
-                retente = true;
-                if let Some(raison) =
-                    servir_reseau(link, retours, dernier_rtt_ms, echantillons_rtt)?
-                {
-                    return Ok(ResultatEnvoi::LienTombe(raison));
-                }
-                std::thread::sleep(GRANULARITE_SERVICE_RESEAU);
-            }
-            Err(_) => return Ok(ResultatEnvoi::Abandonne),
-        }
-    }
-}
-
-fn percentile_f64(tries: &[f64], p: usize) -> f64 {
-    if tries.is_empty() {
-        return 0.0;
-    }
-    let idx = (tries.len() * p / 100).min(tries.len() - 1);
-    tries[idx]
-}
-
-fn percentile_u64(tries: &[u64], p: usize) -> u64 {
-    if tries.is_empty() {
-        return 0;
-    }
-    let idx = (tries.len() * p / 100).min(tries.len() - 1);
-    tries[idx]
 }
 
 /// Message affiché quand `repondant` échoue pour une cause LOCALE (réseau, port
@@ -663,36 +213,11 @@ pub(crate) fn erreur_compte(erreur: ErreurCompte) -> anyhow::Error {
     anyhow::anyhow!(message_utilisateur(&erreur))
 }
 
-/// Boucle jusqu'à ce que le canal de données soit utilisable, ou renonce.
-///
-/// Partagée avec `cmd_view` : les deux bords appliquent exactement le même
-/// délai et le même diagnostic. Rend `None` quand la tentative a échoué — le
-/// message a déjà été affiché.
-///
-/// Aucune adresse n'est affichée : les diagnostics parlent de causes, jamais
-/// de machines.
-pub fn etablir(link: &mut PeerLink) -> anyhow::Result<Option<Duration>> {
-    let debut = Instant::now();
-    loop {
-        match link.poll()? {
-            LinkEvent::Failed(raison) => {
-                println!("ÉCHEC : {raison}");
-                return Ok(None);
-            }
-            LinkEvent::Connected | LinkEvent::Data(_) | LinkEvent::Idle => {}
-        }
-
-        // Le canal de données, pas seulement ICE : c'est lui qui transporte.
-        if link.canal_ouvert() {
-            return Ok(Some(debut.elapsed()));
-        }
-
-        if debut.elapsed() > DELAI_ETABLISSEMENT {
-            diagnostiquer(link);
-            return Ok(None);
-        }
-
-        std::thread::sleep(Duration::from_millis(1));
+/// `ErreurPartage` → l'erreur que `host`/`view` rendaient au C2.
+pub(crate) fn erreur_partage(e: ErreurPartage) -> anyhow::Error {
+    match e {
+        ErreurPartage::Compte(c) => erreur_compte(c),
+        ErreurPartage::Autre(a) => a,
     }
 }
 
@@ -703,26 +228,26 @@ pub fn etablir(link: &mut PeerLink) -> anyhow::Result<Option<Duration>> {
 /// qui le suit. Ce sont deux verdicts opposés pour la question centrale du
 /// jalon, et c'est ce message qui sera consigné comme réponse. Il doit donc
 /// distinguer les deux, et dire quand il n'est pas sûr de lui.
-fn diagnostiquer(link: &PeerLink) {
-    if link.is_connected() {
+pub(crate) fn afficher_diagnostic(d: &Diagnostic) {
+    if d.ice_connecte {
         println!(
             "ÉCHEC : le canal de données ne s'est pas ouvert en {} s.",
-            DELAI_ETABLISSEMENT.as_secs()
+            d.delai.as_secs()
         );
         println!("ATTENTION : la traversée de NAT n'est PAS en cause. Les deux machines");
         println!("se sont bel et bien trouvées — c'est la poignée de main chiffrée");
         println!("(DTLS/SCTP) qui n'a pas abouti. À ne pas compter comme un échec Q5.");
     } else {
-        let (emis, recus, erreurs) = link.trafic();
+        let (emis, recus, erreurs) = (d.emis, d.recus, d.erreurs);
         println!(
             "ÉCHEC : aucune connexion directe en {} s.",
-            DELAI_ETABLISSEMENT.as_secs()
+            d.delai.as_secs()
         );
         println!();
         println!("  Datagrammes émis   : {emis}");
         println!("  Datagrammes reçus  : {recus}");
         println!("  Erreurs de socket  : {erreurs}");
-        let (prive, public) = link.destinations();
+        let (prive, public) = (d.vers_local, d.vers_internet);
         println!("  dont vers reseau local : {prive}");
         println!("  dont vers internet     : {public}");
         println!();
@@ -749,7 +274,7 @@ fn diagnostiquer(link: &PeerLink) {
         }
     }
 
-    let erreurs = link.erreurs_socket();
+    let erreurs = d.erreurs_socket;
     if erreurs > 0 {
         println!();
         println!("Réserve : {erreurs} erreur(s) sur le port UDP local pendant la tentative.");
@@ -774,5 +299,30 @@ mod tests {
         for promesse in ["nouvelle tentative", "prochain sondage", "retent", "réessa"] {
             assert!(!minuscule.contains(promesse), "le message promet une reprise : « {promesse} »");
         }
+    }
+
+    #[test]
+    fn la_ligne_de_mesure_de_l_hote_est_celle_du_c2() {
+        let lignes = lignes_hote(&Evenement::Mesures(Mesures::Envoi {
+            debit_mbps: 12.34,
+            cible_mbps: 20.0,
+            images_sautees: 3,
+            rtt_ms: 85.24,
+        }));
+        assert_eq!(
+            lignes,
+            vec!["  12.3 Mbps envoyés | cible pacer 20.0 Mbps | 3 images sautées cumulées | RTT 85.2 ms".to_string()]
+        );
+    }
+
+    #[test]
+    fn la_demande_recue_affiche_des_secondes_entieres() {
+        // C2 : `debut_attente.elapsed().as_secs()`, pas une décimale.
+        let lignes = lignes_hote(&Evenement::DemandeRecue {
+            expediteur_device_id: 4,
+            apres: Duration::from_millis(12_900),
+            synchronisations: 7,
+        });
+        assert_eq!(lignes, vec!["Demande reçue après 12 s (7 synchronisations).".to_string()]);
     }
 }

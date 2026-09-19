@@ -10,6 +10,11 @@ anyhow.workspace = true
 sky-compte = { version = "0.0.0", path = "../sky-compte" }
 sky-net = { version = "0.0.0", path = "../sky-net" }
 sky-crypto = { version = "0.0.0", path = "../sky-crypto" }
+sky-capture = { version = "0.0.0", path = "../sky-capture" }
+sky-encode = { version = "0.0.0", path = "../sky-encode" }
+# Seulement pour nommer `ID3D11Device` dans la fabrique de la source
+# synthétique : c'est le device de la capture qui la crée.
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D11"] }
 
 # Les tests du rendez-vous fabriquent des `AppareilDAmi`, dont la clé
 # publique voyage en base64 standard — la forme que rend le site.

@@ -30,7 +30,8 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 
 /// Cadence visée pour la boucle d'encodage. `pub(crate)` : réutilisée par
 /// `cmd_codecs` (Q3) pour que la comparaison tourne à la même cadence.
-pub(crate) const FPS: u32 = 60;
+/// Une seule source : celle de la diffusion (`sky_partage::FPS`).
+pub(crate) const FPS: u32 = sky_partage::FPS;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Source {

@@ -1379,9 +1379,12 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64",
+ "sky-capture",
  "sky-compte",
  "sky-crypto",
+ "sky-encode",
  "sky-net",
+ "windows",
 ]
 
 [[package]]
