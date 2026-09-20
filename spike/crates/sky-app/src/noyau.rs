@@ -388,6 +388,21 @@ impl Noyau {
             let mut d = self.donnees();
             if d.generation != generation {
                 drop(d);
+                // TÂCHE 8, correction héritée de la tâche 7 : c'était la SEULE
+                // des quatre sorties gardées du module à ne pas nettoyer le
+                // coffre. `moi()` passe par `avec_jeton_valide`, qui sur un 401
+                // renouvelle — et `renouveler` (`sky-compte/src/session.rs`)
+                // RANGE les jetons frais. Une déconnexion tombée dans cette
+                // fenêtre laissait donc l'écran sur « Déconnecté » avec un
+                // coffre PLEIN, et `Noyau::nouveau`, qui déduit l'état du seul
+                // `coffre.jetons()`, faisait croire au lancement suivant qu'il
+                // était connecté. Même remède qu'aux trois autres sorties.
+                //
+                // `demarrer` ne rend rien : l'échec de l'oubli passe par
+                // `apres_erreur`, comme celui d'`assurer_appareil` plus bas.
+                if let Err(e) = self.oublier_les_orphelins() {
+                    self.apres_erreur(&e);
+                }
                 self.publier();
                 return;
             }
@@ -431,11 +446,13 @@ impl Noyau {
     /// génération — donc le coffre est à lui, et y toucher effacerait des
     /// jetons valides (ronde de correction 3, Important 2).
     ///
-    /// RONDE DE CORRECTION 4 : ce prédicat est partagé par les TROIS chemins
-    /// qui peuvent laisser des jetons orphelins — `abandonner_connexion`, la
-    /// branche d'échec de `connexion`, et la sortie sur génération changée de
-    /// `synchroniser`. Le dupliquer avait déjà produit deux fois la même
-    /// résurrection.
+    /// RONDE DE CORRECTION 4, corrigée à la TÂCHE 8 : ce prédicat est partagé
+    /// par les QUATRE chemins qui peuvent laisser des jetons orphelins —
+    /// `abandonner_connexion`, la branche d'échec de `connexion`, la sortie sur
+    /// génération changée de `synchroniser`, et celle de `demarrer`. Le compte
+    /// annoncé était « TROIS » : la quatrième sortie existait déjà, mais
+    /// n'appelait rien. Le dupliquer avait déjà produit deux fois la même
+    /// résurrection ; l'oublier une fois en a produit une troisième.
     ///
     /// RONDE DE CORRECTION 5 : la phrase ci-dessus était fausse au moment où
     /// elle a été écrite — la branche d'échec de `connexion` faisait alors un
@@ -1190,6 +1207,79 @@ mod tests {
     }
 
     #[test]
+    fn une_deconnexion_pendant_le_demarrage_ne_laisse_aucun_jeton_dans_le_coffre() {
+        // TÂCHE 8, correction héritée de la tâche 7. `demarrer` détectait bien
+        // la déconnexion survenue pendant `moi()` — c'est la garde que couvre
+        // `une_deconnexion_pendant_le_demarrage_n_affiche_pas_le_nom_discord` —
+        // mais sortait SANS nettoyer le coffre : la seule des quatre sorties
+        // gardées du module à ne pas appeler `oublier_les_orphelins()`.
+        //
+        // L'enchaînement, qui n'a rien d'exotique au lancement :
+        //   `demarrer` appelle `moi()` → 401 (session à renouveler)
+        //   → `avec_jeton_valide` reprend : `renouveler` LIT les jetons, POSTe
+        //   → l'utilisateur clique « Se déconnecter » (coffre vidé, écran
+        //     « Déconnecté »)
+        //   → la réponse du renouvellement arrive et RANGE des jetons FRAIS
+        //     (`sky-compte/src/session.rs`) dans le coffre qu'on vient de vider
+        //   → `moi()` réussit, `demarrer` relit la génération, sort.
+        // Résultat avant la correction : écran « Déconnecté », coffre PLEIN.
+        // `Noyau::nouveau` déduisant l'état du seul `coffre.jetons()`, le
+        // lancement suivant se croyait connecté sous une session quittée.
+        //
+        // CE QUI DISCRIMINE : le COFFRE, et lui seul. L'écran finit sur
+        // « Déconnecté » avec ou sans la correction — c'est précisément ce qui
+        // rendait le défaut invisible.
+        //
+        // Aucune horloge réelle : le point d'arrêt retient la réponse du
+        // renouvellement, ce qui place la déconnexion exactement dans la
+        // fenêtre entre la lecture et le rangement des jetons.
+        //
+        // Neutralisation : retirer le SEUL `oublier_les_orphelins()` de la
+        // sortie sur génération changée de `demarrer` — ce test rougit.
+        let c = contexte_bloquant_avec_renouvellement(
+            "sky-test-app-demarrage-orphelins",
+            "/api/auth/refresh",
+            "/api/auth/me",
+        );
+
+        let noyau_du_fil = Arc::clone(&c.noyau);
+        let fil = std::thread::spawn(move || noyau_du_fil.demarrer());
+
+        // `moi()` a pris son 401 ; le renouvellement est en vol.
+        c.serveur.attendre_la_requete();
+        c.noyau.deconnexion().unwrap();
+        assert!(
+            c.noyau.coffre().jetons().unwrap().is_none(),
+            "la déconnexion a bien vidé le coffre AVANT que le renouvellement ne réponde"
+        );
+
+        c.serveur.liberer_la_reponse();
+        fil.join().expect("le fil de démarrage a paniqué");
+
+        // LE FAIT DANGEREUX D'ABORD.
+        assert!(
+            c.noyau.coffre().jetons().unwrap().is_none(),
+            "les jetons frais rangés par `renouveler` pendant le démarrage sont oubliés : \
+             sinon l'écran dit « Déconnecté » sur un coffre plein, et le lancement suivant \
+             se croit connecté"
+        );
+        assert_eq!(c.noyau.instantane().connexion, Connexion::Deconnecte, "la déconnexion tient");
+
+        // CONTRÔLE POSITIF : sans lui, l'assertion ci-dessus passerait aussi
+        // bien si le renouvellement n'avait JAMAIS eu lieu — un coffre resté
+        // vide la satisfait. La trace des chemins prouve que la reprise sur 401
+        // a bien été jouée, donc que des jetons frais ont bien été rangés dans
+        // l'intervalle. Elle prouve aussi que `demarrer` sort là où on le croit :
+        // ni `/api/sky/devices` ni `/api/sky/sync` ne suivent.
+        assert_eq!(
+            c.serveur.chemins(),
+            vec!["/api/auth/me", "/api/auth/refresh", "/api/auth/me"],
+            "le 401, le renouvellement et la seconde tentative ont bien eu lieu, et \
+             `demarrer` s'est arrêté juste après"
+        );
+    }
+
+    #[test]
     fn une_connexion_qui_echoue_ne_laisse_pas_les_jetons_d_une_connexion_depassee() {
         // RONDE DE CORRECTION 4, constat 1. La branche `EnCours` de
         // `abandonner_connexion` s'appuyait sur « l'autre connexion réglera le
@@ -1278,6 +1368,7 @@ mod tests {
         let c = contexte_bloquant_avec_renouvellement(
             "sky-test-app-renouvellement-en-vol",
             "/api/auth/refresh",
+            "/api/sky/sync",
         );
 
         let noyau_du_fil = Arc::clone(&c.noyau);

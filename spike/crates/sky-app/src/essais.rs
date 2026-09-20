@@ -152,15 +152,21 @@ pub(crate) struct ServeurBloquant {
 
 impl ServeurBloquant {
     pub fn demarrer_en_retenant(chemin_retenu: &str) -> ServeurBloquant {
-        ServeurBloquant::demarrer(chemin_retenu, false)
+        ServeurBloquant::demarrer(chemin_retenu, None)
     }
 
-    /// `refuser_le_premier_sync` : le premier `GET /api/sky/sync` rend 401.
-    /// C'est le seul moyen de déclencher la reprise d'`avec_jeton_valide`
+    /// `chemin_refuse` : la PREMIÈRE requête à ce chemin rend 401. C'est le seul
+    /// moyen de déclencher la reprise d'`avec_jeton_valide`
     /// (`sky-compte/src/session.rs`) — renouvellement, puis seconde tentative —
-    /// et donc de faire ranger des jetons FRAIS dans le coffre pendant qu'une
-    /// synchronisation est en vol (ronde de correction 4, constat 2).
-    pub fn demarrer(chemin_retenu: &str, refuser_le_premier_sync: bool) -> ServeurBloquant {
+    /// et donc de faire ranger des jetons FRAIS dans le coffre pendant qu'un
+    /// appel authentifié est en vol (ronde de correction 4, constat 2).
+    ///
+    /// TÂCHE 8 : le chemin refusé est devenu un paramètre. Le constat 2 le
+    /// posait sur `/api/sky/sync` (une synchronisation en vol) ; la sortie
+    /// gardée de `demarrer` se prend, elle, dans la fenêtre de `moi()`, donc sur
+    /// `/api/auth/me`. Sans ce paramètre, aucun test ne pouvait faire ranger des
+    /// jetons frais pendant un DÉMARRAGE.
+    pub fn demarrer(chemin_retenu: &str, chemin_refuse: Option<&str>) -> ServeurBloquant {
         let ecoute = TcpListener::bind("127.0.0.1:0").expect("socket local");
         let port = ecoute.local_addr().unwrap().port();
         let url = format!("http://127.0.0.1:{port}");
@@ -171,12 +177,13 @@ impl ServeurBloquant {
         let arret = Arc::new(AtomicBool::new(false));
 
         let chemin_retenu = chemin_retenu.to_string();
+        let chemin_refuse = chemin_refuse.map(str::to_string);
         let compteur = Arc::clone(&appareils_crees);
         let journal = Arc::clone(&chemins);
         let arret_du_fil = Arc::clone(&arret);
         let fil = std::thread::spawn(move || {
             let mut deja_retenu = false;
-            let mut premier_sync = true;
+            let mut deja_refuse = false;
             loop {
                 let Ok((mut flux, _)) = ecoute.accept() else { return };
                 if arret_du_fil.load(Ordering::SeqCst) {
@@ -192,7 +199,17 @@ impl ServeurBloquant {
                 // Statut ET phrase de raison : « HTTP/1.1 404 » suivi d'un
                 // espace et de rien du tout n'est pas une ligne de statut
                 // valide (RFC 9112 §4) — ronde de correction 4, constat 5.
-                let (statut, raison, corps) = if chemin.starts_with("/api/sky/devices") {
+                // Le refus vient AVANT le routage : c'est un 401 du serveur,
+                // pas une variante de réponse de la route.
+                let refuse_celle_ci = !deja_refuse
+                    && chemin_refuse.as_deref().is_some_and(|r| chemin.starts_with(r));
+                if refuse_celle_ci {
+                    deja_refuse = true;
+                }
+
+                let (statut, raison, corps) = if refuse_celle_ci {
+                    (401, "Unauthorized", r#"{"error":"session expirée"}"#.to_string())
+                } else if chemin.starts_with("/api/sky/devices") {
                     let n = compteur.fetch_add(1, Ordering::SeqCst) + 1;
                     (201, "Created", format!("{{\"id\":{n}}}"))
                 } else if chemin.starts_with("/api/auth/me") {
@@ -200,12 +217,7 @@ impl ServeurBloquant {
                 } else if chemin.starts_with("/api/auth/refresh") {
                     (200, "OK", RENOUVELLEMENT.to_string())
                 } else if chemin.starts_with("/api/sky/sync") {
-                    if refuser_le_premier_sync && premier_sync {
-                        premier_sync = false;
-                        (401, "Unauthorized", r#"{"error":"session expirée"}"#.to_string())
-                    } else {
-                        (200, "OK", SYNC_COMPLET.to_string())
-                    }
+                    (200, "OK", SYNC_COMPLET.to_string())
                 } else {
                     (404, "Not Found", r#"{"error":"route inconnue du point d'arrêt"}"#.to_string())
                 };
@@ -316,25 +328,28 @@ pub(crate) struct ContexteBloquant {
 /// Un noyau connecté, branché sur `ServeurBloquant`, dont le connecteur n'est
 /// pas utilisé.
 pub(crate) fn contexte_bloquant(prefixe: &str, chemin_retenu: &str) -> ContexteBloquant {
-    contexte_bloquant_avec(prefixe, chemin_retenu, false)
+    contexte_bloquant_avec(prefixe, chemin_retenu, None)
 }
 
-/// Le même, mais le premier `GET /api/sky/sync` est refusé (401) : la reprise
-/// d'`avec_jeton_valide` renouvelle le jeton et le RANGE dans le coffre au
-/// milieu de la synchronisation. C'est le dispositif du constat 2 de la ronde 4.
+/// Le même, mais la première requête à `chemin_refuse` est refusée (401) : la
+/// reprise d'`avec_jeton_valide` renouvelle le jeton et le RANGE dans le coffre
+/// au milieu de l'appel. C'est le dispositif du constat 2 de la ronde 4
+/// (`/api/sky/sync`) et, tâche 8, de la sortie gardée de `demarrer`
+/// (`/api/auth/me`).
 pub(crate) fn contexte_bloquant_avec_renouvellement(
     prefixe: &str,
     chemin_retenu: &str,
+    chemin_refuse: &str,
 ) -> ContexteBloquant {
-    contexte_bloquant_avec(prefixe, chemin_retenu, true)
+    contexte_bloquant_avec(prefixe, chemin_retenu, Some(chemin_refuse))
 }
 
 fn contexte_bloquant_avec(
     prefixe: &str,
     chemin_retenu: &str,
-    refuser_le_premier_sync: bool,
+    chemin_refuse: Option<&str>,
 ) -> ContexteBloquant {
-    let serveur = ServeurBloquant::demarrer(chemin_retenu, refuser_le_premier_sync);
+    let serveur = ServeurBloquant::demarrer(chemin_retenu, chemin_refuse);
     let coffre = Coffre::pour_test(prefixe);
     coffre
         .ranger_jetons(&Jetons {
