@@ -459,6 +459,10 @@ pub struct EtatFaux {
     /// Requêtes reçues sur `/api/sky/friends*` (ajout, acceptation, retrait,
     /// blocage), refusées comprises.
     pub appels_amis: u64,
+
+    /// `?version=` reçu à chaque `GET /api/sky/sync` autorisé, dans l'ordre
+    /// (jalon 1, tâche 7) — prouve qu'un client transmet l'état précédent.
+    pub syncs_recues: Vec<Option<u64>>,
 }
 
 /// Serveur double : un `tiny_http::Server` sur un port éphémère, dans un
@@ -728,6 +732,7 @@ fn gerer_sync(
     if let Some(refus) = autoriser_appel(&mut e, jeton) {
         return refus;
     }
+    e.syncs_recues.push(version_connue);
 
     // VAGUE DE CORRECTION FINALE (I1) : l'appareil COURANT est celui que porte
     // la SESSION de ce jeton (`appareil_de_session`, posé par `gerer_devices`)

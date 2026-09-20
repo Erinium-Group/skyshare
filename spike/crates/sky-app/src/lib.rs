@@ -1,12 +1,35 @@
 //! L'application SkyShare (jalon 1) : la coquille Tauri — fenêtre, icône
 //! près de l'horloge, instance unique, démarrage avec Windows.
 
+pub mod cadence;
+pub mod commandes;
+pub mod coquille;
 pub mod demarrage;
+pub mod materiel;
+pub mod noyau;
+pub mod reveil;
+pub mod vue;
 
+#[cfg(test)]
+mod essais;
+// Le serveur double de `sky-compte`, partagé plutôt que recopié : un second
+// double divergerait du premier, qui est dérivé du code du site.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../sky-compte/tests/faux_serveur/mod.rs"]
+mod faux_serveur;
+
+use std::sync::Arc;
+
+use sky_compte::{Coffre, Config};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WindowEvent};
-use tauri_plugin_autostart::MacosLauncher;
+use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+
+use crate::coquille::CoquilleTauri;
+use crate::noyau::{Branchements, Noyau};
+use crate::reveil::SommeilReel;
 
 /// Identifiant de l'icône près de l'horloge — la tâche 11 la retrouve par lui.
 pub const ID_ICONE: &str = "principal";
@@ -21,21 +44,60 @@ pub fn lancer() {
             MacosLauncher::LaunchAgent,
             Some(vec![demarrage::ARGUMENT_DEMARRAGE]),
         ))
+        .invoke_handler(tauri::generate_handler![
+            commandes::etat_courant,
+            commandes::connexion,
+            commandes::deconnexion,
+        ])
         .setup(move |app| {
             installer_icone(app.handle())?;
             #[cfg(not(debug_assertions))]
             activer_au_premier_lancement(app.handle());
+            let noyau = Arc::new(Noyau::nouveau(
+                Config::depuis_env(),
+                Coffre::nouveau()?,
+                Branchements {
+                    coquille: Box::new(CoquilleTauri::nouvelle(app.handle().clone())),
+                    connecter: Box::new(sky_compte::connecter),
+                    nom_machine: std::env::var("COMPUTERNAME").ok(),
+                },
+            ));
+            noyau.definir_demarrage_automatique_connu(app.autolaunch().is_enabled().unwrap_or(false));
+            noyau.definir_visible(!au_demarrage);
+            app.manage(Arc::clone(&noyau));
+            // La boucle unique, sur son propre fil (spec §3).
+            std::thread::Builder::new().name("synchronisation".into()).spawn(move || {
+                noyau.demarrer();
+                noyau.boucle(&mut SommeilReel, None);
+            })?;
             if !au_demarrage {
                 montrer_fenetre(app.handle());
             }
             Ok(())
         })
         .on_window_event(|fenetre, evenement| {
-            if let WindowEvent::CloseRequested { api, .. } = evenement {
-                // Fermer réduit (spec D4) : l'application reste près de
-                // l'horloge ; seul « Quitter » du menu de l'icône la ferme.
-                api.prevent_close();
-                let _ = fenetre.hide();
+            let noyau = fenetre.try_state::<Arc<Noyau>>();
+            match evenement {
+                WindowEvent::CloseRequested { api, .. } => {
+                    // Fermer réduit (spec D4) : l'application reste près de
+                    // l'horloge ; seul « Quitter » du menu de l'icône la ferme.
+                    api.prevent_close();
+                    let _ = fenetre.hide();
+                    if let Some(noyau) = noyau {
+                        noyau.definir_visible(false);
+                    }
+                }
+                WindowEvent::Focused(true) => {
+                    if let Some(noyau) = noyau {
+                        noyau.definir_visible(true);
+                    }
+                }
+                WindowEvent::Resized(_) if fenetre.is_minimized().unwrap_or(false) => {
+                    if let Some(noyau) = noyau {
+                        noyau.definir_visible(false);
+                    }
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())
@@ -47,6 +109,9 @@ fn montrer_fenetre(app: &AppHandle) {
         let _ = fenetre.unminimize();
         let _ = fenetre.show();
         let _ = fenetre.set_focus();
+    }
+    if let Some(noyau) = app.try_state::<Arc<Noyau>>() {
+        noyau.definir_visible(true);
     }
 }
 
@@ -78,7 +143,6 @@ fn installer_icone(app: &AppHandle) -> tauri::Result<()> {
 /// ensuite (Mon compte), il reste désactivé.
 #[cfg(not(debug_assertions))]
 fn activer_au_premier_lancement(app: &AppHandle) {
-    use tauri_plugin_autostart::ManagerExt;
     if let Ok(dossier) = app.path().app_data_dir() {
         if demarrage::premier_lancement(&dossier).unwrap_or(false) {
             let _ = app.autolaunch().enable();

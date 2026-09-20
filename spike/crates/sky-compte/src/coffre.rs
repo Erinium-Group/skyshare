@@ -64,6 +64,27 @@ fn verrou_trousseau() -> MutexGuard<'static, ()> {
 /// du produit, celui que l'utilisateur verra dans son gestionnaire
 /// d'identifiants Windows.
 const SERVICE_PRODUCTION: &str = "SkyShare";
+
+/// Nom de service du coffre de la build de DÉVELOPPEMENT et de TEST — jalon 1,
+/// tâche 7, arbitrage du contrôleur.
+///
+/// Même raison, et même suffixe, que l'identifiant d'application `.dev` que
+/// `sky-app/build.rs` substitue sous le profil `debug` : la version de
+/// développement ne doit jamais toucher aux données de la version installée.
+/// Sans cette séparation, le test d'instance unique — qui lance le VRAI
+/// exécutable — écrirait dans le service « SkyShare » du propriétaire, qui
+/// porte sa clé privée et ses jetons réels.
+///
+/// `debug_assertions` plutôt que la variable `TAURI_CONFIG` de `build.rs` :
+/// `sky-compte` ne dépend pas de Tauri, et le critère est le même (profil
+/// `debug` = `cargo test`, `cargo run`, exécutable de test ; profil `release` =
+/// version publiée).
+const SERVICE_DEVELOPPEMENT: &str = "SkyShare.dev";
+
+/// Le service que `Coffre::nouveau` utilise pour CETTE build.
+const SERVICE_COURANT: &str =
+    if cfg!(debug_assertions) { SERVICE_DEVELOPPEMENT } else { SERVICE_PRODUCTION };
+
 const UTILISATEUR_IDENTITE: &str = "identite";
 const UTILISATEUR_JETONS: &str = "jetons";
 const UTILISATEUR_APPAREIL: &str = "appareil";
@@ -103,11 +124,16 @@ impl fmt::Debug for Jetons {
 }
 
 impl Coffre {
-    /// Coffre de production : service stable et partagé entre tous les
-    /// lancements de l'application sur cette machine.
+    /// Coffre de l'application : service stable et partagé entre tous les
+    /// lancements sur cette machine.
+    ///
+    /// Le service dépend du profil de compilation (`SERVICE_COURANT`) :
+    /// « SkyShare » en version publiée, « SkyShare.dev » en développement et
+    /// en test. Rien n'est nettoyé à l'abandon, ni ici ni là : c'est ce qui
+    /// fait survivre l'identité à un redémarrage.
     pub fn nouveau() -> Result<Coffre, ErreurCompte> {
         Ok(Coffre {
-            service: SERVICE_PRODUCTION.to_string(),
+            service: SERVICE_COURANT.to_string(),
             nettoyer_a_l_abandon: false,
         })
     }
@@ -467,6 +493,28 @@ mod tests {
 
         assert_eq!(coffre.jetons().unwrap(), None);
         assert_eq!(coffre.identifiant_appareil().unwrap(), Some(7));
+    }
+
+    /// Jalon 1, tâche 7 — arbitrage du contrôleur : aucun test, aucun
+    /// lancement de développement ne doit écrire dans le trousseau réel du
+    /// propriétaire. Le test d'instance unique lance le VRAI exécutable ;
+    /// dès qu'il ouvrira un coffre, il écrirait sous « SkyShare », où vivent
+    /// la clé privée et les jetons réels.
+    ///
+    /// Ce test s'exécute toujours sous `debug_assertions` (`cargo test`) : il
+    /// constate que le coffre de CETTE build vise un service distinct de celui
+    /// de la version publiée.
+    ///
+    /// Neutralisation : remettre `SERVICE_PRODUCTION` dans `Coffre::nouveau` —
+    /// ce test rougit sur les deux assertions.
+    #[test]
+    fn le_coffre_de_developpement_ne_vise_pas_le_service_de_production() {
+        let coffre = Coffre::nouveau().unwrap();
+        assert_eq!(coffre.service, "SkyShare.dev");
+        assert_ne!(coffre.service, SERVICE_PRODUCTION);
+        // Ce coffre-ci ne doit rien supprimer à son abandon : il n'est pas un
+        // coffre de test isolé, c'est celui de l'application.
+        assert!(!coffre.nettoyer_a_l_abandon);
     }
 
     #[test]

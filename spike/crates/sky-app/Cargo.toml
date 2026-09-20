@@ -26,5 +26,11 @@ tauri-plugin-single-instance = "=2.4.4"
 tauri-plugin-autostart = "=2.5.1"
 serde.workspace = true
 serde_json.workspace = true
+sky-compte = { version = "0.0.0", path = "../sky-compte" }
+sky-partage = { version = "0.0.0", path = "../sky-partage" }
 
-# [dev-dependencies] : réservé à la tâche 7 (client HTTP et trousseau de test).
+# Le serveur double de `sky-compte` (inclus par `#[path]` dans lib.rs, tests
+# seulement) dépend de ces deux-là.
+[dev-dependencies]
+tiny_http = "0.12"
+base64.workspace = true
