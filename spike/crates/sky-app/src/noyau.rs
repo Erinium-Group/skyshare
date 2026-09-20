@@ -364,13 +364,35 @@ impl Noyau {
 
     /// Au lancement : si une session existe, s'assure qu'un appareil est
     /// enregistré (spec §4), lit le nom Discord et synchronise.
+    ///
+    /// RONDE DE CORRECTION 5 (Mineur 3) : `d.nom` était la SEULE écriture
+    /// d'`Instantane` du module qui ne relisait pas la génération. `moi()` dure
+    /// jusqu'à 5 s au lancement ; une déconnexion pendant cet appel laissait le
+    /// nom Discord posé sur un état `Deconnecte`, affiché au `publier()`
+    /// suivant. Le coffre, lui, était rattrapé par la synchronisation finale —
+    /// c'est bien l'affichage, et lui seul, qui restait faux.
     pub fn demarrer(&self) {
-        if self.donnees().connexion != Connexion::Connecte {
-            self.publier();
-            return;
-        }
+        let generation = {
+            let d = self.donnees();
+            if d.connexion != Connexion::Connecte {
+                drop(d);
+                self.publier();
+                return;
+            }
+            d.generation
+        };
         let nom = sky_compte::moi(&self.config, &self.coffre).ok().map(|m| m.discord_name);
-        self.donnees().nom = nom;
+        {
+            // Relu SOUS le verrou qui va écrire, comme le premier point de
+            // contrôle de `connexion` : le lire avant rouvrirait le TOCTOU.
+            let mut d = self.donnees();
+            if d.generation != generation {
+                drop(d);
+                self.publier();
+                return;
+            }
+            d.nom = nom;
+        }
         if let Err(e) = self.assurer_appareil(false) {
             self.apres_erreur(&e);
         }
@@ -414,6 +436,13 @@ impl Noyau {
     /// branche d'échec de `connexion`, et la sortie sur génération changée de
     /// `synchroniser`. Le dupliquer avait déjà produit deux fois la même
     /// résurrection.
+    ///
+    /// RONDE DE CORRECTION 5 : la phrase ci-dessus était fausse au moment où
+    /// elle a été écrite — la branche d'échec de `connexion` faisait alors un
+    /// `oublier()` INCONDITIONNEL. Elle est vraie depuis. C'est exactement le
+    /// genre de commentaire qui, dans deux jalons, pousse quelqu'un à retirer
+    /// l'un des oublis en croyant l'autre équivalent : le partage annoncé doit
+    /// être le partage réel.
     fn jetons_orphelins(&self) -> bool {
         self.donnees().connexion == Connexion::Deconnecte
     }
@@ -552,7 +581,14 @@ impl Noyau {
             // oubli, `Noyau::nouveau` (qui déduit l'état du seul
             // `coffre.jetons()`) ferait croire au prochain lancement qu'il est
             // connecté, alors que l'écran affiche « Déconnecté ».
-            let oubli = self.coffre.oublier();
+            //
+            // RONDE DE CORRECTION 5 (Mineur 2) : `oublier_les_orphelins` et non
+            // un `oublier()` aveugle. Le verrou vient d'être relâché ; relire
+            // l'état au plus près de l'écriture coûte une lecture et ferme la
+            // seule façon dont ce chemin pourrait encore effacer les jetons de
+            // quelqu'un d'autre. Le commentaire de `jetons_orphelins` annonçait
+            // déjà ce partage — il était faux, il est maintenant vrai.
+            let oubli = self.oublier_les_orphelins();
             self.publier();
             if let Err(oubli) = oubli {
                 return Err(format!(
@@ -597,8 +633,38 @@ impl Noyau {
         synchronisation.map(|_| ()).map_err(|e| message_erreur(&e))
     }
 
+    /// RONDE DE CORRECTION 5 (Important) : la génération bouge AVANT l'oubli,
+    /// jamais après.
+    ///
+    /// Dans l'ordre inverse, il existait une fenêtre entre l'oubli (T1) et
+    /// l'incrément (T2) où la génération n'avait pas encore changé. Une
+    /// `renouveler` en vol qui range des jetons frais dans cet intervalle
+    /// (`sky-compte/src/session.rs` : lecture, POST, rangement) échappait à
+    /// TOUTES les gardes : `synchroniser` relisait une génération inchangée,
+    /// écrivait `Connecte`, puis T2 écrivait `Deconnecte` par-dessus. Écran
+    /// « Déconnecté », coffre plein — et personne ne repassait, la boucle
+    /// jetant la valeur rendue. La fenêtre est de l'ordre de la microseconde et
+    /// exige une préemption : elle n'est pas ordonnançable depuis un test.
+    /// C'est justement pourquoi l'argument ne doit pas rester probabiliste.
+    ///
+    /// L'incrément d'abord rend la propriété structurelle : TOUTE pose de
+    /// jetons postérieure à l'oubli tombe forcément sous une garde.
+    ///
+    /// SI L'OUBLI ÉCHOUE, la génération aura bougé pour rien, et c'est sans
+    /// danger : l'état affiché reste `Connecte` (il n'est écrit qu'après
+    /// l'oubli réussi), donc `oublier_les_orphelins` — qui lit cet état — ne
+    /// touche à aucun jeton, et le tour de boucle suivant resynchronise sous la
+    /// session toujours valide. Le seul effet mesurable est une connexion
+    /// concurrente qui s'abandonnerait alors sur « remplacée » : un message
+    /// imparfait dans un cas doublement exceptionnel (gestionnaire
+    /// d'identifiants en échec PENDANT une authentification), contre une
+    /// fenêtre de résurrection réelle. Le compromis est assumé.
     pub fn deconnexion(&self) -> Result<(), String> {
         permis_hors_partage(self.phase())?;
+        // Même raison qu'en connexion : une réponse en vol appartient à la
+        // session qu'on s'apprête à oublier — y compris une réponse qui n'est
+        // pas encore partie.
+        self.donnees().generation += 1;
         self.coffre.oublier().map_err(|e| message_erreur(&e))?;
         {
             let mut d = self.donnees();
@@ -607,9 +673,6 @@ impl Noyau {
             d.etat = None;
             d.appareil_courant = None;
             d.resynchro_complete = true;
-            // Même raison qu'en connexion : une réponse en vol appartient à la
-            // session qu'on vient d'oublier.
-            d.generation += 1;
         }
         self.publier();
         Ok(())
@@ -991,10 +1054,17 @@ mod tests {
         // L'assertion sur le coffre ci-dessous est un INVARIANT, pas le
         // discriminant : ici les jetons ont été rangés AVANT la déconnexion,
         // donc `deconnexion` les a déjà oubliés et ils sont absents dans les
-        // deux cas. L'`oublier()` de ce contrôle ne sert que si un
-        // renouvellement de jeton a reposé des jetons frais entre-temps
-        // (`avec_jeton_valide` en range sur un 401) — chemin que je n'ai pas su
-        // mettre en scène ; c'est dit tel quel dans le rapport.
+        // deux cas.
+        //
+        // NE PAS RETIRER L'`oublier()` DE CE CONTRÔLE au motif qu'aucun test ne
+        // le couvre (ronde de correction 5, Mineur 4). Il est le SEUL filet
+        // quand la synchronisation vient de `connexion` elle-même pendant la
+        // course avec `deconnexion` : `avec_jeton_valide` range des jetons
+        // frais sur un 401 (`sky-compte/src/session.rs`), et aucune autre garde
+        // ne repasse sur ce chemin-là. C'est un chemin RÉEL, seulement non
+        // ordonnançable depuis un test — la fenêtre se referme entre deux
+        // appels réseau consécutifs du même fil. Ce que la neutralisation de
+        // cette garde mesure, elle, c'est le message rendu à l'utilisateur.
         //
         // Neutralisation : retirer le SEUL second point de contrôle (le
         // `session_changee` qui suit `assurer_appareil`/`synchroniser`) — ce
@@ -1071,6 +1141,52 @@ mod tests {
         );
         assert_eq!(c.noyau.instantane().connexion, Connexion::Connecte, "B tient");
         assert_eq!(issue, Err(MESSAGE_CONNEXION_REMPLACEE.to_string()));
+    }
+
+    #[test]
+    fn une_deconnexion_pendant_le_demarrage_n_affiche_pas_le_nom_discord() {
+        // RONDE DE CORRECTION 5, Mineur 3. `demarrer` écrivait `d.nom` sans
+        // relire la génération — la seule écriture d'`Instantane` du module
+        // dans ce cas. `moi()` dure jusqu'à 5 s au lancement ; une déconnexion
+        // pendant cet appel laissait le nom Discord de la session quittée posé
+        // sur un état `Deconnecte`, et l'écran l'affichait.
+        //
+        // CE QUI DISCRIMINE : `nom`. Le coffre ne discrimine pas — la
+        // déconnexion l'a déjà vidé, et la synchronisation finale de `demarrer`
+        // ne le remplit pas.
+        //
+        // Aucune horloge réelle : le point d'arrêt retient `/api/auth/me`.
+        //
+        // Neutralisation : retirer le SEUL `if d.generation != generation` de
+        // `demarrer` — ce test rougit.
+        let c = contexte_bloquant("sky-test-app-deco-pendant-demarrage", "/api/auth/me");
+
+        let noyau_du_fil = Arc::clone(&c.noyau);
+        let fil = std::thread::spawn(move || noyau_du_fil.demarrer());
+
+        c.serveur.attendre_la_requete();
+        c.noyau.deconnexion().unwrap();
+        c.serveur.liberer_la_reponse();
+        fil.join().expect("le fil de démarrage a paniqué");
+
+        assert_eq!(
+            c.noyau.instantane().nom,
+            None,
+            "le nom Discord de la session quittée ne doit pas rester à l'écran"
+        );
+        assert_eq!(c.noyau.instantane().connexion, Connexion::Deconnecte);
+
+        // CONTRÔLE POSITIF, sur un second point d'arrêt qui ne retient rien de
+        // ce que `demarrer` demande : sans déconnexion, le nom EST écrit. Sans
+        // lui, l'assertion ci-dessus passerait aussi bien si le double ne
+        // rendait aucun nom, ou si `demarrer` n'en écrivait jamais.
+        let temoin = contexte_bloquant("sky-test-app-demarrage-temoin", "/api/sky/envelopes");
+        temoin.noyau.demarrer();
+        assert_eq!(
+            temoin.noyau.instantane().nom.as_deref(),
+            Some("BOB"),
+            "un démarrage non interrompu écrit bien le nom : l'absence ci-dessus vient de la garde"
+        );
     }
 
     #[test]
