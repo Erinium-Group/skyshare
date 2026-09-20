@@ -7,9 +7,19 @@ import { useInstantane } from "./useInstantane";
 const TITRES: Record<Ecran, string> = { amis: "Amis", listes: "Listes", compte: "Mon compte" };
 
 export function App() {
-  const instantane = useInstantane();
+  const etat = useInstantane();
   const [ecran, setEcran] = useState<Ecran>("amis");
-  if (instantane === null) return <p className="p-8 text-texte-2">Chargement…</p>;
+  // L'échec AVANT l'attente : les confondre rendrait un rejet indiscernable
+  // d'un chargement qui n'aboutit pas (ronde de correction 1, I1).
+  if (etat.phase === "echec") {
+    return (
+      <p role="alert" className="p-8 text-alerte">
+        SkyShare n'a pas pu lire son état : {etat.message}
+      </p>
+    );
+  }
+  if (etat.phase === "chargement") return <p className="p-8 text-texte-2">Chargement…</p>;
+  const instantane = etat.instantane;
   // `!== "connecte"` et non `=== "deconnecte"` : `en_cours` et
   // `session_expiree` n'ont pas de session utilisable non plus.
   if (instantane.connexion !== "connecte") return <Connexion connexion={instantane.connexion} />;

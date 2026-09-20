@@ -466,9 +466,24 @@ impl Noyau {
     /// la même résurrection ; l'oublier une fois en a produit une troisième.
     ///
     /// LA RÈGLE, pour qui ajoutera la sixième : toute sortie qui renonce à
-    /// écrire parce que la génération a changé DOIT passer par ici. Renoncer à
-    /// écrire ne suffit jamais — l'appel réseau qu'on vient de faire a pu ranger
-    /// des jetons frais par `renouveler`, et personne d'autre ne repasse.
+    /// écrire parce que la génération a changé APRÈS avoir fait un appel réseau
+    /// authentifié DOIT passer par ici. Renoncer à écrire ne suffit jamais —
+    /// cet appel a pu ranger des jetons frais par `renouveler`, et personne
+    /// d'autre ne repasse.
+    ///
+    /// L'EXCEPTION, et c'est la seule : la première sortie de la branche d'échec
+    /// de `connexion` (celle qui suit `connecter`) renonce sans passer par ici,
+    /// et c'est CORRECT. `connecter` a échoué, donc il n'a rien rangé — le vrai
+    /// ne range qu'en cas de succès — et la génération a changé, donc le coffre
+    /// appartient à une autre session, vivante. Y toucher effacerait ses jetons
+    /// valides : c'est le défaut qu'a fermé la ronde 3 (Important 2).
+    ///
+    /// Cette exception est écrite ici EXPRÈS (ronde de correction 1 de la tâche
+    /// 8, M1). Une règle annoncée comme absolue et démentie par le code d'à côté
+    /// est ce qui pousse quelqu'un, dans deux jalons, soit à « réparer » cette
+    /// sortie-là, soit à retirer un oubli ailleurs en croyant les deux
+    /// équivalents. La ronde 5 dénonçait déjà exactement ce genre de
+    /// commentaire : le partage annoncé doit être le partage réel.
     ///
     /// RONDE DE CORRECTION 5 : la phrase ci-dessus était fausse au moment où
     /// elle a été écrite — la branche d'échec de `connexion` faisait alors un
@@ -599,6 +614,14 @@ impl Noyau {
                 // connexion, survenue pendant la tentative a déjà posé son
                 // état ; ne rien réécrire et ne toucher à aucun jeton qui ne
                 // nous appartient plus.
+                //
+                // L'EXCEPTION à la règle de `jetons_orphelins` (tâche 8, M1) :
+                // cette sortie-ci renonce SANS nettoyer le coffre, et c'est
+                // voulu. `connecter` a ÉCHOUÉ, donc il n'a rien rangé ; la
+                // génération a changé, donc le coffre est à une autre session
+                // vivante, et y toucher effacerait ses jetons valides — le
+                // défaut que la ronde 3 (Important 2) a fermé. NE PAS y ajouter
+                // d'oubli « par cohérence ».
                 if d.generation != generation {
                     return Err(message_erreur(&e));
                 }

@@ -34,6 +34,29 @@ describe("Connexion", () => {
     expect(screen.getByRole("button", { name: "Se connecter avec Discord" })).toBeDisabled();
   });
 
+  it("une seule alerte à la fois : le refus du clic prime sur « session expirée »", async () => {
+    // M3 : deux `role="alert"` simultanés se bousculent chez un lecteur
+    // d'écran. Neutralisation : rendre les deux paragraphes séparément —
+    // `getByRole("alert")` rougit sur « plusieurs éléments trouvés ».
+    vi.mocked(pont.connexion).mockRejectedValue("Impossible pendant un partage.");
+    render(<Connexion connexion="session_expiree" />);
+    await userEvent.click(screen.getByRole("button", { name: "Se connecter avec Discord" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Impossible pendant un partage.");
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+  });
+
+  it("un changement d'état venu du cœur efface le refus affiché", async () => {
+    // M3 : sans cela, « Impossible pendant un partage » resterait en travers
+    // d'un bouton redevenu utilisable. Neutralisation : retirer le
+    // `setErreur(null)` du bloc `connexionVue !== connexion`.
+    vi.mocked(pont.connexion).mockRejectedValue("Impossible pendant un partage.");
+    const { rerender } = render(<Connexion connexion="deconnecte" />);
+    await userEvent.click(screen.getByRole("button", { name: "Se connecter avec Discord" }));
+    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    rerender(<Connexion connexion="en_cours" />);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("un refus du cœur s'affiche, et le bouton reste cliquable", async () => {
     // Le cœur refuse déjà pendant un partage (`MESSAGE_PENDANT_PARTAGE`) :
     // sans affichage, le clic resterait sans effet visible. Neutralisation :
