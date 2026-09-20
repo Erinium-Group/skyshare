@@ -223,6 +223,15 @@ avec chaque arbitrage : `.superpowers/sdd/2026-09-11-jalon-c2-client-signaling/p
 - Un site malveillant qui substituerait une clé d'annuaire n'est pas détecté — inhérent à D2.
 - Cadences `CADENCE` 2 s, `FENETRE_HOTE` 30 min, `ATTENTE_SPECTATEUR` 60 s : **argumentées, pas mesurées**.
 
+### Dette de la tâche 8 (jalon 1), héritée de la tâche 7
+- **Nettoyer les jetons sur la sortie gardée de `demarrer`** (`sky-app/src/noyau.rs`) : elle détecte une
+  déconnexion survenue pendant le démarrage mais n'appelle pas `oublier_les_orphelins()`, seule des quatre
+  sorties gardées du module. Mesuré : écran « Déconnecté », coffre plein — donc le lancement suivant se croit
+  connecté. Une ligne, plus le doc-comment (« TROIS chemins » → quatre) et un test.
+- **Supprimer l'appareil orphelin éventuel** : une déconnexion tombant pendant le tout premier enregistrement
+  d'appareil peut laisser une ligne inutile sur le compte (au plus une par machine). Elle ne détourne aucun
+  partage ; l'écran « Mon compte » permettra de la révoquer.
+
 ### Reporté au jalon 2
 - Erreur typée rendue par `PeerLink::repondant` : `echec_local` classe aujourd'hui sur le texte du message.
 - Agent HTTP recréé à chaque appel : aucune connexion réutilisée, coût non mesuré.
