@@ -25,7 +25,9 @@
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use sky_compte::{Coffre, Config, ErreurCompte, Etat, Jetons};
+use sky_compte::{
+    Acceptation, AjoutAmi, Blocage, Coffre, Config, ErreurCompte, Etat, Jetons, Retrait,
+};
 
 use crate::cadence::{cadence, Phase, PLANCHER_ENTRE_SYNCHROS};
 use crate::coquille::Coquille;
@@ -64,6 +66,14 @@ pub const MESSAGE_CONNEXION_REMPLACEE: &str =
 /// Ce que rend `synchroniser` quand la session a changé pendant sa requête.
 pub const MESSAGE_SESSION_CHANGEE: &str =
     "session changée pendant la synchronisation : l'état reçu a été abandonné";
+/// Toute commande qui parle au site exige une session.
+pub const MESSAGE_NON_CONNECTE: &str = "Connecte-toi d'abord.";
+pub const MESSAGE_CODE_MAL_FORME: &str =
+    "Ce code ami n'a pas la bonne forme : 8 caractères, par exemple SKY-ABCD-EFGH.";
+/// Le site rend le MÊME 404 pour une amitié inexistante, celle d'autrui, ou
+/// celle d'un compte qui nous a bloqué — à dessein (`annuaire.rs`). Un seul
+/// message, donc, qui ne prétend pas distinguer ce que le site confond.
+const MESSAGE_AMI_DISPARU: &str = "Cet ami n'est plus dans ta liste.";
 
 /// Longueur maximale, en caractères, du détail d'erreur recopié à l'écran.
 /// Assez pour un message de validation du site, trop peu pour un corps de
@@ -447,12 +457,18 @@ impl Noyau {
     /// jetons valides (ronde de correction 3, Important 2).
     ///
     /// RONDE DE CORRECTION 4, corrigée à la TÂCHE 8 : ce prédicat est partagé
-    /// par les QUATRE chemins qui peuvent laisser des jetons orphelins —
+    /// par les CINQ chemins qui peuvent laisser des jetons orphelins —
     /// `abandonner_connexion`, la branche d'échec de `connexion`, la sortie sur
-    /// génération changée de `synchroniser`, et celle de `demarrer`. Le compte
-    /// annoncé était « TROIS » : la quatrième sortie existait déjà, mais
-    /// n'appelait rien. Le dupliquer avait déjà produit deux fois la même
-    /// résurrection ; l'oublier une fois en a produit une troisième.
+    /// génération changée de `synchroniser`, celle de `demarrer`, et celle
+    /// d'`apres_commande`. Le compte annoncé était « TROIS » : la quatrième
+    /// sortie existait déjà mais n'appelait rien, et la cinquième est arrivée
+    /// avec les commandes d'annuaire. Le dupliquer avait déjà produit deux fois
+    /// la même résurrection ; l'oublier une fois en a produit une troisième.
+    ///
+    /// LA RÈGLE, pour qui ajoutera la sixième : toute sortie qui renonce à
+    /// écrire parce que la génération a changé DOIT passer par ici. Renoncer à
+    /// écrire ne suffit jamais — l'appel réseau qu'on vient de faire a pu ranger
+    /// des jetons frais par `renouveler`, et personne d'autre ne repasse.
     ///
     /// RONDE DE CORRECTION 5 : la phrase ci-dessus était fausse au moment où
     /// elle a été écrite — la branche d'échec de `connexion` faisait alors un
@@ -693,6 +709,113 @@ impl Noyau {
         }
         self.publier();
         Ok(())
+    }
+
+    /// Refuse une commande qui exige une session, et rend la GÉNÉRATION de
+    /// celle-ci.
+    ///
+    /// Les deux tiennent ensemble à dessein, sous UN SEUL verrou : toute
+    /// commande d'annuaire fait son appel réseau hors verrou, et doit relire
+    /// cette génération avant d'écrire quoi que ce soit — sans quoi une
+    /// déconnexion demandée pendant l'appel serait annulée par la suite de la
+    /// commande. Rendre la génération plutôt que `()` rend l'oubli impossible :
+    /// il n'y a rien à capturer séparément, donc rien à oublier de capturer.
+    fn exiger_connexion(&self) -> Result<u64, String> {
+        let d = self.donnees();
+        if d.connexion == Connexion::Connecte {
+            Ok(d.generation)
+        } else {
+            Err(MESSAGE_NON_CONNECTE.to_string())
+        }
+    }
+
+    /// Après une commande qui a modifié l'annuaire : rafraîchir l'affichage
+    /// tout de suite — c'est ce qu'un utilisateur attend d'un clic — et SANS
+    /// précédent, parce que le site calcule la version comme le MAX des
+    /// `updated_at` des lignes qui RESTENT (voir l'en-tête du module) : un
+    /// retrait supprime une ligne sans faire bouger la version, et `?version=`
+    /// rendrait `inchange` en gardant l'ami retiré à l'écran.
+    ///
+    /// CINQUIÈME SORTIE GARDÉE du module, pour la même raison que les quatre
+    /// autres. `ajouter_ami` et consorts passent par `avec_jeton_valide` : sur
+    /// un 401, `renouveler` (`sky-compte/src/session.rs`) LIT les jetons, POSTe,
+    /// puis les RANGE. Une déconnexion tombée dans cet intervalle laisse des
+    /// jetons FRAIS dans un coffre qu'elle venait de vider — et sans la garde
+    /// ci-dessous la resynchronisation les utiliserait, réussirait, et
+    /// réafficherait le compte que l'utilisateur vient de quitter.
+    ///
+    /// Relire puis écrire sous LE MÊME verrou : lire avant rouvrirait le TOCTOU
+    /// que les cinq rondes de correction de la tâche 7 ont fermé partout.
+    fn apres_commande(&self, generation: u64) {
+        {
+            let mut d = self.donnees();
+            if d.generation != generation {
+                drop(d);
+                if let Err(e) = self.oublier_les_orphelins() {
+                    self.apres_erreur(&e);
+                }
+                self.publier();
+                return;
+            }
+            d.resynchro_complete = true;
+        }
+        let _ = self.synchroniser();
+    }
+
+    /// Envoie une demande d'ami à partir de la saisie brute de l'interface.
+    pub fn ajouter_ami(&self, saisie: &str) -> Result<String, String> {
+        let generation = self.exiger_connexion()?;
+        let code = sky_compte::normaliser_code_ami(saisie)
+            .ok_or_else(|| MESSAGE_CODE_MAL_FORME.to_string())?;
+        // Le site refuse de s'ajouter soi-même par un 400 sans message utile
+        // (`annuaire.rs` : les 400 deviennent un `Protocole` brut) : le dire
+        // ici, et n'émettre aucune requête.
+        if self.donnees().etat.as_ref().is_some_and(|e| e.code == code) {
+            return Err("C'est ton propre code ami.".to_string());
+        }
+        let issue = sky_compte::ajouter_ami(&self.config, &self.coffre, &code)
+            .map_err(|e| self.apres_erreur(&e))?;
+        self.apres_commande(generation);
+        match issue {
+            AjoutAmi::Envoyee { .. } => Ok("Demande envoyée.".to_string()),
+            // Couvre aussi « ce compte t'a bloqué » : le site ne les distingue
+            // pas, l'application non plus.
+            AjoutAmi::CodeIntrouvable => Err("Code ami introuvable.".to_string()),
+            AjoutAmi::DejaDemandee => Err("Une demande existe déjà avec ce compte.".to_string()),
+        }
+    }
+
+    pub fn accepter_ami(&self, friendship_id: i64) -> Result<String, String> {
+        let generation = self.exiger_connexion()?;
+        let issue = sky_compte::accepter_ami(&self.config, &self.coffre, friendship_id)
+            .map_err(|e| self.apres_erreur(&e))?;
+        self.apres_commande(generation);
+        match issue {
+            Acceptation::Acceptee => Ok("Demande acceptée.".to_string()),
+            Acceptation::Introuvable => Err("Cette demande n'existe plus.".to_string()),
+        }
+    }
+
+    pub fn retirer_ami(&self, friendship_id: i64) -> Result<String, String> {
+        let generation = self.exiger_connexion()?;
+        let issue = sky_compte::retirer_ami(&self.config, &self.coffre, friendship_id)
+            .map_err(|e| self.apres_erreur(&e))?;
+        self.apres_commande(generation);
+        match issue {
+            Retrait::Retire => Ok("Ami retiré.".to_string()),
+            Retrait::Introuvable => Err(MESSAGE_AMI_DISPARU.to_string()),
+        }
+    }
+
+    pub fn bloquer_ami(&self, friendship_id: i64) -> Result<String, String> {
+        let generation = self.exiger_connexion()?;
+        let issue = sky_compte::bloquer_ami(&self.config, &self.coffre, friendship_id)
+            .map_err(|e| self.apres_erreur(&e))?;
+        self.apres_commande(generation);
+        match issue {
+            Blocage::Bloque => Ok("Ami bloqué.".to_string()),
+            Blocage::Introuvable => Err(MESSAGE_AMI_DISPARU.to_string()),
+        }
     }
 
     /// Un tour de boucle : synchronise (sauf pendant une attente, et sauf si le
@@ -1406,6 +1529,164 @@ mod tests {
             c.serveur.chemins(),
             vec!["/api/sky/sync", "/api/auth/refresh", "/api/sky/sync"],
             "le 401, le renouvellement et la seconde tentative ont bien eu lieu"
+        );
+    }
+
+    #[test]
+    fn on_ne_s_ajoute_pas_soi_meme_et_rien_ne_part() {
+        // Le site refuserait par un 400 sans message utile (`ajouter_ami`,
+        // `annuaire.rs` : les 400 deviennent un `Protocole` brut). Neutralisation :
+        // retirer la comparaison au code de l'état — la demande part
+        // (`appels_amis` à 1).
+        let c = contexte("sky-test-app-propre-code", true);
+        c.noyau.synchroniser().unwrap(); // code « FAUX2345 » du double
+        assert_eq!(
+            c.noyau.ajouter_ami("sky-faux-2345"),
+            Err("C'est ton propre code ami.".to_string())
+        );
+        assert_eq!(c.serveur.etat_mut().appels_amis, 0);
+    }
+
+    #[test]
+    fn une_saisie_mal_formee_ne_part_pas() {
+        let c = contexte("sky-test-app-code-mal-forme", true);
+        assert_eq!(c.noyau.ajouter_ami("pas un code"), Err(MESSAGE_CODE_MAL_FORME.to_string()));
+        assert_eq!(c.serveur.etat_mut().appels_amis, 0);
+    }
+
+    #[test]
+    fn retirer_un_ami_le_fait_disparaitre_meme_si_la_version_ne_bouge_pas() {
+        // Le double, comme le site, ne fait pas progresser la version sur un
+        // retrait : il SUPPRIME la ligne, et la version est le MAX des
+        // `updated_at` de celles qui RESTENT. Neutralisation : retirer
+        // `d.resynchro_complete = true` de `apres_commande` — la
+        // resynchronisation part avec `?version=`, le site rend `inchange`, et
+        // l'ami reste affiché.
+        let c = contexte("sky-test-app-retirer", true);
+        let mut ami = crate::faux_serveur::AmiFaux::sans_appareil("bob");
+        ami.friendship_id = 777;
+        c.serveur.etat_mut().amis.push(ami);
+        c.noyau.synchroniser().unwrap();
+        assert_eq!(c.noyau.instantane().amis.len(), 1);
+
+        assert_eq!(c.noyau.retirer_ami(777), Ok("Ami retiré.".to_string()));
+        assert!(c.noyau.instantane().amis.is_empty());
+    }
+
+    #[test]
+    fn une_commande_d_annuaire_exige_une_session() {
+        // La serrure posée ET branchée : `exiger_connexion` n'a de valeur que
+        // si les quatre commandes l'appellent.
+        //
+        // CE QUI DISCRIMINE, MESURÉ : le MESSAGE. Sans la garde, la commande
+        // descend jusqu'à `jeton_courant`, qui rend `Refuse` faute de jeton, et
+        // `apres_erreur` traduit ce refus en « Session expirée —
+        // reconnecte-toi » ET bascule l'état affiché en `SessionExpiree` : un
+        // message alarmant et faux pour quelqu'un qui ne s'est simplement
+        // jamais connecté. `appels_amis` reste à 0 dans les DEUX cas — le refus
+        // vient d'avant le réseau — donc ce compteur est un invariant, pas le
+        // discriminant.
+        //
+        // Neutralisation : remplacer `self.exiger_connexion()?` d'`accepter_ami`
+        // par la seule lecture de génération — ce test rougit.
+        let c = contexte("sky-test-app-annuaire-sans-session", false);
+        assert_eq!(c.noyau.instantane().connexion, Connexion::Deconnecte);
+        assert_eq!(c.noyau.ajouter_ami("SKY-ABCD-EFGH"), Err(MESSAGE_NON_CONNECTE.to_string()));
+        assert_eq!(c.noyau.accepter_ami(1), Err(MESSAGE_NON_CONNECTE.to_string()));
+        assert_eq!(c.noyau.retirer_ami(1), Err(MESSAGE_NON_CONNECTE.to_string()));
+        assert_eq!(c.noyau.bloquer_ami(1), Err(MESSAGE_NON_CONNECTE.to_string()));
+        assert_eq!(c.serveur.etat_mut().appels_amis, 0);
+
+        // CONTRÔLE POSITIF : le MÊME double, avec une session, laisse bien
+        // partir la demande. Sans lui, les assertions ci-dessus passeraient
+        // aussi avec un serveur injoignable ou un double qui ne compte rien.
+        let d = contexte("sky-test-app-annuaire-avec-session", true);
+        d.serveur.etat_mut().code_ami_valide = Some(("ABCD2345".to_string(), 42));
+        assert_eq!(d.noyau.ajouter_ami("SKY-ABCD-2345"), Ok("Demande envoyée.".to_string()));
+        assert_eq!(d.serveur.etat_mut().appels_amis, 1);
+    }
+
+    #[test]
+    fn une_deconnexion_pendant_un_ajout_d_ami_n_est_pas_annulee() {
+        // La discipline de génération du module vaut AUSSI pour les commandes
+        // d'annuaire : leur appel réseau se fait hors verrou, donc une
+        // déconnexion peut tomber pendant.
+        //
+        // L'enchaînement, celui du constat 2 de la ronde 4 déplacé sur une
+        // commande :
+        //   `ajouter_ami` POSTe `/api/sky/friends` → 401
+        //   → `avec_jeton_valide` reprend : `renouveler` LIT les jetons, POSTe
+        //   → l'utilisateur clique « Se déconnecter » (coffre vidé, gén. + 1)
+        //   → la réponse du renouvellement RANGE des jetons FRAIS dans ce
+        //     coffre vidé, et la commande retente puis aboutit
+        //   → `apres_commande` resynchronise.
+        // Sans la garde, cette resynchronisation-là RÉUSSIT (les jetons frais
+        // sont valides), prend sa PROPRE génération — postérieure à la
+        // déconnexion, donc concordante — et écrit `Connecte` avec le code ami
+        // et les amis du compte que l'utilisateur vient de quitter.
+        //
+        // CE QUI DISCRIMINE : l'état affiché ET le coffre, les deux.
+        //
+        // Aucune horloge réelle : le point d'arrêt retient la réponse du
+        // renouvellement.
+        //
+        // Neutralisation : retirer le SEUL `if d.generation != generation`
+        // d'`apres_commande` — ce test rougit.
+        let c = contexte_bloquant_avec_renouvellement(
+            "sky-test-app-ajout-en-vol",
+            "/api/auth/refresh",
+            "/api/sky/friends",
+        );
+        // Le point d'arrêt ne connaît pas `/api/sky/friends` : sa seconde
+        // tentative rend 404, que `ajouter_ami` traduit en `CodeIntrouvable`.
+        // L'issue rendue importe peu — ce qui est visé, c'est ce qu'écrit
+        // l'après-commande.
+        let noyau_du_fil = Arc::clone(&c.noyau);
+        let fil = std::thread::spawn(move || noyau_du_fil.ajouter_ami("SKY-ABCD-EFGH"));
+
+        c.serveur.attendre_la_requete();
+        c.noyau.deconnexion().unwrap();
+        assert!(
+            c.noyau.coffre().jetons().unwrap().is_none(),
+            "la déconnexion a bien vidé le coffre AVANT que le renouvellement ne réponde"
+        );
+        c.serveur.liberer_la_reponse();
+        let _ = fil.join().expect("le fil d'ajout a paniqué");
+
+        // LE FAIT DANGEREUX D'ABORD.
+        assert!(
+            c.noyau.coffre().jetons().unwrap().is_none(),
+            "les jetons frais rangés par `renouveler` pendant la commande sont oubliés"
+        );
+        assert_eq!(
+            c.noyau.instantane().connexion,
+            Connexion::Deconnecte,
+            "l'utilisateur s'est déconnecté : l'après-commande ne doit pas réafficher le \
+             compte quitté"
+        );
+        assert!(c.noyau.instantane().code.is_none(), "aucune donnée du compte quitté");
+
+        // CONTRÔLE POSITIF : la trace prouve que la reprise sur 401 a bien été
+        // jouée — donc que des jetons frais ont bien été rangés dans
+        // l'intervalle — et qu'aucune synchronisation n'a suivi.
+        assert_eq!(
+            c.serveur.chemins(),
+            vec!["/api/sky/friends", "/api/auth/refresh", "/api/sky/friends"],
+            "le 401, le renouvellement et la seconde tentative ont eu lieu, et aucune \
+             synchronisation d'après-commande n'a suivi"
+        );
+
+        // SECOND CONTRÔLE POSITIF, sur un noyau intact : sans déconnexion, la
+        // commande rafraîchit bien l'affichage tout de suite. Sans lui, les
+        // assertions ci-dessus passeraient aussi si `apres_commande` ne
+        // synchronisait JAMAIS.
+        let d = contexte("sky-test-app-ajout-temoin", true);
+        assert!(d.noyau.instantane().code.is_none(), "rien n'a encore été synchronisé");
+        let _ = d.noyau.ajouter_ami("SKY-ABCD-EFGH");
+        assert_eq!(
+            d.noyau.instantane().code.as_deref(),
+            Some("FAUX2345"),
+            "une commande d'annuaire rafraîchit bien l'affichage tout de suite"
         );
     }
 

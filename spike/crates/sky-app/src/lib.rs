@@ -48,6 +48,10 @@ pub fn lancer() {
             commandes::etat_courant,
             commandes::connexion,
             commandes::deconnexion,
+            commandes::ajouter_ami,
+            commandes::accepter_ami,
+            commandes::retirer_ami,
+            commandes::bloquer_ami,
         ])
         .setup(move |app| {
             installer_icone(app.handle())?;
