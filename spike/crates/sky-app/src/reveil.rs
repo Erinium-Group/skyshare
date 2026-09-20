@@ -2,7 +2,7 @@
 //! fin d'un partage change la cadence tout de suite, pas au bout de 5 min.
 
 use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct Reveil {
@@ -38,6 +38,22 @@ pub struct SommeilReel;
 impl Sommeil for SommeilReel {
     fn dormir(&mut self, duree: Duration, reveil: &Reveil) {
         reveil.attendre(duree);
+    }
+}
+
+/// L'heure telle que le noyau la voit — injectée pour la même raison que
+/// `Sommeil` : aucun test ne doit dépendre d'une durée réelle. C'est elle qui
+/// rend mesurable le plancher entre deux synchronisations
+/// (`cadence::PLANCHER_ENTRE_SYNCHROS`).
+pub trait Horloge: Send + Sync {
+    fn maintenant(&self) -> Instant;
+}
+
+pub struct HorlogeReelle;
+
+impl Horloge for HorlogeReelle {
+    fn maintenant(&self) -> Instant {
+        Instant::now()
     }
 }
 

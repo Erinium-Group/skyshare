@@ -15,6 +15,14 @@
 //! systématiquement toutes celles qui attendent. Lancer l'une de ces
 //! commandes pendant une négociation en cours détruirait donc l'offre en
 //! attente, pour l'appelant comme pour son correspondant.
+//!
+//! COFFRE : LANCER CES COMMANDES EN `--release` (jalon 1, tâche 7, ronde de
+//! correction 1). Depuis que `Coffre::nouveau` sépare le coffre selon le
+//! profil (`SERVICE_DEVELOPPEMENT`, `sky-compte/src/coffre.rs`), un
+//! `cargo run -p sky-probe -- …` en profil `debug` ouvre un coffre VIDE : il
+//! ne voit pas l'identité réelle, et un `login` y créerait un SECOND appareil
+//! sur le compte Discord réel, en laissant la clé précédente orpheline côté
+//! site. En `debug`, on travaille sur un compte de développement.
 
 use sky_compte::{
     accepter_ami, ajouter_ami, enregistrer_appareil, moi, normaliser_code_ami, synchroniser,

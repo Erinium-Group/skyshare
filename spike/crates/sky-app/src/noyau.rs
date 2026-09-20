@@ -23,14 +23,14 @@
 //! `reveil`) : elles appartiennent à la tâche qui les branche.
 
 use std::sync::{Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use sky_compte::{Coffre, Config, ErreurCompte, Etat, Jetons};
 
-use crate::cadence::{cadence, Phase};
+use crate::cadence::{cadence, Phase, PLANCHER_ENTRE_SYNCHROS};
 use crate::coquille::Coquille;
 use crate::materiel::nom_d_appareil;
-use crate::reveil::{Reveil, Sommeil};
+use crate::reveil::{Horloge, Reveil, Sommeil};
 use crate::vue::{
     AmiVue, AppareilVue, Connexion, DemandeVue, EcranVue, Instantane, ListeVue, PartageVue,
 };
@@ -44,14 +44,48 @@ pub struct Branchements {
     pub connecter: Connecteur,
     /// `COMPUTERNAME` en production.
     pub nom_machine: Option<String>,
+    /// `HorlogeReelle` en production ; une horloge que le test avance à la main.
+    pub horloge: Box<dyn Horloge>,
 }
 
 pub const MESSAGE_PENDANT_PARTAGE: &str =
     "Impossible pendant un partage ou une attente : arrête-le d'abord.";
 pub const MESSAGE_SESSION_EXPIREE: &str = "Session expirée — reconnecte-toi";
 
-/// Le message montré pour une erreur de compte. Jamais de jeton : les
-/// variantes d'`ErreurCompte` n'en portent pas (voir `erreur.rs`).
+/// Longueur maximale, en caractères, du détail d'erreur recopié à l'écran.
+/// Assez pour un message de validation du site, trop peu pour un corps de
+/// réponse entier.
+const LONGUEUR_MAX_DETAIL: usize = 200;
+
+/// Ramène un détail d'erreur à ce qu'on peut afficher sans risque : tout ce
+/// qui suit `Bearer ` est coupé, et le reste est tronqué.
+///
+/// Découpe en `chars` et non en octets : trancher un `&str` sur une frontière
+/// arbitraire paniquerait dès qu'un accent tombe au mauvais endroit, et les
+/// messages du site sont en français.
+fn detail_borne(detail: &str) -> String {
+    let avant_jeton = match detail.find("Bearer ") {
+        Some(debut) => &detail[..debut],
+        None => detail,
+    };
+    let mut borne: String = avant_jeton.chars().take(LONGUEUR_MAX_DETAIL).collect();
+    if borne.chars().count() < avant_jeton.chars().count() || avant_jeton.len() < detail.len() {
+        borne.push_str(" […]");
+    }
+    borne
+}
+
+/// Le message montré pour une erreur de compte.
+///
+/// RONDE DE CORRECTION 1 (Mineur 2). Le commentaire précédent affirmait
+/// qu'aucune variante d'`ErreurCompte` ne porte de jeton. C'est vrai des seuls
+/// chemins qui passent par `ErreurCompte::depuis_statut`, qui filtre le corps
+/// (`corps_sans_en_tete`, `erreur.rs`) — UN site sur huit. `annuaire.rs` (cinq
+/// occurrences), `listes.rs` et `boite.rs` construisent
+/// `Protocole(format!("statut {statut} inattendu : {corps}"))` SANS ce filtre,
+/// et ce sont précisément les fonctions que la tâche 8 branchera à l'interface.
+/// La garantie vient donc de `depuis_statut`, pas du type : le détail est borné
+/// ICI, au dernier point avant l'écran.
 pub fn message_erreur(e: &ErreurCompte) -> String {
     match e {
         ErreurCompte::Refuse => MESSAGE_SESSION_EXPIREE.to_string(),
@@ -61,8 +95,10 @@ pub fn message_erreur(e: &ErreurCompte) -> String {
         // Le `Display` d'`ErreurCompte::Protocole` préfixe « réponse inattendue
         // du serveur », faux pour une entrée refusée AVANT le réseau (listes,
         // nom d'appareil) : seul le détail est montré.
-        ErreurCompte::Protocole(detail) => detail.clone(),
-        ErreurCompte::Coffre(detail) => format!("Gestionnaire d'identifiants de Windows : {detail}"),
+        ErreurCompte::Protocole(detail) => detail_borne(detail),
+        ErreurCompte::Coffre(detail) => {
+            format!("Gestionnaire d'identifiants de Windows : {}", detail_borne(detail))
+        }
     }
 }
 
@@ -85,6 +121,12 @@ struct Donnees {
     appareil_courant: Option<i64>,
     /// Le prochain tour synchronisera SANS précédent (voir l'en-tête).
     resynchro_complete: bool,
+    /// Génération de la session affichée — incrémentée par CHAQUE changement
+    /// de session (connexion, déconnexion). Voir `synchroniser`.
+    generation: u64,
+    /// Début de la dernière synchronisation lancée, pour le plancher de
+    /// `tour` (`PLANCHER_ENTRE_SYNCHROS`). `None` : aucune encore.
+    derniere_synchro: Option<Instant>,
     visible: bool,
     partage: PartageVue,
     nvenc: bool,
@@ -98,7 +140,9 @@ pub struct Noyau {
     branchements: Branchements,
     donnees: Mutex<Donnees>,
     /// Sérialise les synchronisations : une seule à la fois, qu'elle vienne
-    /// de la boucle, d'une commande ou d'un partage.
+    /// de la boucle, d'une commande ou d'un partage. Il ne couvre PAS
+    /// `connexion`/`deconnexion` — voir la garde de génération dans
+    /// `synchroniser`, et la raison de ce choix.
     synchro: Mutex<()>,
     reveil: Reveil,
 }
@@ -116,6 +160,8 @@ impl Noyau {
                 etat: None,
                 appareil_courant: None,
                 resynchro_complete: true,
+                generation: 0,
+                derniere_synchro: None,
                 visible: true,
                 partage: PartageVue::Inactif,
                 nvenc: false,
@@ -231,18 +277,31 @@ impl Noyau {
     /// pendant une attente, c'est le partage.
     pub fn synchroniser(&self) -> Result<Etat, ErreurCompte> {
         let _une_a_la_fois = self.synchro.lock().expect("verrou de synchronisation empoisonné");
-        let precedent = {
-            let d = self.donnees();
-            if d.resynchro_complete {
-                None
-            } else {
-                d.etat.clone()
-            }
+        let (precedent, generation) = {
+            let mut d = self.donnees();
+            d.derniere_synchro = Some(self.branchements.horloge.maintenant());
+            let precedent = if d.resynchro_complete { None } else { d.etat.clone() };
+            (precedent, d.generation)
         };
         let issue = sky_compte::synchroniser(&self.config, &self.coffre, precedent.as_ref());
         let appareil_courant = self.coffre.identifiant_appareil().ok().flatten();
         {
             let mut d = self.donnees();
+            // RONDE DE CORRECTION 1 (Important 1) : une réponse d'une session
+            // qui n'est plus la session courante n'écrit RIEN. `synchro` ne
+            // protège pas ce chemin — `donnees` est délibérément relâché
+            // pendant l'appel réseau (jusqu'à 5 s), et prendre `synchro` dans
+            // `connexion` y bloquerait la boucle le temps d'une connexion
+            // Discord (5 minutes). La génération est la seule garde qui tienne
+            // sans contredire l'ordre des verrous : sans elle, une déconnexion
+            // acceptée pendant la requête était annulée par la branche `Ok`,
+            // qui réaffichait code ami, amis et listes d'un compte dont les
+            // jetons n'existaient plus.
+            if d.generation != generation {
+                drop(d);
+                self.publier();
+                return issue;
+            }
             match &issue {
                 Ok(etat) => {
                     d.etat = Some(Etat { enveloppes: Vec::new(), ..etat.clone() });
@@ -305,7 +364,13 @@ impl Noyau {
 
     pub fn connexion(&self) -> Result<(), String> {
         permis_hors_partage(self.phase())?;
-        self.donnees().connexion = Connexion::EnCours;
+        {
+            // La session change : toute synchronisation déjà partie sur le
+            // réseau appartient à la précédente et ne doit rien réécrire.
+            let mut d = self.donnees();
+            d.connexion = Connexion::EnCours;
+            d.generation += 1;
+        }
         self.publier();
         if let Err(e) = (self.branchements.connecter)(&self.config, &self.coffre) {
             self.donnees().connexion = Connexion::Deconnecte;
@@ -339,22 +404,36 @@ impl Noyau {
             d.connexion = Connexion::Deconnecte;
             d.nom = None;
             d.etat = None;
+            d.appareil_courant = None;
             d.resynchro_complete = true;
+            // Même raison qu'en connexion : une réponse en vol appartient à la
+            // session qu'on vient d'oublier.
+            d.generation += 1;
         }
         self.publier();
         Ok(())
     }
 
-    /// Un tour de boucle : synchronise (sauf pendant une attente), rend la
-    /// durée du prochain sommeil.
+    /// Un tour de boucle : synchronise (sauf pendant une attente, et sauf si le
+    /// plancher n'est pas franchi), rend la durée du prochain sommeil.
     pub fn tour(&self) -> Duration {
-        let (connecte, phase) = {
+        let (connecte, phase, restant) = {
             let d = self.donnees();
-            (d.connexion == Connexion::Connecte, Phase::de(&d.partage))
+            let restant = d.derniere_synchro.and_then(|debut| {
+                PLANCHER_ENTRE_SYNCHROS
+                    .checked_sub(self.branchements.horloge.maintenant().duration_since(debut))
+            });
+            (d.connexion == Connexion::Connecte, Phase::de(&d.partage), restant)
         };
         // Pendant une attente, c'est le partage qui synchronise : la boucle lui
         // volerait les enveloppes, que le serveur efface en les livrant.
         if connecte && phase != Phase::Attente {
+            // Plancher (Mineur 4) : trop tôt, on rend le temps qui reste comme
+            // durée de sommeil plutôt que la cadence — la synchronisation part
+            // dès qu'il est franchi, pas au prochain battement.
+            if let Some(restant) = restant.filter(|r| !r.is_zero()) {
+                return restant;
+            }
             let _ = self.synchroniser();
         }
         let d = self.donnees();
@@ -380,17 +459,22 @@ impl Noyau {
 mod tests {
     use super::*;
     use crate::cadence::{CADENCE_PARTAGE, CADENCE_REDUITE, CADENCE_VISIBLE};
-    use crate::essais::contexte;
+    use crate::essais::{contexte, contexte_bloquant, HorlogeDeTest};
     use std::sync::Arc;
 
     struct SommeilEspion {
         noyau: Arc<Noyau>,
+        /// Dormir fait AVANCER l'horloge injectée d'autant : sans cela, la
+        /// boucle se heurterait au plancher `PLANCHER_ENTRE_SYNCHROS` dès son
+        /// second tour, alors qu'elle a bel et bien laissé passer sa cadence.
+        horloge: Arc<HorlogeDeTest>,
         durees: Vec<Duration>,
     }
 
     impl Sommeil for SommeilEspion {
         fn dormir(&mut self, duree: Duration, _reveil: &Reveil) {
             self.durees.push(duree);
+            self.horloge.avancer(duree);
             if self.durees.len() == 1 {
                 self.noyau.definir_visible(false);
             }
@@ -404,7 +488,11 @@ mod tests {
         // `tour` — la seconde durée reste 30 s.
         let c = contexte("sky-test-app-boucle", true);
         c.serveur.etat_mut().version = 4;
-        let mut sommeil = SommeilEspion { noyau: Arc::clone(&c.noyau), durees: Vec::new() };
+        let mut sommeil = SommeilEspion {
+            noyau: Arc::clone(&c.noyau),
+            horloge: Arc::clone(&c.horloge),
+            durees: Vec::new(),
+        };
         c.noyau.boucle(&mut sommeil, Some(3));
         assert_eq!(c.serveur.etat_mut().syncs_recues, vec![None, Some(4), Some(4)]);
         assert_eq!(sommeil.durees, vec![CADENCE_VISIBLE, CADENCE_REDUITE]);
@@ -417,10 +505,61 @@ mod tests {
         // `tour` — une synchronisation apparaît.
         let c = contexte("sky-test-app-attente", true);
         c.noyau.forcer_partage(PartageVue::Disponible { debut_ms: 0, fenetre_s: 1800, ecran: 0 });
-        let mut sommeil = SommeilEspion { noyau: Arc::clone(&c.noyau), durees: Vec::new() };
+        let mut sommeil = SommeilEspion {
+            noyau: Arc::clone(&c.noyau),
+            horloge: Arc::clone(&c.horloge),
+            durees: Vec::new(),
+        };
         c.noyau.boucle(&mut sommeil, Some(2));
         assert!(c.serveur.etat_mut().syncs_recues.is_empty());
         assert_eq!(sommeil.durees, vec![CADENCE_PARTAGE]);
+
+        // CONTRÔLE POSITIF (ronde de correction 1, Mineur 3) : l'assertion
+        // ci-dessus est négative et passerait aussi si le double était
+        // injoignable, ou si la boucle ne synchronisait jamais. Hors attente,
+        // le MÊME noyau et le MÊME double doivent produire une
+        // synchronisation — sans quoi l'absence ne prouve rien.
+        c.noyau.forcer_partage(PartageVue::Inactif);
+        c.horloge.avancer(PLANCHER_ENTRE_SYNCHROS);
+        c.noyau.tour();
+        assert_eq!(
+            c.serveur.etat_mut().syncs_recues.len(),
+            1,
+            "hors attente, la boucle synchronise bien : l'absence ci-dessus vient de l'attente"
+        );
+    }
+
+    #[test]
+    fn une_rafale_de_reveils_ne_produit_qu_une_synchronisation_par_plancher() {
+        // Mineur 4 : chaque réveil (alt-tab, fermeture, réduction) coupe le
+        // sommeil et fait refaire un tour. Sans plancher, une rafale produit
+        // autant de requêtes, hors du budget que les cadences bornent.
+        // Neutralisation : retirer le `return restant` de `tour` — deux
+        // synchronisations au lieu d'une, et la durée rendue devient 30 s.
+        let c = contexte("sky-test-app-plancher", true);
+
+        assert_eq!(c.noyau.tour(), CADENCE_VISIBLE);
+        assert_eq!(c.serveur.etat_mut().syncs_recues.len(), 1);
+
+        // Alt-tab 200 ms plus tard : le réveil a coupé le sommeil.
+        c.horloge.avancer(Duration::from_millis(200));
+        let restant = c.noyau.tour();
+        assert_eq!(
+            c.serveur.etat_mut().syncs_recues.len(),
+            1,
+            "le plancher a retenu la seconde synchronisation"
+        );
+        assert_eq!(
+            restant,
+            PLANCHER_ENTRE_SYNCHROS - Duration::from_millis(200),
+            "le tour rend le temps restant, pas la cadence : la synchronisation reportée \
+             part dès que le plancher est franchi"
+        );
+
+        // Plancher franchi : elle part.
+        c.horloge.avancer(restant);
+        assert_eq!(c.noyau.tour(), CADENCE_VISIBLE);
+        assert_eq!(c.serveur.etat_mut().syncs_recues.len(), 2);
     }
 
     #[test]
@@ -460,6 +599,57 @@ mod tests {
         assert_eq!(*c.connexions.lock().unwrap(), 0);
         assert_eq!(c.noyau.deconnexion(), Err(MESSAGE_PENDANT_PARTAGE.to_string()));
         assert!(c.noyau.coffre().jetons().unwrap().is_some(), "la session est intacte");
+    }
+
+    #[test]
+    fn une_deconnexion_pendant_une_synchronisation_en_vol_n_est_pas_annulee() {
+        // RONDE DE CORRECTION 1, Important 1. `synchro` ne couvre pas
+        // `deconnexion` (le prendre dans `connexion` bloquerait la boucle 5
+        // minutes) : c'est la génération qui garde le chemin. Sans elle, la
+        // branche `Ok` réécrivait INCONDITIONNELLEMENT `Connecte` et l'état,
+        // réaffichant code ami, amis et listes d'un compte dont les jetons
+        // n'existent plus — jusqu'à 5 minutes, et avec le mauvais message.
+        //
+        // Aucune horloge réelle : le serveur retient sa réponse jusqu'à ce que
+        // le test la libère, ce qui place la déconnexion exactement pendant la
+        // requête en vol.
+        //
+        // Neutralisation : retirer le `if d.generation != generation` de
+        // `synchroniser` — la réponse en vol ressuscite la session.
+        let c = contexte_bloquant("sky-test-app-deconnexion-en-vol");
+
+        let noyau_du_fil = Arc::clone(&c.noyau);
+        let fil = std::thread::spawn(move || noyau_du_fil.synchroniser());
+
+        c.serveur.attendre_la_requete();
+        // La requête est partie, la réponse n'est pas encore écrite.
+        c.noyau.deconnexion().unwrap();
+        assert_eq!(c.noyau.instantane().connexion, Connexion::Deconnecte);
+
+        c.serveur.liberer_la_reponse();
+        let issue = fil.join().expect("le fil de synchronisation a paniqué");
+        assert!(issue.is_ok(), "le serveur a bien répondu : c'est l'écriture qu'on éprouve");
+
+        let vue = c.noyau.instantane();
+        assert_eq!(vue.connexion, Connexion::Deconnecte, "la déconnexion tient");
+        assert!(vue.code.is_none(), "aucune donnée du compte déconnecté n'est réaffichée");
+        assert!(c.noyau.coffre().jetons().unwrap().is_none(), "les jetons restent oubliés");
+    }
+
+    #[test]
+    fn le_detail_d_une_erreur_de_protocole_est_borne_avant_l_ecran() {
+        // Mineur 2 : un seul des huit sites de construction de
+        // `Protocole` filtre le corps de la réponse. Neutralisation : rendre
+        // `detail.clone()` dans `message_erreur` — le jeton et les 1000
+        // caractères arrivent tels quels à l'interface.
+        let corps = format!(
+            "statut 500 inattendu : {{\"echo\":\"Authorization: Bearer JETON-DE-SESSION\"}}{}",
+            "x".repeat(1000)
+        );
+        let message = message_erreur(&ErreurCompte::Protocole(corps));
+        assert!(!message.contains("JETON-DE-SESSION"), "le jeton est coupé");
+        assert!(message.chars().count() <= LONGUEUR_MAX_DETAIL + 4, "le détail est borné");
+        assert!(message.starts_with("statut 500 inattendu :"), "le début reste lisible");
     }
 
     #[test]

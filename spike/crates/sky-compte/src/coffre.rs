@@ -79,9 +79,27 @@ const SERVICE_PRODUCTION: &str = "SkyShare";
 /// `sky-compte` ne dépend pas de Tauri, et le critère est le même (profil
 /// `debug` = `cargo test`, `cargo run`, exécutable de test ; profil `release` =
 /// version publiée).
+///
+/// CONSÉQUENCE SUR `sky-probe`, À CONNAÎTRE AVANT DE LANCER UNE COMMANDE
+/// (ronde de correction 1, Important 2) : cette bascule vit ICI, donc elle vaut
+/// pour TOUT ce qui ouvre un `Coffre::nouveau`, `sky-probe` compris — pas
+/// seulement pour l'application.
+///
+/// - `cargo run -p sky-probe -- …` (profil `debug`) ne voit PAS l'identité
+///   réelle du propriétaire : le coffre est vide. Un `login` y **créerait un
+///   second appareil sur son compte Discord réel**, sur la base qui porte 11
+///   comptes réels, en laissant la clé précédente orpheline côté site.
+/// - Pour retrouver son identité réelle, lancer `sky-probe` **en `--release`**.
+///   En `debug`, on travaille sur un compte de développement.
+///
+/// Le mécanisme est voulu : sans lui, le test d'instance unique — qui lance le
+/// vrai exécutable — lirait les jetons réels. C'est la consigne d'usage, pas la
+/// séparation, qui manquait.
 const SERVICE_DEVELOPPEMENT: &str = "SkyShare.dev";
 
-/// Le service que `Coffre::nouveau` utilise pour CETTE build.
+/// Le service que `Coffre::nouveau` utilise pour CETTE build — `sky-app`
+/// comme `sky-probe`. Lire `SERVICE_DEVELOPPEMENT` avant de lancer une
+/// commande de `sky-probe` : en `debug`, elle ne voit pas le compte réel.
 const SERVICE_COURANT: &str =
     if cfg!(debug_assertions) { SERVICE_DEVELOPPEMENT } else { SERVICE_PRODUCTION };
 

@@ -10,6 +10,22 @@ pub const CADENCE_REDUITE: Duration = Duration::from_secs(5 * 60);
 /// La même que la négociation (C2) : une seule source.
 pub const CADENCE_PARTAGE: Duration = sky_partage::rendez_vous::CADENCE;
 
+/// Intervalle minimal entre deux synchronisations lancées par la BOUCLE, quelle
+/// que soit leur cause (ronde de correction 1, Mineur 4).
+///
+/// Les cadences ci-dessus bornent le budget de requêtes tant que la boucle
+/// dort le temps prévu. Mais chaque réveil (`Focused(true)`, fermeture,
+/// réduction de la fenêtre) coupe le sommeil : une rafale d'alt-tab produisait
+/// autant de synchronisations, hors de tout budget. Ce plancher les ramène à
+/// une seule — et le tour qui le rencontre rend le TEMPS RESTANT comme durée
+/// de sommeil, pour que la synchronisation reportée parte dès qu'il est
+/// franchi, jamais à la cadence suivante.
+///
+/// Vaut `CADENCE_PARTAGE` : c'est la cadence la plus serrée que la spec
+/// autorise, donc la seule borne qui ne contredise aucune des trois. Une valeur
+/// plus grande casserait le battement de 2 s pendant un partage.
+pub const PLANCHER_ENTRE_SYNCHROS: Duration = CADENCE_PARTAGE;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Inactive,

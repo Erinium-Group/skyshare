@@ -29,7 +29,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use crate::coquille::CoquilleTauri;
 use crate::noyau::{Branchements, Noyau};
-use crate::reveil::SommeilReel;
+use crate::reveil::{HorlogeReelle, SommeilReel};
 
 /// Identifiant de l'icône près de l'horloge — la tâche 11 la retrouve par lui.
 pub const ID_ICONE: &str = "principal";
@@ -60,6 +60,7 @@ pub fn lancer() {
                     coquille: Box::new(CoquilleTauri::nouvelle(app.handle().clone())),
                     connecter: Box::new(sky_compte::connecter),
                     nom_machine: std::env::var("COMPUTERNAME").ok(),
+                    horloge: Box::new(HorlogeReelle),
                 },
             ));
             noyau.definir_demarrage_automatique_connu(app.autolaunch().is_enabled().unwrap_or(false));
