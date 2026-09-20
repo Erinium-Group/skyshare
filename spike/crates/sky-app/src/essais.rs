@@ -115,6 +115,11 @@ const SYNC_COMPLET: &str = concat!(
 /// `GET /api/auth/me` — `sky_compte::moi` ne lit que ces deux champs.
 const MOI: &str = r#"{"id":1,"discordName":"BOB"}"#;
 
+/// `POST /api/auth/refresh` — `sky_compte::renouveler` ne lit que `acces`, et
+/// RANGE le résultat dans le coffre (`session.rs:142`). C'est ce rangement-là
+/// que le test du constat 2 cherche à voir nettoyé.
+const RENOUVELLEMENT: &str = r#"{"acces":"jeton-renouvele"}"#;
+
 /// Serveur HTTP minimal qui **retient la première réponse** à un chemin choisi,
 /// jusqu'à ce que le test la libère. C'est ce qui permet de placer une
 /// déconnexion PENDANT une requête précise, sans dépendre d'aucune durée réelle
@@ -140,25 +145,38 @@ pub(crate) struct ServeurBloquant {
     recue: Receiver<()>,
     liberer: SyncSender<()>,
     appareils_crees: Arc<AtomicUsize>,
+    chemins: Arc<Mutex<Vec<String>>>,
     arret: Arc<AtomicBool>,
     fil: Option<JoinHandle<()>>,
 }
 
 impl ServeurBloquant {
     pub fn demarrer_en_retenant(chemin_retenu: &str) -> ServeurBloquant {
+        ServeurBloquant::demarrer(chemin_retenu, false)
+    }
+
+    /// `refuser_le_premier_sync` : le premier `GET /api/sky/sync` rend 401.
+    /// C'est le seul moyen de déclencher la reprise d'`avec_jeton_valide`
+    /// (`sky-compte/src/session.rs`) — renouvellement, puis seconde tentative —
+    /// et donc de faire ranger des jetons FRAIS dans le coffre pendant qu'une
+    /// synchronisation est en vol (ronde de correction 4, constat 2).
+    pub fn demarrer(chemin_retenu: &str, refuser_le_premier_sync: bool) -> ServeurBloquant {
         let ecoute = TcpListener::bind("127.0.0.1:0").expect("socket local");
         let port = ecoute.local_addr().unwrap().port();
         let url = format!("http://127.0.0.1:{port}");
         let (dire_recue, recue) = sync_channel(1);
         let (liberer, attendre_liberation) = sync_channel(1);
         let appareils_crees = Arc::new(AtomicUsize::new(0));
+        let chemins = Arc::new(Mutex::new(Vec::new()));
         let arret = Arc::new(AtomicBool::new(false));
 
         let chemin_retenu = chemin_retenu.to_string();
         let compteur = Arc::clone(&appareils_crees);
+        let journal = Arc::clone(&chemins);
         let arret_du_fil = Arc::clone(&arret);
         let fil = std::thread::spawn(move || {
             let mut deja_retenu = false;
+            let mut premier_sync = true;
             loop {
                 let Ok((mut flux, _)) = ecoute.accept() else { return };
                 if arret_du_fil.load(Ordering::SeqCst) {
@@ -169,15 +187,27 @@ impl ServeurBloquant {
                 let _ = flux.set_read_timeout(Some(Duration::from_secs(5)));
                 let Some(chemin) = lire_chemin(&mut flux) else { continue };
 
-                let (statut, corps) = if chemin.starts_with("/api/sky/devices") {
+                journal.lock().unwrap().push(chemin.clone());
+
+                // Statut ET phrase de raison : « HTTP/1.1 404 » suivi d'un
+                // espace et de rien du tout n'est pas une ligne de statut
+                // valide (RFC 9112 §4) — ronde de correction 4, constat 5.
+                let (statut, raison, corps) = if chemin.starts_with("/api/sky/devices") {
                     let n = compteur.fetch_add(1, Ordering::SeqCst) + 1;
-                    (201, format!("{{\"id\":{n}}}"))
+                    (201, "Created", format!("{{\"id\":{n}}}"))
                 } else if chemin.starts_with("/api/auth/me") {
-                    (200, MOI.to_string())
+                    (200, "OK", MOI.to_string())
+                } else if chemin.starts_with("/api/auth/refresh") {
+                    (200, "OK", RENOUVELLEMENT.to_string())
                 } else if chemin.starts_with("/api/sky/sync") {
-                    (200, SYNC_COMPLET.to_string())
+                    if refuser_le_premier_sync && premier_sync {
+                        premier_sync = false;
+                        (401, "Unauthorized", r#"{"error":"session expirée"}"#.to_string())
+                    } else {
+                        (200, "OK", SYNC_COMPLET.to_string())
+                    }
                 } else {
-                    (404, r#"{"error":"route inconnue du point d'arrêt"}"#.to_string())
+                    (404, "Not Found", r#"{"error":"route inconnue du point d'arrêt"}"#.to_string())
                 };
 
                 if !deja_retenu && chemin.starts_with(&chemin_retenu) {
@@ -189,7 +219,7 @@ impl ServeurBloquant {
                 }
 
                 let reponse = format!(
-                    "HTTP/1.1 {statut} \r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{corps}",
+                    "HTTP/1.1 {statut} {raison}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{corps}",
                     corps.len()
                 );
                 let _ = flux.write_all(reponse.as_bytes());
@@ -197,7 +227,7 @@ impl ServeurBloquant {
             }
         });
 
-        ServeurBloquant { url, port, recue, liberer, appareils_crees, arret, fil: Some(fil) }
+        ServeurBloquant { url, port, recue, liberer, appareils_crees, chemins, arret, fil: Some(fil) }
     }
 
     pub fn url(&self) -> String {
@@ -209,6 +239,13 @@ impl ServeurBloquant {
     /// abandonnée enregistre quand même un appareil avant d'être arrêtée.
     pub fn appareils_crees(&self) -> usize {
         self.appareils_crees.load(Ordering::SeqCst)
+    }
+
+    /// Les chemins reçus, dans l'ordre. Contrôle positif du test du constat 2 :
+    /// sans lui, « le coffre est vide » passerait aussi bien si le
+    /// renouvellement n'avait jamais eu lieu.
+    pub fn chemins(&self) -> Vec<String> {
+        self.chemins.lock().unwrap().clone()
     }
 
     /// Rend la main quand la requête retenue est arrivée. Borné : un blocage
@@ -279,7 +316,25 @@ pub(crate) struct ContexteBloquant {
 /// Un noyau connecté, branché sur `ServeurBloquant`, dont le connecteur n'est
 /// pas utilisé.
 pub(crate) fn contexte_bloquant(prefixe: &str, chemin_retenu: &str) -> ContexteBloquant {
-    let serveur = ServeurBloquant::demarrer_en_retenant(chemin_retenu);
+    contexte_bloquant_avec(prefixe, chemin_retenu, false)
+}
+
+/// Le même, mais le premier `GET /api/sky/sync` est refusé (401) : la reprise
+/// d'`avec_jeton_valide` renouvelle le jeton et le RANGE dans le coffre au
+/// milieu de la synchronisation. C'est le dispositif du constat 2 de la ronde 4.
+pub(crate) fn contexte_bloquant_avec_renouvellement(
+    prefixe: &str,
+    chemin_retenu: &str,
+) -> ContexteBloquant {
+    contexte_bloquant_avec(prefixe, chemin_retenu, true)
+}
+
+fn contexte_bloquant_avec(
+    prefixe: &str,
+    chemin_retenu: &str,
+    refuser_le_premier_sync: bool,
+) -> ContexteBloquant {
+    let serveur = ServeurBloquant::demarrer(chemin_retenu, refuser_le_premier_sync);
     let coffre = Coffre::pour_test(prefixe);
     coffre
         .ranger_jetons(&Jetons {
@@ -409,4 +464,94 @@ pub(crate) fn contexte_connexion_bloquante(prefixe: &str) -> ContexteConnexion {
         },
     ));
     ContexteConnexion { serveur, noyau, appele, liberer }
+}
+
+/// Le message que rend le connecteur quand « l'onglet a été fermé ».
+pub(crate) const MESSAGE_ONGLET_FERME: &str = "onglet de connexion fermé";
+
+/// Deux connexions retenues INDÉPENDAMMENT : la première aboutit (jetons
+/// rangés, comme le vrai `connecter`), la seconde échoue sans rien ranger —
+/// l'onglet Discord fermé. Deux canaux distincts, parce que l'enchaînement du
+/// constat 2 exige que la SECONDE soit déjà `EnCours` quand la PREMIÈRE aboutit
+/// (ronde de correction 4, constat 1).
+///
+/// Aucune durée réelle n'est attendue : les deux attentes sont des
+/// `recv_timeout` de 5 s, donc un blocage rend un test rouge et jamais une
+/// suite sans fin.
+pub(crate) struct ContexteDeuxConnexions {
+    /// Tenu en vie, jamais lu : la première connexion appelle `moi()` avant de
+    /// s'abandonner, et le double doit encore répondre à ce moment-là. Le
+    /// relâcher ici fermerait le serveur au milieu du test. Nommé avec un
+    /// souligné PLUTÔT qu'assorti d'une assertion décorative : une assertion
+    /// qui ne discrimine rien n'est pas une preuve (ronde 3, Mineur 4).
+    _serveur: FauxServeur,
+    pub noyau: Arc<Noyau>,
+    appelee: [Receiver<()>; 2],
+    liberer: [SyncSender<()>; 2],
+}
+
+impl ContexteDeuxConnexions {
+    /// `rang` : 0 pour la première connexion, 1 pour la seconde.
+    pub fn attendre_le_connecteur(&self, rang: usize) {
+        self.appelee[rang]
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| panic!("le connecteur n°{rang} n'a pas été appelé en 5 s"));
+    }
+
+    pub fn liberer_le_connecteur(&self, rang: usize) {
+        let _ = self.liberer[rang].send(());
+    }
+}
+
+pub(crate) fn contexte_deux_connexions(prefixe: &str) -> ContexteDeuxConnexions {
+    let serveur = FauxServeur::demarrer();
+    let jeton_du_premier = serveur.jeton_de_test_pour("premier");
+    // Coffre vide : l'application démarre déconnectée.
+    let coffre = Coffre::pour_test(prefixe);
+    let (dire_a, appele_a) = sync_channel(1);
+    let (dire_b, appele_b) = sync_channel(1);
+    let (liberer_a, attendre_a) = sync_channel(1);
+    let (liberer_b, attendre_b) = sync_channel(1);
+    // `Receiver` est `Send` mais pas `Sync` : le `Connecteur` exige les deux.
+    // DEUX verrous distincts, jamais un tableau sous un seul : la première
+    // connexion attend PENDANT que la seconde s'exécute, et un verrou partagé
+    // la ferait attendre le verrou au lieu de son canal — l'ordre mis en scène
+    // par le test ne serait plus celui qu'il annonce.
+    let attendre_a = Mutex::new(attendre_a);
+    let attendre_b = Mutex::new(attendre_b);
+    let appels = AtomicUsize::new(0);
+    let noyau = Arc::new(Noyau::nouveau(
+        Config::vers(&serveur.url()),
+        coffre,
+        Branchements {
+            coquille: Box::new(Arc::new(CoquilleEspion::default())),
+            connecter: Box::new(move |_config, coffre| {
+                let rang = appels.fetch_add(1, Ordering::SeqCst);
+                assert!(rang < 2, "ce contexte ne met en scène que DEUX connexions");
+                if rang == 0 {
+                    let _ = dire_a.send(());
+                    let _ = attendre_a.lock().unwrap().recv_timeout(Duration::from_secs(5));
+                    let jetons = Jetons {
+                        session: jeton_du_premier.clone(),
+                        renouvellement: "peu-importe".into(),
+                    };
+                    coffre.ranger_jetons(&jetons)?;
+                    Ok(jetons)
+                } else {
+                    let _ = dire_b.send(());
+                    let _ = attendre_b.lock().unwrap().recv_timeout(Duration::from_secs(5));
+                    // Le vrai `connecter` ne range RIEN quand il échoue.
+                    Err(ErreurCompte::Protocole(MESSAGE_ONGLET_FERME.to_string()))
+                }
+            }),
+            nom_machine: Some("MACHINE-DE-TEST".into()),
+            horloge: Box::new(HorlogeDeTest::nouvelle()),
+        },
+    ));
+    ContexteDeuxConnexions {
+        _serveur: serveur,
+        noyau,
+        appelee: [appele_a, appele_b],
+        liberer: [liberer_a, liberer_b],
+    }
 }
