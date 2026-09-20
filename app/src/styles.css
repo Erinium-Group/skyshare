@@ -1,0 +1,27 @@
+@import "tailwindcss";
+@import "@fontsource/manrope/400.css";
+@import "@fontsource/manrope/600.css";
+@import "@fontsource/instrument-serif/400.css";
+
+/* Direction artistique du site (src/app/globals.css), spec D6. */
+@theme {
+  --color-fond: #16120F;
+  --color-surface: #1D1815;
+  --color-surface-haute: #26201B;
+  --color-bordure: #332B25;
+  --color-accent: #C4664A;
+  --color-succes: #6E8F6A;
+  --color-alerte: #B0553F;
+  --color-texte: #F2ECE6;
+  --color-texte-2: #A79E96;
+  --color-texte-3: #8C837B;
+  --font-titre: "Instrument Serif", Georgia, serif;
+  --font-corps: "Manrope", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+  background: var(--color-fond);
+  color: var(--color-texte);
+  font-family: var(--font-corps);
+}

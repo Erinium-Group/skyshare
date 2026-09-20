@@ -12,6 +12,7 @@ dist
 # Tauri
 src-tauri/target
 src-tauri/gen
+spike/crates/sky-app/gen/
 
 # Secrets et configuration locale
 .env
