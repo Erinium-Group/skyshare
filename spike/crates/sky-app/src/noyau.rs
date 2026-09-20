@@ -51,6 +51,15 @@ pub struct Branchements {
 pub const MESSAGE_PENDANT_PARTAGE: &str =
     "Impossible pendant un partage ou une attente : arrête-le d'abord.";
 pub const MESSAGE_SESSION_EXPIREE: &str = "Session expirée — reconnecte-toi";
+/// Ronde de correction 2 : une déconnexion demandée pendant l'authentification
+/// l'emporte sur elle. Un message, pas un `Ok` silencieux — la connexion
+/// demandée n'a pas eu lieu — et pas une alarme : l'utilisateur a eu ce qu'il
+/// a demandé.
+pub const MESSAGE_CONNEXION_ANNULEE: &str =
+    "Connexion annulée : tu t'es déconnecté pendant l'authentification.";
+/// Ce que rend `synchroniser` quand la session a changé pendant sa requête.
+pub const MESSAGE_SESSION_CHANGEE: &str =
+    "session changée pendant la synchronisation : l'état reçu a été abandonné";
 
 /// Longueur maximale, en caractères, du détail d'erreur recopié à l'écran.
 /// Assez pour un message de validation du site, trop peu pour un corps de
@@ -300,7 +309,16 @@ impl Noyau {
             if d.generation != generation {
                 drop(d);
                 self.publier();
-                return issue;
+                // RONDE DE CORRECTION 2 (Mineur) : ne rien ÉCRIRE ne suffit
+                // pas — rendre `Ok(etat)` remettrait à l'appelant un état
+                // ENVELOPPES COMPRISES, d'une session qui n'existe plus. Sans
+                // effet aujourd'hui (`boucle` jette la valeur), mais à la
+                // tâche 11 le partage consommerait les enveloppes d'un autre
+                // compte, que le serveur a déjà effacées en les livrant : elles
+                // seraient perdues pour leur vrai destinataire. Une erreur
+                // explicite, jamais un état vide qui passerait pour une
+                // réponse normale.
+                return Err(ErreurCompte::Protocole(MESSAGE_SESSION_CHANGEE.to_string()));
             }
             match &issue {
                 Ok(etat) => {
@@ -362,30 +380,83 @@ impl Noyau {
         }
     }
 
+    /// La session a-t-elle changé depuis le début de cette connexion ?
+    fn session_changee(&self, generation: u64) -> bool {
+        self.donnees().generation != generation
+    }
+
+    /// Une déconnexion a été demandée pendant la connexion : elle gagne.
+    ///
+    /// RONDE DE CORRECTION 2. Ne rien afficher ne suffit pas : `connecter`
+    /// range les jetons frais dans le coffre AVANT de rendre la main. Les
+    /// laisser ferait croire au prochain lancement qu'il est connecté sous la
+    /// session que l'utilisateur vient de refuser — pire que le défaut
+    /// d'origine, qui ne réaffichait que des données.
+    fn abandonner_connexion(&self) -> Result<(), String> {
+        let oubli = self.coffre.oublier();
+        self.publier();
+        match oubli {
+            Ok(()) => Err(MESSAGE_CONNEXION_ANNULEE.to_string()),
+            // L'oubli a échoué : le dire, sans quoi des jetons refusés
+            // resteraient dans le trousseau en silence.
+            Err(e) => Err(format!("{MESSAGE_CONNEXION_ANNULEE} ({})", message_erreur(&e))),
+        }
+    }
+
+    /// RONDE DE CORRECTION 2 (Important) : `deconnexion` n'est bloquée que par
+    /// `permis_hors_partage`, donc elle est autorisée pendant les cinq minutes
+    /// que peut durer `connecter` (navigateur Discord). Chaque étape qui suit
+    /// relit donc la génération capturée ici. Refuser `deconnexion` pendant
+    /// `EnCours` aurait été plus simple mais piégerait l'utilisateur cinq
+    /// minutes s'il ferme l'onglet Discord : c'est la déconnexion qui gagne,
+    /// jamais l'inverse.
     pub fn connexion(&self) -> Result<(), String> {
         permis_hors_partage(self.phase())?;
-        {
+        let generation = {
             // La session change : toute synchronisation déjà partie sur le
             // réseau appartient à la précédente et ne doit rien réécrire.
             let mut d = self.donnees();
             d.connexion = Connexion::EnCours;
             d.generation += 1;
-        }
+            d.generation
+        };
         self.publier();
         if let Err(e) = (self.branchements.connecter)(&self.config, &self.coffre) {
-            self.donnees().connexion = Connexion::Deconnecte;
-            self.publier();
+            let mut d = self.donnees();
+            // Même garde sur l'échec : une déconnexion survenue pendant la
+            // tentative a déjà posé `Deconnecte`, ne pas la réécrire.
+            if d.generation == generation {
+                d.connexion = Connexion::Deconnecte;
+                drop(d);
+                self.publier();
+            }
             return Err(message_erreur(&e));
+        }
+        // Premier point de contrôle, AVANT tout appel réseau : les jetons
+        // frais sont déjà dans le coffre, c'est le plus tôt où les oublier.
+        if self.session_changee(generation) {
+            return self.abandonner_connexion();
         }
         let nom = sky_compte::moi(&self.config, &self.coffre).ok().map(|m| m.discord_name);
         {
             let mut d = self.donnees();
+            // Relu SOUS le verrou qui va écrire : entre le contrôle ci-dessus
+            // et ici, `moi` a pu durer jusqu'à 5 s.
+            if d.generation != generation {
+                drop(d);
+                return self.abandonner_connexion();
+            }
             d.nom = nom;
             d.connexion = Connexion::Connecte;
             d.resynchro_complete = true;
         }
         let appareil = self.assurer_appareil(true);
         let synchronisation = self.synchroniser();
+        // Dernier point de contrôle : `assurer_appareil` et `synchroniser`
+        // sont deux appels réseau de plus.
+        if self.session_changee(generation) {
+            return self.abandonner_connexion();
+        }
         appareil.map_err(|e| {
             format!(
                 "Connecté, mais cet appareil n'a pas pu être rattaché ({}) : il ne recevra aucune \
@@ -459,7 +530,9 @@ impl Noyau {
 mod tests {
     use super::*;
     use crate::cadence::{CADENCE_PARTAGE, CADENCE_REDUITE, CADENCE_VISIBLE};
-    use crate::essais::{contexte, contexte_bloquant, HorlogeDeTest};
+    use crate::essais::{
+        contexte, contexte_bloquant, contexte_connexion_bloquante, HorlogeDeTest,
+    };
     use std::sync::Arc;
 
     struct SommeilEspion {
@@ -628,12 +701,70 @@ mod tests {
 
         c.serveur.liberer_la_reponse();
         let issue = fil.join().expect("le fil de synchronisation a paniqué");
-        assert!(issue.is_ok(), "le serveur a bien répondu : c'est l'écriture qu'on éprouve");
+        // RONDE DE CORRECTION 2 (Mineur) : ne rien écrire ne suffisait pas —
+        // l'état complet, ENVELOPPES COMPRISES, repartait chez l'appelant.
+        // Neutralisation : rendre `issue` au lieu de l'erreur — cette
+        // assertion-ci rougit, les autres restent vertes.
+        match issue {
+            Err(ErreurCompte::Protocole(detail)) => assert_eq!(detail, MESSAGE_SESSION_CHANGEE),
+            Ok(etat) => panic!(
+                "l'état d'une session périmée est rendu à l'appelant, avec {} enveloppe(s) que le \
+                 serveur a déjà effacées en les livrant",
+                etat.enveloppes.len()
+            ),
+            Err(autre) => panic!("erreur inattendue : {autre}"),
+        }
 
         let vue = c.noyau.instantane();
         assert_eq!(vue.connexion, Connexion::Deconnecte, "la déconnexion tient");
         assert!(vue.code.is_none(), "aucune donnée du compte déconnecté n'est réaffichée");
         assert!(c.noyau.coffre().jetons().unwrap().is_none(), "les jetons restent oubliés");
+    }
+
+    #[test]
+    fn une_deconnexion_pendant_une_connexion_gagne_et_oublie_les_jetons_frais() {
+        // RONDE DE CORRECTION 2, Important. `deconnexion` n'est bloquée que par
+        // `permis_hors_partage` : elle est donc autorisée pendant les cinq
+        // minutes que peut durer `connecter`. Deux clics ordinaires suffisent —
+        // « Se connecter », le navigateur s'ouvre, « Se déconnecter ». La queue
+        // de `connexion` écrivait alors `Connecte` avec une génération
+        // concordante, ET les jetons frais que `connecter` venait de ranger
+        // restaient dans le coffre : la déconnexion était annulée, jetons
+        // compris.
+        //
+        // Aucune horloge réelle : le connecteur retient sa réponse sur un canal.
+        //
+        // Neutralisation : retirer les points de contrôle de génération de la
+        // queue de `connexion` (les deux `abandonner_connexion` et le test sous
+        // verrou) — ce test rougit, et lui seul.
+        let c = contexte_connexion_bloquante("sky-test-app-deconnexion-pendant-connexion");
+        assert_eq!(c.noyau.instantane().connexion, Connexion::Deconnecte);
+
+        let noyau_du_fil = Arc::clone(&c.noyau);
+        let fil = std::thread::spawn(move || noyau_du_fil.connexion());
+
+        c.attendre_le_connecteur();
+        assert_eq!(c.noyau.instantane().connexion, Connexion::EnCours);
+        // Le navigateur est ouvert : l'utilisateur clique « Se déconnecter ».
+        c.noyau.deconnexion().unwrap();
+        assert_eq!(c.noyau.instantane().connexion, Connexion::Deconnecte);
+
+        // Le navigateur rend la main : `connecter` range les jetons et réussit.
+        c.serveur.jeton_de_test();
+        c.liberer_le_connecteur();
+        let issue = fil.join().expect("le fil de connexion a paniqué");
+
+        assert_eq!(issue, Err(MESSAGE_CONNEXION_ANNULEE.to_string()));
+        assert_eq!(c.noyau.instantane().connexion, Connexion::Deconnecte, "la déconnexion gagne");
+        assert!(
+            c.noyau.coffre().jetons().unwrap().is_none(),
+            "les jetons rangés par le connecteur sont oubliés : ne pas les AFFICHER ne suffit pas, \
+             le prochain lancement se croirait connecté"
+        );
+        assert!(
+            c.serveur.etat_mut().appareils.is_empty(),
+            "aucun appareil n'a été rattaché à la session refusée"
+        );
     }
 
     #[test]

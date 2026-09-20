@@ -100,9 +100,15 @@ pub(crate) fn contexte(prefixe: &str, connecte: bool) -> Contexte {
 
 /// Corps d'une réponse `GET /api/sky/sync` complète et valide — la forme du
 /// double, réduite à ce que `sky_compte::synchroniser` lit.
+///
+/// Elle porte UNE enveloppe (ronde de correction 2, Mineur) : le serveur
+/// l'efface en la livrant, donc une réponse rendue à un appelant d'une session
+/// périmée la perdrait pour son vrai destinataire. C'est cette enveloppe-là que
+/// le test cherche à ne pas voir ressortir.
 const SYNC_COMPLET: &str = concat!(
-    r#"{"version":7,"code":"FAUX2345","amis":[],"demandes":[],"#,
-    r#""listes":[],"appareils":[],"enveloppes":[]}"#
+    r#"{"version":7,"code":"FAUX2345","amis":[],"demandes":[],"listes":[],"appareils":[],"#,
+    r#""enveloppes":[{"id":"1","expediteur_device_id":1,"destinataire_device_id":2,"#,
+    r#""charge":"QUJDRA=="}]}"#
 );
 
 /// Serveur HTTP minimal qui **retient sa réponse** jusqu'à ce que le test la
@@ -205,4 +211,66 @@ pub(crate) fn contexte_bloquant(prefixe: &str) -> ContexteBloquant {
         },
     ));
     ContexteBloquant { serveur, noyau }
+}
+
+// --- Connecteur qui retient sa réponse ---------------------------------
+
+/// Un noyau DÉCONNECTÉ dont le connecteur se bloque à l'appel jusqu'à ce que
+/// le test le libère — l'équivalent, pour la connexion, de `ServeurBloquant`
+/// (ronde de correction 2, Important).
+///
+/// En production, `sky_compte::connecter` ouvre le navigateur et attend au
+/// plus cinq minutes ; c'est cette fenêtre que le test doit pouvoir occuper à
+/// volonté, sans jamais attendre une durée réelle. Comme le vrai, ce
+/// connecteur **range les jetons dans le coffre avant de rendre la main** :
+/// c'est précisément ce qui rend l'annulation insuffisante si elle se contente
+/// de ne rien afficher.
+pub(crate) struct ContexteConnexion {
+    pub serveur: FauxServeur,
+    pub noyau: Arc<Noyau>,
+    appele: Receiver<()>,
+    liberer: SyncSender<()>,
+}
+
+impl ContexteConnexion {
+    /// Rend la main quand le connecteur a été appelé (le « navigateur » est
+    /// ouvert). Borné : un blocage rend un test rouge, pas une suite sans fin.
+    pub fn attendre_le_connecteur(&self) {
+        self.appele
+            .recv_timeout(Duration::from_secs(5))
+            .expect("le connecteur n'a pas été appelé en 5 s");
+    }
+
+    pub fn liberer_le_connecteur(&self) {
+        let _ = self.liberer.send(());
+    }
+}
+
+pub(crate) fn contexte_connexion_bloquante(prefixe: &str) -> ContexteConnexion {
+    let serveur = FauxServeur::demarrer();
+    let jeton = serveur.jeton_de_test();
+    // Coffre vide : l'application démarre déconnectée.
+    let coffre = Coffre::pour_test(prefixe);
+    let (dire_appele, appele) = sync_channel(1);
+    let (liberer, attendre) = sync_channel(1);
+    // `Receiver` est `Send` mais pas `Sync` : le `Connecteur` exige les deux.
+    let attendre = Mutex::new(attendre);
+    let noyau = Arc::new(Noyau::nouveau(
+        Config::vers(&serveur.url()),
+        coffre,
+        Branchements {
+            coquille: Box::new(Arc::new(CoquilleEspion::default())),
+            connecter: Box::new(move |_config, coffre| {
+                let _ = dire_appele.send(());
+                let _ = attendre.lock().unwrap().recv_timeout(Duration::from_secs(5));
+                let jetons =
+                    Jetons { session: jeton.clone(), renouvellement: "peu-importe".into() };
+                coffre.ranger_jetons(&jetons)?;
+                Ok(jetons)
+            }),
+            nom_machine: Some("MACHINE-DE-TEST".into()),
+            horloge: Box::new(HorlogeDeTest::nouvelle()),
+        },
+    ));
+    ContexteConnexion { serveur, noyau, appele, liberer }
 }
