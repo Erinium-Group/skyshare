@@ -67,3 +67,73 @@ pub async fn bloquer_ami(
 ) -> Result<String, String> {
     sur_un_fil(noyau.inner(), move |n| n.bloquer_ami(friendship_id)).await?
 }
+
+// --- Listes de diffusion ---------------------------------------------------
+//
+// Les arguments voyagent en camelCase depuis l'interface : Tauri 2 résout
+// chaque paramètre PAR SA CLÉ, sans repli — une clé absente est une erreur
+// d'invocation, pas un `None` silencieux. `friendship_id` s'invoque donc
+// `{ friendshipId }`, et les noms d'un seul mot ci-dessous restent identiques
+// des deux côtés.
+
+#[tauri::command]
+pub async fn creer_liste(
+    noyau: State<'_, Arc<Noyau>>,
+    nom: String,
+    couleur: Option<String>,
+    emoji: Option<String>,
+) -> Result<String, String> {
+    sur_un_fil(noyau.inner(), move |n| n.creer_liste(&nom, couleur.as_deref(), emoji.as_deref()))
+        .await?
+}
+
+#[tauri::command]
+pub async fn modifier_liste(
+    noyau: State<'_, Arc<Noyau>>,
+    id: i64,
+    nom: String,
+    couleur: Option<String>,
+    emoji: Option<String>,
+) -> Result<String, String> {
+    sur_un_fil(noyau.inner(), move |n| {
+        n.modifier_liste(id, &nom, couleur.as_deref(), emoji.as_deref())
+    })
+    .await?
+}
+
+#[tauri::command]
+pub async fn supprimer_liste(noyau: State<'_, Arc<Noyau>>, id: i64) -> Result<String, String> {
+    sur_un_fil(noyau.inner(), move |n| n.supprimer_liste(id)).await?
+}
+
+/// `membres` : identifiants d'UTILISATEUR des amis cochés, jamais d'amitié.
+#[tauri::command]
+pub async fn definir_membres(
+    noyau: State<'_, Arc<Noyau>>,
+    id: i64,
+    membres: Vec<i64>,
+) -> Result<String, String> {
+    sur_un_fil(noyau.inner(), move |n| n.definir_membres(id, &membres)).await?
+}
+
+// --- Mon compte ------------------------------------------------------------
+
+#[tauri::command]
+pub async fn regenerer_code(noyau: State<'_, Arc<Noyau>>) -> Result<String, String> {
+    sur_un_fil(noyau.inner(), |n| n.regenerer_code()).await?
+}
+
+#[tauri::command]
+pub async fn revoquer_appareil(noyau: State<'_, Arc<Noyau>>, id: i64) -> Result<String, String> {
+    sur_un_fil(noyau.inner(), move |n| n.revoquer_appareil(id)).await?
+}
+
+/// Touche le registre de Windows par la coquille : `spawn_blocking` comme les
+/// autres, jamais le fil de l'interface.
+#[tauri::command]
+pub async fn demarrage_automatique(
+    noyau: State<'_, Arc<Noyau>>,
+    actif: bool,
+) -> Result<(), String> {
+    sur_un_fil(noyau.inner(), move |n| n.demarrage_automatique(actif)).await?
+}

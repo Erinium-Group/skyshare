@@ -19,11 +19,20 @@ use crate::vue::Instantane;
 #[derive(Default)]
 pub(crate) struct CoquilleEspion {
     pub etats: Mutex<Vec<Instantane>>,
+    /// Les valeurs reçues par `demarrage_automatique`, dans l'ordre : le seul
+    /// moyen de prouver que la case passe bien par la coquille — c'est elle
+    /// qui touche le registre de Windows, jamais le noyau.
+    pub demarrages: Mutex<Vec<bool>>,
 }
 
 impl Coquille for Arc<CoquilleEspion> {
     fn publier_etat(&self, instantane: &Instantane) {
         self.etats.lock().unwrap().push(instantane.clone());
+    }
+
+    fn demarrage_automatique(&self, actif: bool) -> Result<(), String> {
+        self.demarrages.lock().unwrap().push(actif);
+        Ok(())
     }
 }
 

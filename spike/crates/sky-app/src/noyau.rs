@@ -26,7 +26,8 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use sky_compte::{
-    Acceptation, AjoutAmi, Blocage, Coffre, Config, ErreurCompte, Etat, Jetons, Retrait,
+    Acceptation, AjoutAmi, Blocage, ChampsListe, Coffre, Config, CreationListe, DefinitionMembres,
+    ErreurCompte, Etat, Jetons, ModificationListe, Retrait, SuppressionListe,
 };
 
 use crate::cadence::{cadence, Phase, PLANCHER_ENTRE_SYNCHROS};
@@ -74,6 +75,28 @@ pub const MESSAGE_CODE_MAL_FORME: &str =
 /// celle d'un compte qui nous a bloqué — à dessein (`annuaire.rs`). Un seul
 /// message, donc, qui ne prétend pas distinguer ce que le site confond.
 const MESSAGE_AMI_DISPARU: &str = "Cet ami n'est plus dans ta liste.";
+const MESSAGE_NOM_PRIS: &str = "Une liste porte déjà ce nom.";
+const MESSAGE_LISTE_DISPARUE: &str = "Cette liste n'existe plus.";
+
+/// LES QUATRE BORNES DU SITE, dites en français plutôt qu'en statut brut.
+///
+/// `sky-compte` les applique déjà avant tout appel réseau (`listes.rs`), mais
+/// ses refus sont rédigés pour un développeur — « 1 à 40 unités UTF-16, sans
+/// octet NUL — refusé avant tout appel au site » — et arrivent à l'écran tels
+/// quels par `detail_borne`. Les reprendre ICI ne duplique pas une protection :
+/// la protection reste celle de `sky-compte` (et, en dernier ressort, celle du
+/// site) ; ce qui est ajouté, c'est la PHRASE que lit l'utilisateur. Retirer ces
+/// contrôles ne laisserait donc passer aucune requête invalide — seulement un
+/// message illisible.
+pub const MESSAGE_NOM_LISTE_INVALIDE: &str =
+    "Le nom d'une liste fait entre 1 et 40 caractères.";
+pub const MESSAGE_COULEUR_INVALIDE: &str = "La couleur doit s'écrire #RRGGBB, par exemple #C4664A.";
+pub const MESSAGE_EMOJI_INVALIDE: &str = "Cet émoji est trop long : 8 octets au plus.";
+pub const MESSAGE_TROP_DE_MEMBRES: &str = "Une liste ne peut pas dépasser 200 membres.";
+/// Révoquer l'appareil de cette machine révoquerait aussi la session qu'il
+/// porte : l'utilisateur se retrouverait déconnecté sans l'avoir demandé.
+pub const MESSAGE_APPAREIL_COURANT: &str =
+    "C'est l'appareil que tu utilises : il ne peut pas se révoquer lui-même.";
 
 /// Longueur maximale, en caractères, du détail d'erreur recopié à l'écran.
 /// Assez pour un message de validation du site, trop peu pour un corps de
@@ -134,6 +157,26 @@ pub fn permis_hors_partage(phase: Phase) -> Result<(), String> {
     } else {
         Err(MESSAGE_PENDANT_PARTAGE.to_string())
     }
+}
+
+/// Les trois champs d'une liste, contrôlés contre les bornes du site avant
+/// qu'aucune requête ne parte. Voir les constantes de messages ci-dessus pour
+/// la raison de ce doublon assumé avec `sky-compte`.
+fn valider_champs_liste(
+    nom: &str,
+    couleur: Option<&str>,
+    emoji: Option<&str>,
+) -> Result<(), String> {
+    if !sky_compte::listes::nom_liste_valide(nom) {
+        return Err(MESSAGE_NOM_LISTE_INVALIDE.to_string());
+    }
+    if !sky_compte::listes::couleur_valide(couleur) {
+        return Err(MESSAGE_COULEUR_INVALIDE.to_string());
+    }
+    if !sky_compte::listes::emoji_valide(emoji) {
+        return Err(MESSAGE_EMOJI_INVALIDE.to_string());
+    }
+    Ok(())
 }
 
 struct Donnees {
@@ -370,6 +413,43 @@ impl Noyau {
             self.publier();
         }
         message_erreur(e)
+    }
+
+    /// Une commande a ÉCHOUÉ après son appel réseau. C'est la SIXIÈME sortie
+    /// gardée du module, trouvée à la tâche 10 en mesurant un test qui devait
+    /// passer et qui rougissait.
+    ///
+    /// Les cinq autres traitent le cas où la commande RÉUSSIT (`apres_commande`).
+    /// Celui-ci manquait, et il est atteignable par exactement le même
+    /// enchaînement : `avec_jeton_valide` prend un 401, `renouveler`
+    /// (`sky-compte/src/session.rs`) LIT les jetons, POSTe, puis les RANGE ; si
+    /// la déconnexion tombe dans cet intervalle, des jetons FRAIS atterrissent
+    /// dans le coffre qu'elle venait de vider. Que la seconde tentative aboutisse
+    /// ou échoue ne change rien au coffre — mais seule la branche qui aboutit
+    /// passait par `apres_commande`. Écran « Déconnecté », coffre PLEIN, et
+    /// `Noyau::nouveau` faisant croire au lancement suivant qu'il est connecté.
+    ///
+    /// Deux cas, donc :
+    /// - session inchangée : `apres_erreur` comme avant (message, et bascule en
+    ///   `SessionExpiree` sur un refus) ;
+    /// - session changée : ne RIEN écrire — la déconnexion a déjà posé son
+    ///   état, et écrire `SessionExpiree` par-dessus `Deconnecte` serait
+    ///   exactement le défaut de la ronde 3 — mais nettoyer le coffre.
+    fn apres_erreur_de_commande(&self, generation: u64, e: &ErreurCompte) -> String {
+        if !self.session_changee(generation) {
+            return self.apres_erreur(e);
+        }
+        let oubli = self.oublier_les_orphelins();
+        self.publier();
+        match oubli {
+            Ok(()) => message_erreur(e),
+            Err(oubli) => format!(
+                "{} De plus, les jetons n'ont pas pu être retirés du trousseau ({}) : \
+                 le prochain lancement se croira connecté. Déconnecte-toi.",
+                message_erreur(e),
+                message_erreur(&oubli)
+            ),
+        }
     }
 
     /// Au lancement : si une session existe, s'assure qu'un appareil est
@@ -797,7 +877,7 @@ impl Noyau {
             return Err("C'est ton propre code ami.".to_string());
         }
         let issue = sky_compte::ajouter_ami(&self.config, &self.coffre, &code)
-            .map_err(|e| self.apres_erreur(&e))?;
+            .map_err(|e| self.apres_erreur_de_commande(generation, &e))?;
         self.apres_commande(generation);
         match issue {
             AjoutAmi::Envoyee { .. } => Ok("Demande envoyée.".to_string()),
@@ -811,7 +891,7 @@ impl Noyau {
     pub fn accepter_ami(&self, friendship_id: i64) -> Result<String, String> {
         let generation = self.exiger_connexion()?;
         let issue = sky_compte::accepter_ami(&self.config, &self.coffre, friendship_id)
-            .map_err(|e| self.apres_erreur(&e))?;
+            .map_err(|e| self.apres_erreur_de_commande(generation, &e))?;
         self.apres_commande(generation);
         match issue {
             Acceptation::Acceptee => Ok("Demande acceptée.".to_string()),
@@ -822,7 +902,7 @@ impl Noyau {
     pub fn retirer_ami(&self, friendship_id: i64) -> Result<String, String> {
         let generation = self.exiger_connexion()?;
         let issue = sky_compte::retirer_ami(&self.config, &self.coffre, friendship_id)
-            .map_err(|e| self.apres_erreur(&e))?;
+            .map_err(|e| self.apres_erreur_de_commande(generation, &e))?;
         self.apres_commande(generation);
         match issue {
             Retrait::Retire => Ok("Ami retiré.".to_string()),
@@ -833,12 +913,132 @@ impl Noyau {
     pub fn bloquer_ami(&self, friendship_id: i64) -> Result<String, String> {
         let generation = self.exiger_connexion()?;
         let issue = sky_compte::bloquer_ami(&self.config, &self.coffre, friendship_id)
-            .map_err(|e| self.apres_erreur(&e))?;
+            .map_err(|e| self.apres_erreur_de_commande(generation, &e))?;
         self.apres_commande(generation);
         match issue {
             Blocage::Bloque => Ok("Ami bloqué.".to_string()),
             Blocage::Introuvable => Err(MESSAGE_AMI_DISPARU.to_string()),
         }
+    }
+
+    // --- Listes de diffusion (écran Listes) ---------------------------------
+    //
+    // Les quatre commandes suivent la MÊME discipline que celles d'annuaire, et
+    // pour la même raison (voir `apres_commande`) : appel réseau HORS verrou,
+    // génération capturée par `exiger_connexion` puis RELUE sous le verrou qui
+    // écrit, et nettoyage du coffre si elle a changé. Aucune n'a le droit de
+    // s'en dispenser, y compris `regenerer_code` et `revoquer_appareil`, qui
+    // passent elles aussi par `avec_jeton_valide` — donc par un `renouveler`
+    // capable de ranger des jetons frais dans un coffre qu'une déconnexion vient
+    // de vider.
+
+    pub fn creer_liste(
+        &self,
+        nom: &str,
+        couleur: Option<&str>,
+        emoji: Option<&str>,
+    ) -> Result<String, String> {
+        let generation = self.exiger_connexion()?;
+        valider_champs_liste(nom, couleur, emoji)?;
+        let issue = sky_compte::creer_liste(&self.config, &self.coffre, nom, couleur, emoji)
+            .map_err(|e| self.apres_erreur_de_commande(generation, &e))?;
+        self.apres_commande(generation);
+        match issue {
+            CreationListe::Creee(_) => Ok("Liste créée.".to_string()),
+            CreationListe::NomDejaPris => Err(MESSAGE_NOM_PRIS.to_string()),
+        }
+    }
+
+    /// L'écran d'édition montre toujours la liste entière : il envoie les
+    /// trois champs, `None` remettant couleur ou émoji à rien.
+    pub fn modifier_liste(
+        &self,
+        id: i64,
+        nom: &str,
+        couleur: Option<&str>,
+        emoji: Option<&str>,
+    ) -> Result<String, String> {
+        let generation = self.exiger_connexion()?;
+        valider_champs_liste(nom, couleur, emoji)?;
+        let champs = ChampsListe { nom: Some(nom), couleur: Some(couleur), emoji: Some(emoji) };
+        let issue = sky_compte::modifier_liste(&self.config, &self.coffre, id, &champs)
+            .map_err(|e| self.apres_erreur_de_commande(generation, &e))?;
+        self.apres_commande(generation);
+        match issue {
+            ModificationListe::Modifiee => Ok("Liste enregistrée.".to_string()),
+            ModificationListe::Introuvable => Err(MESSAGE_LISTE_DISPARUE.to_string()),
+            ModificationListe::NomDejaPris => Err(MESSAGE_NOM_PRIS.to_string()),
+        }
+    }
+
+    pub fn supprimer_liste(&self, id: i64) -> Result<String, String> {
+        let generation = self.exiger_connexion()?;
+        let issue = sky_compte::supprimer_liste(&self.config, &self.coffre, id)
+            .map_err(|e| self.apres_erreur_de_commande(generation, &e))?;
+        self.apres_commande(generation);
+        match issue {
+            SuppressionListe::Supprimee => Ok("Liste supprimée.".to_string()),
+            SuppressionListe::Introuvable => Err(MESSAGE_LISTE_DISPARUE.to_string()),
+        }
+    }
+
+    /// `membres` : identifiants d'UTILISATEUR des amis cochés.
+    pub fn definir_membres(&self, id: i64, membres: &[i64]) -> Result<String, String> {
+        let generation = self.exiger_connexion()?;
+        if membres.len() > sky_compte::listes::MEMBRES_MAX {
+            return Err(MESSAGE_TROP_DE_MEMBRES.to_string());
+        }
+        let issue = sky_compte::definir_membres(&self.config, &self.coffre, id, membres)
+            .map_err(|e| self.apres_erreur_de_commande(generation, &e))?;
+        self.apres_commande(generation);
+        match issue {
+            DefinitionMembres::Definis => Ok("Membres enregistrés.".to_string()),
+            DefinitionMembres::Refuses => Err(
+                "Un des membres n'est plus ton ami, ou la liste n'existe plus : rien n'a changé."
+                    .to_string(),
+            ),
+        }
+    }
+
+    // --- Mon compte ---------------------------------------------------------
+
+    pub fn regenerer_code(&self) -> Result<String, String> {
+        let generation = self.exiger_connexion()?;
+        let code = sky_compte::regenerer_code(&self.config, &self.coffre)
+            .map_err(|e| self.apres_erreur_de_commande(generation, &e))?;
+        self.apres_commande(generation);
+        // Le site rend 8 caractères ASCII de l'alphabet ; si ce n'était pas le
+        // cas, le découpage ci-dessous paniquerait — on montre le code brut.
+        if code.len() != 8 || !code.is_ascii() {
+            return Ok(format!("Nouveau code : {code}. L'ancien ne fonctionne plus."));
+        }
+        Ok(format!("Nouveau code : SKY-{}-{}. L'ancien ne fonctionne plus.", &code[..4], &code[4..]))
+    }
+
+    /// Jamais l'appareil de cette machine : sa révocation révoquerait aussi la
+    /// session courante (`revoquerAppareil`, site), et l'utilisateur se
+    /// retrouverait déconnecté sans avoir rien demandé de tel.
+    pub fn revoquer_appareil(&self, id: i64) -> Result<String, String> {
+        let generation = self.exiger_connexion()?;
+        let courant = self.coffre.identifiant_appareil().map_err(|e| message_erreur(&e))?;
+        if courant == Some(id) {
+            return Err(MESSAGE_APPAREIL_COURANT.to_string());
+        }
+        sky_compte::revoquer_appareil(&self.config, &self.coffre, id)
+            .map_err(|e| self.apres_erreur_de_commande(generation, &e))?;
+        self.apres_commande(generation);
+        Ok("Appareil révoqué.".to_string())
+    }
+
+    /// Le registre de Windows est touché par la COQUILLE, pas ici : aucune
+    /// session n'est requise, et rien ne part sur le réseau. L'état affiché ne
+    /// bouge qu'APRÈS un succès — une case qui se coche sans que rien ne change
+    /// au démarrage serait un mensonge muet.
+    pub fn demarrage_automatique(&self, actif: bool) -> Result<(), String> {
+        self.branchements.coquille.demarrage_automatique(actif)?;
+        self.donnees().demarrage_automatique = actif;
+        self.publier();
+        Ok(())
     }
 
     /// Un tour de boucle : synchronise (sauf pendant une attente, et sauf si le
@@ -1727,6 +1927,244 @@ mod tests {
         assert!(!message.contains("JETON-DE-SESSION"), "le jeton est coupé");
         assert!(message.chars().count() <= LONGUEUR_MAX_DETAIL + 4, "le détail est borné");
         assert!(message.starts_with("statut 500 inattendu :"), "le début reste lisible");
+    }
+
+    /// Une liste du double, avec des membres et une couleur.
+    fn liste_fausse(id: i64, nom: &str, membres: Vec<i64>) -> crate::faux_serveur::ListeFausse {
+        crate::faux_serveur::ListeFausse {
+            id,
+            nom: nom.to_string(),
+            couleur: Some("#C4664A".to_string()),
+            emoji: Some("🎮".to_string()),
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            membres,
+        }
+    }
+
+    #[test]
+    fn on_ne_revoque_pas_l_appareil_qu_on_utilise() {
+        // Révoquer l'appareil courant révoquerait aussi la session de cette
+        // machine (`revoquerAppareil`, site) : l'utilisateur serait déconnecté
+        // sans l'avoir demandé.
+        //
+        // CE QUI DISCRIMINE : le double, qui révoque VRAIMENT — sans la
+        // comparaison, `appareils_revoques` contient l'appareil courant.
+        //
+        // Neutralisation : retirer la comparaison à l'appareil du coffre — ce
+        // test rougit.
+        let c = contexte("sky-test-app-revoquer-soi", true);
+        c.noyau.demarrer(); // enregistre l'appareil de la machine
+        let courant = c.noyau.coffre().identifiant_appareil().unwrap().unwrap();
+        assert_eq!(c.noyau.revoquer_appareil(courant), Err(MESSAGE_APPAREIL_COURANT.to_string()));
+        assert!(c.serveur.etat_mut().appareils_revoques.is_empty());
+
+        // CONTRÔLE POSITIF : le MÊME double, sur un AUTRE appareil, révoque
+        // bien. Sans lui, l'assertion ci-dessus passerait aussi si la
+        // révocation ne marchait pas du tout.
+        let autre = {
+            let mut etat = c.serveur.etat_mut();
+            etat.prochain_id_appareil += 1;
+            let id = etat.prochain_id_appareil;
+            etat.cles_des_appareils.insert(id, "cle-quelconque".to_string());
+            id
+        };
+        assert_eq!(c.noyau.revoquer_appareil(autre), Ok("Appareil révoqué.".to_string()));
+        assert!(c.serveur.etat_mut().appareils_revoques.contains(&autre));
+    }
+
+    #[test]
+    fn un_code_regenere_se_voit_aussitot() {
+        // Le code n'entre pas dans le calcul de version du site (il vit dans
+        // `users.friend_code`) : seule une resynchronisation SANS précédent le
+        // montre. Neutralisation : retirer `d.resynchro_complete = true` de
+        // `apres_commande` — l'ancien code reste affiché.
+        let c = contexte("sky-test-app-code", true);
+        c.noyau.synchroniser().unwrap();
+        assert_eq!(c.noyau.instantane().code.as_deref(), Some("FAUX2345"));
+        assert_eq!(
+            c.noyau.regenerer_code(),
+            Ok("Nouveau code : SKY-REGE-NAA2. L'ancien ne fonctionne plus.".to_string())
+        );
+        assert_eq!(c.noyau.instantane().code.as_deref(), Some("REGENAA2"));
+    }
+
+    #[test]
+    fn le_demarrage_automatique_passe_par_la_coquille_et_se_voit() {
+        // Le registre de Windows n'est pas touché par le noyau : c'est la
+        // coquille qui l'écrit, et l'état affiché ne bouge qu'après son accord.
+        // Neutralisation : ne pas mettre à jour `d.demarrage_automatique` — la
+        // case resterait cochée après l'avoir décochée.
+        let c = contexte("sky-test-app-demarrage", true);
+        c.noyau.definir_demarrage_automatique_connu(true);
+        assert!(c.noyau.instantane().demarrage_automatique);
+        c.noyau.demarrage_automatique(false).unwrap();
+        assert_eq!(*c.coquille.demarrages.lock().unwrap(), vec![false]);
+        assert!(!c.noyau.instantane().demarrage_automatique);
+    }
+
+    #[test]
+    fn une_liste_supprimee_disparait_meme_si_la_version_ne_bouge_pas() {
+        // Même piège que le retrait d'un ami : le site calcule la version comme
+        // le MAX des `updated_at` des lignes qui RESTENT, et une suppression en
+        // retire une. Neutralisation : retirer `d.resynchro_complete = true` de
+        // `apres_commande` — le site rend `inchange` et la liste reste affichée.
+        let c = contexte("sky-test-app-supprimer-liste", true);
+        c.serveur.etat_mut().listes.push(liste_fausse(7, "Jeu", vec![2]));
+        c.noyau.synchroniser().unwrap();
+        assert_eq!(c.noyau.instantane().listes.len(), 1);
+        assert_eq!(c.noyau.instantane().listes[0].membres, vec![2]);
+
+        assert_eq!(c.noyau.supprimer_liste(7), Ok("Liste supprimée.".to_string()));
+        assert!(c.noyau.instantane().listes.is_empty());
+    }
+
+    #[test]
+    fn les_bornes_du_site_sont_dites_en_francais_et_rien_ne_part() {
+        // Arbitrage du contrôleur : refuser localement ce que le site
+        // refuserait, avec une phrase lisible plutôt qu'un statut brut. Les
+        // refus de `sky-compte` sont rédigés pour un développeur (« 1 à 40
+        // unités UTF-16 ») et arrivent à l'écran tels quels par `detail_borne`.
+        //
+        // CE QUI DISCRIMINE : le MESSAGE. `appels_listes` reste à 0 dans les
+        // DEUX cas — `sky-compte` refuse déjà avant le réseau — c'est donc un
+        // invariant, pas le discriminant : ces contrôles-ci ne protègent pas le
+        // site, ils protègent la lecture.
+        //
+        // Neutralisation : retirer l'appel à `valider_champs_liste` de
+        // `creer_liste` — le message devient « nom de liste invalide : 1 à 40
+        // unités UTF-16, sans octet NUL — refusé avant tout appel au site ».
+        let c = contexte("sky-test-app-bornes-listes", true);
+        assert_eq!(c.noyau.creer_liste("", None, None), Err(MESSAGE_NOM_LISTE_INVALIDE.to_string()));
+        assert_eq!(
+            c.noyau.creer_liste(&"n".repeat(41), None, None),
+            Err(MESSAGE_NOM_LISTE_INVALIDE.to_string())
+        );
+        assert_eq!(
+            c.noyau.creer_liste("Jeu", Some("rouge"), None),
+            Err(MESSAGE_COULEUR_INVALIDE.to_string())
+        );
+        assert_eq!(
+            c.noyau.creer_liste("Jeu", None, Some("123456789")),
+            Err(MESSAGE_EMOJI_INVALIDE.to_string())
+        );
+        assert_eq!(
+            c.noyau.modifier_liste(7, "Jeu", Some("#GGGGGG"), None),
+            Err(MESSAGE_COULEUR_INVALIDE.to_string())
+        );
+        let trop = (1..=201i64).collect::<Vec<_>>();
+        assert_eq!(c.noyau.definir_membres(7, &trop), Err(MESSAGE_TROP_DE_MEMBRES.to_string()));
+        assert_eq!(c.serveur.etat_mut().appels_listes, 0, "rien n'est parti sur le réseau");
+
+        // CONTRÔLE POSITIF : le MÊME double, avec des champs valides, accepte.
+        // Sans lui, tout ce qui précède passerait avec un serveur injoignable,
+        // ou avec des bornes si strictes que rien ne passerait jamais.
+        assert_eq!(
+            c.noyau.creer_liste(&"n".repeat(40), Some("#c4664a"), Some("🎮")),
+            Ok("Liste créée.".to_string())
+        );
+        assert_eq!(c.serveur.etat_mut().listes.len(), 1);
+    }
+
+    #[test]
+    fn les_commandes_de_listes_et_de_compte_exigent_une_session() {
+        // La serrure posée ET branchée, comme pour les quatre commandes
+        // d'annuaire : `exiger_connexion` n'a de valeur que si CHAQUE commande
+        // l'appelle, et elle rend la génération que l'après-commande relit.
+        //
+        // CE QUI DISCRIMINE, MESURÉ : le MESSAGE. Sans la garde, la commande
+        // descend jusqu'à `jeton_courant`, qui rend `Refuse` faute de jeton, et
+        // `apres_erreur` traduit ce refus en « Session expirée —
+        // reconnecte-toi » ET bascule l'état affiché en `SessionExpiree` : faux
+        // et alarmant pour quelqu'un qui ne s'est jamais connecté.
+        //
+        // Neutralisation : remplacer `self.exiger_connexion()?` de
+        // `supprimer_liste` par la seule lecture de génération — ce test rougit.
+        let c = contexte("sky-test-app-compte-sans-session", false);
+        assert_eq!(c.noyau.instantane().connexion, Connexion::Deconnecte);
+        assert_eq!(
+            c.noyau.creer_liste("Jeu", None, None),
+            Err(MESSAGE_NON_CONNECTE.to_string())
+        );
+        assert_eq!(
+            c.noyau.modifier_liste(1, "Jeu", None, None),
+            Err(MESSAGE_NON_CONNECTE.to_string())
+        );
+        assert_eq!(c.noyau.supprimer_liste(1), Err(MESSAGE_NON_CONNECTE.to_string()));
+        assert_eq!(c.noyau.definir_membres(1, &[2]), Err(MESSAGE_NON_CONNECTE.to_string()));
+        assert_eq!(c.noyau.regenerer_code(), Err(MESSAGE_NON_CONNECTE.to_string()));
+        assert_eq!(c.noyau.revoquer_appareil(1), Err(MESSAGE_NON_CONNECTE.to_string()));
+        assert_eq!(c.serveur.etat_mut().appels_listes, 0);
+
+        // CONTRÔLE POSITIF : le MÊME double, avec une session, laisse bien
+        // passer la même commande.
+        let d = contexte("sky-test-app-compte-avec-session", true);
+        assert_eq!(d.noyau.creer_liste("Jeu", None, None), Ok("Liste créée.".to_string()));
+        assert_eq!(d.serveur.etat_mut().appels_listes, 1);
+    }
+
+    #[test]
+    fn une_commande_qui_echoue_pendant_une_deconnexion_ne_laisse_aucun_jeton() {
+        // LA SIXIÈME SORTIE GARDÉE, trouvée à la tâche 10 : ce test a été écrit
+        // en croyant mesurer `apres_commande`, et il a rougi. Les cinq sorties
+        // gardées du module traitaient toutes le cas où la commande RÉUSSIT ;
+        // celle où elle ÉCHOUE après son appel réseau n'existait pas, et le
+        // point d'arrêt — qui ne connaît pas `/api/sky/friend-code` et rend 404
+        // à la seconde tentative — tombe exactement dedans.
+        //
+        // L'enchaînement, identique à celui du constat 2 de la ronde 4 :
+        //   `regenerer_code` POSTe `/api/sky/friend-code` → 401
+        //   → `avec_jeton_valide` reprend : `renouveler` LIT les jetons, POSTe
+        //   → l'utilisateur clique « Se déconnecter » (coffre vidé, gén. + 1)
+        //   → la réponse du renouvellement RANGE des jetons FRAIS dans ce
+        //     coffre vidé, la seconde tentative part et ÉCHOUE (404)
+        //   → l'erreur remonte par `map_err`, sans jamais passer par
+        //     `apres_commande`.
+        // Avant la correction : écran « Déconnecté », coffre PLEIN.
+        //
+        // CE QUI DISCRIMINE : le COFFRE. L'écran finit sur « Déconnecté » dans
+        // les deux cas — c'est ce qui rendait le défaut invisible.
+        //
+        // Aucune horloge réelle : le point d'arrêt retient la réponse du
+        // renouvellement, ce qui place la déconnexion exactement entre la
+        // lecture et le rangement des jetons.
+        //
+        // Neutralisation : remettre `self.apres_erreur(&e)` à la place de
+        // `self.apres_erreur_de_commande(generation, &e)` dans `regenerer_code`
+        // — ce test rougit, et lui seul.
+        let c = contexte_bloquant_avec_renouvellement(
+            "sky-test-app-code-en-vol",
+            "/api/auth/refresh",
+            "/api/sky/friend-code",
+        );
+        let noyau_du_fil = Arc::clone(&c.noyau);
+        let fil = std::thread::spawn(move || noyau_du_fil.regenerer_code());
+
+        c.serveur.attendre_la_requete();
+        c.noyau.deconnexion().unwrap();
+        assert!(
+            c.noyau.coffre().jetons().unwrap().is_none(),
+            "la déconnexion a bien vidé le coffre AVANT que le renouvellement ne réponde"
+        );
+        c.serveur.liberer_la_reponse();
+        let _ = fil.join().expect("le fil de régénération a paniqué");
+
+        // LE FAIT DANGEREUX D'ABORD.
+        assert!(
+            c.noyau.coffre().jetons().unwrap().is_none(),
+            "les jetons frais rangés par `renouveler` pendant la commande sont oubliés"
+        );
+        assert_eq!(c.noyau.instantane().connexion, Connexion::Deconnecte);
+        assert!(c.noyau.instantane().code.is_none(), "aucune donnée du compte quitté");
+
+        // CONTRÔLE POSITIF : la trace prouve que la reprise sur 401 a bien été
+        // jouée — donc que des jetons frais ont bien été rangés dans
+        // l'intervalle — et qu'aucune synchronisation n'a suivi.
+        assert_eq!(
+            c.serveur.chemins(),
+            vec!["/api/sky/friend-code", "/api/auth/refresh", "/api/sky/friend-code"],
+            "le 401, le renouvellement et la seconde tentative ont eu lieu, et aucune \
+             synchronisation d'après-commande n'a suivi"
+        );
     }
 
     #[test]

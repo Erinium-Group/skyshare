@@ -52,6 +52,13 @@ pub fn lancer() {
             commandes::accepter_ami,
             commandes::retirer_ami,
             commandes::bloquer_ami,
+            commandes::creer_liste,
+            commandes::modifier_liste,
+            commandes::supprimer_liste,
+            commandes::definir_membres,
+            commandes::regenerer_code,
+            commandes::revoquer_appareil,
+            commandes::demarrage_automatique,
         ])
         .setup(move |app| {
             installer_icone(app.handle())?;
