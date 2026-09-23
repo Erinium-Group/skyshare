@@ -22,4 +22,16 @@ export const pont = {
   bloquerAmi: (friendshipId: number) => invoke<string>("bloquer_ami", { friendshipId }),
   /** `ami` : identifiant d'UTILISATEUR. Commande ajoutée à la tâche 11. */
   regarder: (ami: number) => invoke<void>("regarder", { ami }),
+  creerListe: (nom: string, couleur: string | null, emoji: string | null) =>
+    invoke<string>("creer_liste", { nom, couleur, emoji }),
+  modifierListe: (id: number, nom: string, couleur: string | null, emoji: string | null) =>
+    invoke<string>("modifier_liste", { id, nom, couleur, emoji }),
+  supprimerListe: (id: number) => invoke<string>("supprimer_liste", { id }),
+  /** `membres` : identifiants d'UTILISATEUR (AmiVue.id), jamais d'amitié. */
+  definirMembres: (id: number, membres: number[]) =>
+    invoke<string>("definir_membres", { id, membres }),
+  regenererCode: () => invoke<string>("regenerer_code"),
+  /** `id` : identifiant d'APPAREIL. Jamais celui de cette machine — le cœur le refuse. */
+  revoquerAppareil: (id: number) => invoke<string>("revoquer_appareil", { id }),
+  demarrageAutomatique: (actif: boolean) => invoke<void>("demarrage_automatique", { actif }),
 };
