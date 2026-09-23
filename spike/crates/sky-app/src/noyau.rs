@@ -1975,9 +1975,15 @@ mod tests {
     #[test]
     fn un_code_regenere_se_voit_aussitot() {
         // Le code n'entre pas dans le calcul de version du site (il vit dans
-        // `users.friend_code`) : seule une resynchronisation SANS précédent le
-        // montre. Neutralisation : retirer `d.resynchro_complete = true` de
-        // `apres_commande` — l'ancien code reste affiché.
+        // `users.friend_code`, hors du MAX des `updated_at`) : seule une
+        // resynchronisation SANS précédent le montre, et c'est `apres_commande`
+        // qui la demande.
+        //
+        // Neutralisation : retirer `self.apres_commande(generation)` de
+        // `regenerer_code` — ce test rougit, et lui seul. (Retirer
+        // `d.resynchro_complete = true` d'`apres_commande` le ferait rougir
+        // aussi, mais avec trois autres : cette garde-là est partagée, et une
+        // neutralisation partagée ne prouve rien en propre.)
         let c = contexte("sky-test-app-code", true);
         c.noyau.synchroniser().unwrap();
         assert_eq!(c.noyau.instantane().code.as_deref(), Some("FAUX2345"));
@@ -2006,8 +2012,10 @@ mod tests {
     fn une_liste_supprimee_disparait_meme_si_la_version_ne_bouge_pas() {
         // Même piège que le retrait d'un ami : le site calcule la version comme
         // le MAX des `updated_at` des lignes qui RESTENT, et une suppression en
-        // retire une. Neutralisation : retirer `d.resynchro_complete = true` de
-        // `apres_commande` — le site rend `inchange` et la liste reste affichée.
+        // retire une. Neutralisation : retirer `self.apres_commande(generation)`
+        // de `supprimer_liste` — la liste reste affichée. (Retirer
+        // `d.resynchro_complete = true` d'`apres_commande` la ferait rester
+        // aussi, mais cette garde-là est partagée par quatre tests.)
         let c = contexte("sky-test-app-supprimer-liste", true);
         c.serveur.etat_mut().listes.push(liste_fausse(7, "Jeu", vec![2]));
         c.noyau.synchroniser().unwrap();

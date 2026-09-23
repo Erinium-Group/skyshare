@@ -421,9 +421,25 @@ mod contrat_typescript {
         // au lieu de « remise à rien ». Neutralisation : poser
         // `#[serde(skip_serializing_if = "Option::is_none")]` sur ces champs —
         // ce test rougit.
+        // `valeur["cle"]` NE CONVIENT PAS ICI : indexer un objet JSON par une
+        // clé ABSENTE rend `Null`, exactement comme une clé présente à `null`.
+        // Mesuré : avec cette écriture-là, poser
+        // `skip_serializing_if = "Option::is_none"` sur `couleur` laissait le
+        // test VERT. C'est la classe de défaut que `CLAUDE.md` disqualifie — un
+        // test qui passerait aussi bien dans le cas négatif. La présence de la
+        // clé se demande à `get`.
+        fn present_et_nul(valeur: &serde_json::Value, cle: &str) {
+            let objet = valeur.as_object().expect("un objet JSON");
+            assert_eq!(
+                objet.get(cle),
+                Some(&serde_json::Value::Null),
+                "la clé « {cle} » doit être PRÉSENTE et valoir null, pas absente"
+            );
+        }
+
         let vide = serde_json::to_value(Instantane::vide(Connexion::Deconnecte)).unwrap();
-        assert_eq!(vide["nom"], serde_json::Value::Null);
-        assert_eq!(vide["code"], serde_json::Value::Null);
+        present_et_nul(&vide, "nom");
+        present_et_nul(&vide, "code");
         let liste = serde_json::to_value(ListeVue {
             id: 1,
             nom: "Jeu".to_string(),
@@ -432,8 +448,8 @@ mod contrat_typescript {
             membres: Vec::new(),
         })
         .unwrap();
-        assert_eq!(liste["couleur"], serde_json::Value::Null);
-        assert_eq!(liste["emoji"], serde_json::Value::Null);
+        present_et_nul(&liste, "couleur");
+        present_et_nul(&liste, "emoji");
         let diffuse = serde_json::to_value(PartageVue::Diffuse {
             spectateur: None,
             depuis_ms: 1,
@@ -442,6 +458,6 @@ mod contrat_typescript {
             ecran: 0,
         })
         .unwrap();
-        assert_eq!(diffuse["spectateur"], serde_json::Value::Null);
+        present_et_nul(&diffuse, "spectateur");
     }
 }

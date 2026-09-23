@@ -80,14 +80,22 @@ describe("Listes", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Liste créée.");
   });
 
-  it("une liste qui n'existe pas encore n'offre pas de membres", () => {
+  it("une liste qui n'existe pas encore n'offre pas de membres, et le dit", async () => {
     // Le site attache les membres à une liste EXISTANTE (`PUT
-    // /lists/{id}/members`) : il n'y a pas d'identifiant à envoyer avant la
-    // création. Neutralisation : afficher les cases aussi pour « nouvelle » —
-    // elles apparaissent sans pouvoir être enregistrées.
+    // /lists/{id}/members`) : il n'y a aucun identifiant à envoyer avant la
+    // création. Des cases à cocher sans effet seraient un mensonge.
+    // Neutralisation : rendre le `fieldset` des membres aussi quand `liste` est
+    // `null` — la case « Bob » apparaît.
     render(<Listes instantane={instantaneDeTest({ amis: AMIS })} />);
-    expect(screen.queryByRole("form", { name: "Édition de la liste" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Nouvelle liste" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Nouvelle liste" }));
+    expect(edition().queryByRole("checkbox", { name: "Bob" })).toBeNull();
+    expect(edition().getByText(/une fois la liste créée/)).toBeInTheDocument();
+
+    // CONTRÔLE POSITIF : sur une liste QUI EXISTE, la même case est bien là.
+    // Sans lui, un écran qui n'affiche jamais de case satisferait le test.
+    render(<Listes instantane={instantaneDeTest({ amis: AMIS, listes: [JEU] })} />);
+    await userEvent.click(screen.getAllByRole("button", { name: /Jeu/ })[0]);
+    expect(screen.getAllByRole("checkbox", { name: "Bob" })[0]).toBeInTheDocument();
   });
 
   it("supprimer une liste demande une confirmation nommée", async () => {
