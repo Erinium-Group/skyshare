@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { duree, messageDeFin } from "./messages";
+import { decimale, duree, messageDeFin } from "./messages";
 
 /**
  * Les quatre échecs de la spec §4 ont CHACUN leur test : un seul test qui les
@@ -55,6 +55,28 @@ describe("les autres fins", () => {
     expect(messageDeFin({ cause: "aucune_demande" })).toBe(
       "Personne n'a demandé à regarder pendant 30 minutes.",
     );
+  });
+});
+
+describe("décimales", () => {
+  it("le séparateur est la VIRGULE, jamais le point", () => {
+    // RONDE DE CORRECTION 1, M1. `toFixed(1)` rend « 0.6 » — la convention
+    // anglaise — dans une application dont la langue de travail est le
+    // français, et sur la seule sortie chiffrée que l'utilisateur lit.
+    // Neutralisation : retirer le `.replace(".", ",")` — les trois assertions
+    // rougissent, la première sur « 0.6 ».
+    expect(decimale(0.6)).toBe("0,6");
+    expect(decimale(12.4)).toBe("12,4");
+    // Une décimale TOUJOURS, même sur un entier : « 5 ms » et « 5,0 ms » dans
+    // la même ligne de mesures sauteraient d'une largeur à l'autre.
+    expect(decimale(5)).toBe("5,0");
+  });
+
+  it("l'arrondi reste celui de `toFixed`, à une décimale", () => {
+    // Contrôle positif : sans lui, un `String(valeur).replace(…)` passerait le
+    // test précédent tout en affichant « 12,449999999999999 Mbps ».
+    expect(decimale(12.449999999999999)).toBe("12,4");
+    expect(decimale(0.05)).toBe("0,1");
   });
 });
 

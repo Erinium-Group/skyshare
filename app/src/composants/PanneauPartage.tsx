@@ -1,5 +1,5 @@
 import { useActions } from "../actions";
-import { duree, messageDeFin } from "../messages";
+import { decimale, duree, messageDeFin } from "../messages";
 import { pont } from "../pont";
 import type { Instantane } from "../types";
 import { useMaintenant } from "./useMaintenant";
@@ -22,20 +22,44 @@ function Mesure({ libelle, valeur }: { libelle: string; valeur: string }) {
  */
 export function PanneauPartage({ instantane }: { instantane: Instantane }) {
   const actions = useActions();
-  const maintenant = useMaintenant();
   const partage = instantane.partage;
+  // L'horloge ne bat que pour « Depuis » et « Durée » (ronde de correction 1,
+  // M2). En `inactif`, ce composant rend `null` : il faisait pourtant battre
+  // une minuterie par seconde pour rien.
+  const maintenant = useMaintenant(partage.etat === "diffuse" || partage.etat === "regarde");
   const cadre = "mb-6 flex flex-col gap-3 rounded-md bg-surface p-4";
 
-  // Comme dans la barre : jamais désactivé, borné par la seule garde
-  // d'`useActions`.
+  /**
+   * Arrêter, et le refus du cœur qui peut suivre.
+   *
+   * RONDE DE CORRECTION 1, I1 : le bouton était rendu sans `actions.message`.
+   * Or ce panneau est le SEUL porteur d'un Arrêter dans `demande` et `regarde`
+   * — la barre latérale y est sur une autre branche. Un `arreter` refusé y
+   * laissait donc un clic sans le moindre effet visible : la variante interface
+   * de « la serrure posée mais jamais branchée », et la promesse « les échecs,
+   * tous en clair » (spec §4) tenue à moitié.
+   *
+   * Jamais désactivé : un bouton d'arrêt grisé laisserait un partage en cours
+   * sans issue visible. Sa seule borne est la garde d'`useActions` — voir
+   * l'invariant écrit dans `BarrePartage`, qui vaut ici mot pour mot : les deux
+   * composants tiennent chacun leur `enVolRef`, et ne se coordonnent que parce
+   * que leurs deux boutons ne coexistent jamais.
+   */
   const arreter = (
-    <button
-      type="button"
-      className="self-start rounded-md bg-surface-haute px-4 py-2"
-      onClick={() => void actions.executer(() => pont.arreter())}
-    >
-      Arrêter
-    </button>
+    <>
+      <button
+        type="button"
+        className="self-start rounded-md bg-surface-haute px-4 py-2"
+        onClick={() => void actions.executer(() => pont.arreter())}
+      >
+        Arrêter
+      </button>
+      {actions.message && (
+        <p role="alert" className="text-sm text-alerte">
+          {actions.message}
+        </p>
+      )}
+    </>
   );
 
   switch (partage.etat) {
@@ -58,7 +82,7 @@ export function PanneauPartage({ instantane }: { instantane: Instantane }) {
           <h2 className="font-titre text-2xl">{partage.spectateur ?? "Un ami"} regarde ton écran</h2>
           <dl className="flex gap-8">
             <Mesure libelle="Depuis" valeur={duree(maintenant - partage.depuisMs)} />
-            <Mesure libelle="Débit envoyé" valeur={`${partage.debitMbps.toFixed(1)} Mbps`} />
+            <Mesure libelle="Débit envoyé" valeur={`${decimale(partage.debitMbps)} Mbps`} />
             <Mesure libelle="Aller-retour" valeur={`${Math.round(partage.rttMs)} ms`} />
           </dl>
         </section>
@@ -77,7 +101,7 @@ export function PanneauPartage({ instantane }: { instantane: Instantane }) {
       return (
         <section aria-label="Partage" className={cadre}>
           <h2 className="font-titre text-2xl">
-            Connecté en {partage.connecteEnS.toFixed(1)} s · connexion directe, sans relais
+            Connecté en {decimale(partage.connecteEnS)} s · connexion directe, sans relais
           </h2>
           {/* Spec D2, « le panneau le dit en toutes lettres » : sans cette
               phrase, l'absence d'image passe pour une panne, et l'utilisateur
@@ -89,9 +113,11 @@ export function PanneauPartage({ instantane }: { instantane: Instantane }) {
             puis jette la vidéo reçue — rien n'est écrit sur le disque.
           </p>
           <dl className="flex gap-8">
-            <Mesure libelle="Débit reçu" valeur={`${partage.debitMbps.toFixed(1)} Mbps`} />
+            <Mesure libelle="Débit reçu" valeur={`${decimale(partage.debitMbps)} Mbps`} />
+            {/* `imagesParS` est un entier côté cœur (`images_par_s: u32`) : pas
+                de décimale à séparer. */}
             <Mesure libelle="Cadence" valeur={`${partage.imagesParS} images/s`} />
-            <Mesure libelle="Gigue" valeur={`${partage.gigueMs.toFixed(1)} ms`} />
+            <Mesure libelle="Gigue" valeur={`${decimale(partage.gigueMs)} ms`} />
             <Mesure libelle="Durée" valeur={duree(maintenant - partage.depuisMs)} />
           </dl>
           {arreter}

@@ -181,9 +181,75 @@ describe("panneau de partage", () => {
         })}
       />,
     );
-    expect(screen.getByText("Connecté en 0.6 s · connexion directe, sans relais")).toBeInTheDocument();
+    expect(screen.getByText("Connecté en 0,6 s · connexion directe, sans relais")).toBeInTheDocument();
     expect(screen.getByText(/image n'est pas encore affichée/)).toBeInTheDocument();
     expect(screen.getByText("107 images/s")).toBeInTheDocument();
+  });
+
+  it("les mesures du spectateur sont écrites à la française", () => {
+    // RONDE DE CORRECTION 1, M1 : virgule décimale, pas point.
+    // Neutralisation : retirer le `.replace(".", ",")` de `decimale` — les
+    // trois assertions rougissent ici, plus celles de `messages.test.ts`.
+    render(
+      <PanneauPartage
+        instantane={instantaneDeTest({
+          partage: {
+            etat: "regarde",
+            ami: "Bob",
+            connecteEnS: 0.6,
+            debitMbps: 12.4,
+            imagesParS: 107,
+            gigueMs: 5,
+            depuisMs: Date.now(),
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("12,4 Mbps")).toBeInTheDocument();
+    expect(screen.getByText("5,0 ms")).toBeInTheDocument();
+    // La cadence est un entier côté cœur : aucune décimale à séparer.
+    expect(screen.getByText("107 images/s")).toBeInTheDocument();
+  });
+
+  it("un refus d'`arreter` s'affiche DANS LE PANNEAU, en état regarde", async () => {
+    // RONDE DE CORRECTION 1, I1. Dans `demande` et `regarde`, ce panneau est le
+    // SEUL porteur d'un bouton Arrêter : la barre latérale y est sur une autre
+    // branche. Sans cet affichage, un refus du cœur laissait le clic sans le
+    // moindre effet visible — « la serrure posée mais jamais branchée », version
+    // interface. Neutralisation : retirer le bloc `{actions.message && …}` de
+    // `arreter` dans `PanneauPartage` — ce test rougit, et LUI SEUL : celui de
+    // la barre monte `BarrePartage`, qui a son propre affichage.
+    vi.mocked(pont.arreter).mockRejectedValue("le coeur a refusé");
+    render(
+      <PanneauPartage
+        instantane={instantaneDeTest({
+          partage: {
+            etat: "regarde",
+            ami: "Bob",
+            connecteEnS: 0.6,
+            debitMbps: 12.4,
+            imagesParS: 107,
+            gigueMs: 5,
+            depuisMs: Date.now(),
+          },
+        })}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Arrêter" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("le coeur a refusé");
+  });
+
+  it("un refus d'`arreter` s'affiche aussi en état demande", async () => {
+    // Le même bouton, l'autre état. Sans ce second test, déplacer l'affichage
+    // dans la seule branche `regarde` resterait vert.
+    vi.mocked(pont.arreter).mockRejectedValue("le coeur a refusé");
+    render(
+      <PanneauPartage
+        instantane={instantaneDeTest({ partage: { etat: "demande", ami: "Bob", debutMs: Date.now() } })}
+      />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Arrêter" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("le coeur a refusé");
   });
 
   it("le panneau dit aussi que rien n'est écrit sur le disque", () => {
@@ -229,7 +295,9 @@ describe("panneau de partage", () => {
       />,
     );
     expect(screen.getByRole("heading", { name: "Bob regarde ton écran" })).toBeInTheDocument();
-    expect(screen.getByText("12.4 Mbps")).toBeInTheDocument();
+    expect(screen.getByText("12,4 Mbps")).toBeInTheDocument();
+    // L'aller-retour est ARRONDI à l'entier : une milliseconde décimale n'ajoute
+    // rien à un chiffre qui varie de dizaines.
     expect(screen.getByText("115 ms")).toBeInTheDocument();
   });
 
@@ -296,8 +364,143 @@ describe("on ne partage jamais sans le savoir", () => {
   });
 });
 
+describe("on ne reçoit pas non plus sans le savoir", () => {
+  it("la barre latérale dit qu'une réception est en cours", () => {
+    // RONDE DE CORRECTION 1, M4. Une réception consomme du débit et du quota
+    // comme une émission. Le panneau la montre déjà sur tous les écrans, mais
+    // il vit dans un `<main>` en `overflow-y-auto` : sur une longue liste
+    // d'amis, il défile hors de vue. La barre, elle, ne défile pas.
+    // Neutralisation : retirer la branche `demande | regarde` de
+    // `BarrePartage` — la région disparaît et « Partager mon écran » reprend sa
+    // place.
+    render(
+      <BarrePartage
+        instantane={instantaneDeTest({
+          partage: {
+            etat: "regarde",
+            ami: "Bob",
+            connecteEnS: 0.6,
+            debitMbps: 12.4,
+            imagesParS: 107,
+            gigueMs: 5,
+            depuisMs: Date.now(),
+          },
+        })}
+      />,
+    );
+    const zone = within(screen.getByRole("region", { name: "Réception en cours" }));
+    expect(zone.getByText("Tu regardes")).toBeInTheDocument();
+    expect(zone.getByText("Bob")).toBeInTheDocument();
+    // Partager reste hors d'atteinte pendant une réception : la machine est
+    // occupée. Ce n'est plus un `disabled` mais une branche, donc le bouton
+    // n'existe pas du tout.
+    expect(screen.queryByRole("button", { name: "Partager mon écran" })).toBeNull();
+  });
+
+  it("une demande en attente se voit aussi dans la barre", () => {
+    render(
+      <BarrePartage
+        instantane={instantaneDeTest({ partage: { etat: "demande", ami: "Bob", debutMs: Date.now() } })}
+      />,
+    );
+    const zone = within(screen.getByRole("region", { name: "Réception en cours" }));
+    expect(zone.getByText("Demande envoyée")).toBeInTheDocument();
+    expect(zone.getByText("Bob")).toBeInTheDocument();
+  });
+
+  it("la barre ne propose PAS un second Arrêter pendant une réception", () => {
+    // INVARIANT DE M3 : `useActions` tient son `enVolRef` par composant. Deux
+    // boutons Arrêter simultanés, dans deux composants, auraient deux gardes
+    // indépendantes — et deux `arreter` partiraient. Ce test fige la seule
+    // chose qui garantit aujourd'hui qu'ils ne coexistent pas.
+    // Neutralisation : ajouter un bouton Arrêter à la branche « Réception en
+    // cours » de `BarrePartage`.
+    render(
+      <BarrePartage
+        instantane={instantaneDeTest({
+          partage: {
+            etat: "regarde",
+            ami: "Bob",
+            connecteEnS: 0.6,
+            debitMbps: 12.4,
+            imagesParS: 107,
+            gigueMs: 5,
+            depuisMs: Date.now(),
+          },
+        })}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Arrêter" })).toBeNull();
+  });
+
+  it("l'état « je regarde » survit au changement d'écran", async () => {
+    courant = instantaneDeTest({
+      partage: {
+        etat: "regarde",
+        ami: "Bob",
+        connecteEnS: 0.6,
+        debitMbps: 12.4,
+        imagesParS: 107,
+        gigueMs: 5,
+        depuisMs: Date.now(),
+      },
+    });
+    render(<App />);
+    const navigation = await screen.findByRole("navigation", { name: "Navigation" });
+    await userEvent.click(within(navigation).getByRole("button", { name: "Listes" }));
+    expect(within(navigation).getByRole("region", { name: "Réception en cours" })).toBeInTheDocument();
+    // Le panneau est rendu HORS des branches `ecran === …` d'`App.tsx` : il
+    // survit lui aussi au changement d'écran. Mesuré, pas supposé — et figé ici
+    // pour que personne ne le glisse dans une branche d'écran.
+    expect(screen.getByRole("button", { name: "Arrêter" })).toBeInTheDocument();
+  });
+});
+
 describe("le temps restant s'écoule", () => {
   afterEach(() => vi.useRealTimers());
+
+  it("hors partage, AUCUNE minuterie ne tourne", () => {
+    // RONDE DE CORRECTION 1, M2. L'application « vit comme Discord » (spec D4) :
+    // elle reste ouverte des journées entières, l'écrasante majorité du temps
+    // hors de tout partage. Deux minuteries à 1 Hz y battaient en permanence,
+    // dont une dans un composant qui rend `null`.
+    // Neutralisation : rendre `useMaintenant` inconditionnel (retirer le
+    // `if (!actif) return`) — ce test rougit avec 2 au lieu de 0.
+    vi.useFakeTimers();
+    const instantane = instantaneDeTest();
+    render(
+      <>
+        <BarrePartage instantane={instantane} />
+        <PanneauPartage instantane={instantane} />
+      </>,
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("côté spectateur, l'horloge bat — mais dans le panneau seulement", () => {
+    // Contrôle positif du test ci-dessus : sans lui, « ne jamais démarrer de
+    // minuterie » le satisferait, et la durée de réception resterait figée.
+    vi.useFakeTimers();
+    const instantane = instantaneDeTest({
+      partage: {
+        etat: "regarde",
+        ami: "Bob",
+        connecteEnS: 0.6,
+        debitMbps: 12.4,
+        imagesParS: 107,
+        gigueMs: 5,
+        depuisMs: Date.now(),
+      },
+    });
+    render(
+      <>
+        <BarrePartage instantane={instantane} />
+        <PanneauPartage instantane={instantane} />
+      </>,
+    );
+    // UNE seule : la barre n'affiche aucune durée dans cet état.
+    expect(vi.getTimerCount()).toBe(1);
+  });
 
   it("le compte à rebours descend sans nouvel instantané du cœur", () => {
     // Le cœur ne publie un instantané que sur CHANGEMENT : entre deux

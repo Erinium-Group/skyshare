@@ -28,8 +28,10 @@ export function BarrePartage({ instantane }: { instantane: Instantane }) {
   // rien ne le dise.
   const [choix, setChoix] = useState<number | null>(null);
   const actions = useActions();
-  const maintenant = useMaintenant();
   const partage = instantane.partage;
+  // L'horloge ne bat que pour le « Temps restant », donc dans le seul état qui
+  // en affiche un (ronde de correction 1, M2).
+  const maintenant = useMaintenant(partage.etat === "disponible");
   const principal = instantane.ecrans.find((e) => e.principal)?.index ?? 0;
   const ecran = choix ?? principal;
 
@@ -54,7 +56,18 @@ export function BarrePartage({ instantane }: { instantane: Instantane }) {
         )}
         {/* JAMAIS désactivé, même pendant une action : un bouton d'arrêt grisé
             laisserait un partage en cours sans issue visible. Sa seule borne
-            est la garde d'`useActions`, et c'est suffisant. */}
+            est la garde d'`useActions`, et c'est suffisant.
+
+            INVARIANT À NE PAS CASSER (ronde de correction 1, M3) : `useActions`
+            tient son `enVolRef` PAR COMPOSANT. Ce bouton-ci et celui de
+            `PanneauPartage` ont donc chacun leur garde, et elles ne se parlent
+            pas. C'est sans conséquence AUJOURD'HUI parce que les deux ne
+            coexistent jamais : la barre n'affiche « Arrêter » que dans
+            `disponible` et `diffuse`, le panneau seulement dans `demande` et
+            `regarde`. Déplacer un bouton d'arrêt d'un composant à l'autre, ou
+            en ajouter un troisième, casserait cet invariant en silence — deux
+            gardes indépendantes laisseraient passer deux `arreter`. Si cela
+            devient nécessaire, remonter `useActions` au-dessus des deux. */}
         <button
           type="button"
           className="rounded-md bg-fond px-3 py-1 text-texte"
@@ -71,9 +84,34 @@ export function BarrePartage({ instantane }: { instantane: Instantane }) {
     );
   }
 
-  // Une demande envoyée ou un partage regardé occupent déjà la machine : elle
-  // ne peut pas se rendre disponible en même temps.
-  const occupe = partage.etat === "demande" || partage.etat === "regarde";
+  // RONDE DE CORRECTION 1, M4. Une réception consomme du débit et du quota
+  // exactement comme une émission. Le `PanneauPartage` la montre déjà sur tous
+  // les écrans — il est rendu hors des branches `ecran === …` d'`App.tsx` —,
+  // mais il vit dans un `<main>` en `overflow-y-auto` : sur une longue liste
+  // d'amis, il défile hors de vue. La barre latérale, elle, ne défile pas.
+  //
+  // Informatif SEULEMENT : pas de second bouton Arrêter ici. Le panneau en
+  // porte déjà un dans ces deux états, et deux boutons d'arrêt simultanés
+  // casseraient l'invariant noté plus bas.
+  if (partage.etat === "demande" || partage.etat === "regarde") {
+    return (
+      <div
+        role="region"
+        aria-label="Réception en cours"
+        className="flex flex-col gap-1 rounded-md border border-accent p-3"
+      >
+        <strong>{partage.etat === "regarde" ? "Tu regardes" : "Demande envoyée"}</strong>
+        <span className="text-sm text-texte-2">{partage.ami}</span>
+      </div>
+    );
+  }
+
+  // Ici, `partage.etat` ne peut plus valoir que `inactif` ou `termine` : les
+  // quatre autres états sont partis dans les deux branches ci-dessus. Le garde
+  // `occupe` de la première écriture a donc disparu — non pas retiré, mais
+  // devenu une comparaison que TypeScript refuse désormais de compiler, faute
+  // de recouvrement. C'est le typage qui tient l'invariant, pas une condition
+  // qu'on pourrait oublier de mettre à jour.
   return (
     <div className="flex flex-col gap-2">
       {instantane.ecrans.length > 1 && (
@@ -95,7 +133,7 @@ export function BarrePartage({ instantane }: { instantane: Instantane }) {
       )}
       <button
         type="button"
-        disabled={!instantane.nvenc || occupe || actions.enVol}
+        disabled={!instantane.nvenc || actions.enVol}
         className="w-full rounded-md bg-accent px-3 py-2 text-fond disabled:opacity-50"
         onClick={() => void actions.executer(() => pont.partager(ecran))}
       >

@@ -39,6 +39,22 @@ export function messageDeFin(fin: FinVue): string {
 }
 
 /**
+ * Un nombre à une décimale, séparateur à la VIRGULE : « 0,6 », « 12,4 ».
+ *
+ * RONDE DE CORRECTION 1, M1. `toFixed(1)` rend un point — la convention
+ * anglaise. C'est la seule sortie chiffrée que l'utilisateur lit, dans une
+ * application dont la langue de travail est le français ; la spec et les mesures
+ * du jalon 0 écrivent « 0,4 s » et « 12,4 Mbps ».
+ *
+ * Écrit à la main plutôt que par `toLocaleString("fr-FR")` : la locale d'une
+ * `WebView2` suit celle de Windows, et la même mesure s'afficherait « 12.4 » sur
+ * une machine en anglais. Le séparateur ne doit dépendre d'aucun réglage.
+ */
+export function decimale(valeur: number): string {
+  return valeur.toFixed(1).replace(".", ",");
+}
+
+/**
  * « 2 min 05 s ». Une durée négative vaut zéro : le temps restant se calcule par
  * soustraction, et la fenêtre de 30 minutes s'écoule pendant que l'instantané
  * précédent est encore à l'écran — « -1 min 55 s » n'a aucun sens pour qui le lit.
