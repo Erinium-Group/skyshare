@@ -9,10 +9,13 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use sky_compte::{Coffre, Config, ErreurCompte, Jetons};
+use sky_encode::Codec;
+use sky_partage::{Arret, ErreurPartage, Evenement, Fin};
 
 use crate::coquille::Coquille;
 use crate::faux_serveur::FauxServeur;
 use crate::noyau::{Branchements, Noyau};
+use crate::partage::Partageur;
 use crate::reveil::Horloge;
 use crate::vue::Instantane;
 
@@ -23,6 +26,10 @@ pub(crate) struct CoquilleEspion {
     /// moyen de prouver que la case passe bien par la coquille — c'est elle
     /// qui touche le registre de Windows, jamais le noyau.
     pub demarrages: Mutex<Vec<bool>>,
+    /// Les valeurs reçues par `icone_partage`, dans l'ordre : l'icône près de
+    /// l'horloge n'existe pas dans un test sans fenêtre, seul son pilotage se
+    /// prouve.
+    pub icones: Mutex<Vec<bool>>,
 }
 
 impl Coquille for Arc<CoquilleEspion> {
@@ -33,6 +40,55 @@ impl Coquille for Arc<CoquilleEspion> {
     fn demarrage_automatique(&self, actif: bool) -> Result<(), String> {
         self.demarrages.lock().unwrap().push(actif);
         Ok(())
+    }
+
+    fn icone_partage(&self, actif: bool) {
+        self.icones.lock().unwrap().push(actif);
+    }
+}
+
+/// La fenêtre qu'annonce le factice — DISTINCTE de `FENETRE_HOTE` EXPRÈS.
+///
+/// `Noyau::partager` pose déjà `FENETRE_HOTE` au clic, avant même de lancer le
+/// fil. Un factice qui annoncerait la même valeur rendrait indistinguables
+/// « l'événement est arrivé jusqu'à l'instantané » et « la réservation l'avait
+/// déjà écrit » : mesuré, un test écrit ainsi restait VERT alors que
+/// `appliquer` ne traitait plus l'événement du tout.
+pub(crate) const FENETRE_FACTICE: Duration = Duration::from_secs(90);
+
+/// Un partage qui annonce sa disponibilité puis attend l'arrêt, sans réseau
+/// ni carte graphique. Aucune capture d'écran, aucune session NVENC.
+pub(crate) struct PartageurFactice;
+
+impl Partageur for PartageurFactice {
+    fn heberger(
+        &self,
+        _noyau: &Noyau,
+        _codec: Codec,
+        _ecran: usize,
+        arret: &Arret,
+        evenements: &mut dyn FnMut(Evenement),
+    ) -> Result<Fin, ErreurPartage> {
+        evenements(Evenement::Pret);
+        evenements(Evenement::Disponible { fenetre: FENETRE_FACTICE });
+        while !arret.est_demande() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(Fin::Arrete)
+    }
+
+    fn regarder(
+        &self,
+        _noyau: &Noyau,
+        _ami: i64,
+        _lancement: Instant,
+        arret: &Arret,
+        _evenements: &mut dyn FnMut(Evenement),
+    ) -> Result<Fin, ErreurPartage> {
+        while !arret.est_demande() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(Fin::Arrete)
     }
 }
 
@@ -101,6 +157,7 @@ pub(crate) fn contexte(prefixe: &str, connecte: bool) -> Contexte {
             }),
             nom_machine: Some("MACHINE-DE-TEST".into()),
             horloge: Box::new(Arc::clone(&horloge)),
+            partageur: Box::new(PartageurFactice),
         },
     ));
     Contexte { serveur, noyau, coquille, horloge, connexions }
@@ -376,6 +433,7 @@ fn contexte_bloquant_avec(
             }),
             nom_machine: Some("MACHINE-DE-TEST".into()),
             horloge: Box::new(HorlogeDeTest::nouvelle()),
+            partageur: Box::new(PartageurFactice),
         },
     ));
     ContexteBloquant { serveur, noyau }
@@ -405,6 +463,7 @@ pub(crate) fn contexte_connexion_en_pause(prefixe: &str, chemin_retenu: &str) ->
             }),
             nom_machine: Some("MACHINE-DE-TEST".into()),
             horloge: Box::new(HorlogeDeTest::nouvelle()),
+            partageur: Box::new(PartageurFactice),
         },
     ));
     ContexteBloquant { serveur, noyau }
@@ -485,6 +544,7 @@ pub(crate) fn contexte_connexion_bloquante(prefixe: &str) -> ContexteConnexion {
             }),
             nom_machine: Some("MACHINE-DE-TEST".into()),
             horloge: Box::new(HorlogeDeTest::nouvelle()),
+            partageur: Box::new(PartageurFactice),
         },
     ));
     ContexteConnexion { serveur, noyau, appele, liberer }
@@ -570,6 +630,7 @@ pub(crate) fn contexte_deux_connexions(prefixe: &str) -> ContexteDeuxConnexions 
             }),
             nom_machine: Some("MACHINE-DE-TEST".into()),
             horloge: Box::new(HorlogeDeTest::nouvelle()),
+            partageur: Box::new(PartageurFactice),
         },
     ));
     ContexteDeuxConnexions {

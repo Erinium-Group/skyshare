@@ -22,6 +22,9 @@ export const pont = {
   bloquerAmi: (friendshipId: number) => invoke<string>("bloquer_ami", { friendshipId }),
   /** `ami` : identifiant d'UTILISATEUR. Commande ajoutée à la tâche 11. */
   regarder: (ami: number) => invoke<void>("regarder", { ami }),
+  /** `ecran` : le RANG dans `instantane.ecrans`, jamais un identifiant Windows. */
+  partager: (ecran: number) => invoke<void>("partager", { ecran }),
+  arreter: () => invoke<void>("arreter"),
   creerListe: (nom: string, couleur: string | null, emoji: string | null) =>
     invoke<string>("creer_liste", { nom, couleur, emoji }),
   modifierListe: (id: number, nom: string, couleur: string | null, emoji: string | null) =>

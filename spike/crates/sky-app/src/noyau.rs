@@ -22,20 +22,24 @@
 //! `modifier_partage`, `definir_ecrans`, les accesseurs `config` et
 //! `reveil`) : elles appartiennent à la tâche qui les branche.
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use sky_compte::{
     Acceptation, AjoutAmi, Blocage, ChampsListe, Coffre, Config, CreationListe, DefinitionMembres,
     ErreurCompte, Etat, Jetons, ModificationListe, Retrait, SuppressionListe,
 };
+use sky_encode::Codec;
+use sky_partage::rendez_vous::FENETRE_HOTE;
+use sky_partage::{Arret, ErreurPartage, Evenement, Fin};
 
 use crate::cadence::{cadence, Phase, PLANCHER_ENTRE_SYNCHROS};
 use crate::coquille::Coquille;
 use crate::materiel::nom_d_appareil;
+use crate::partage::{appliquer, fin_vue, maintenant_ms, Partageur};
 use crate::reveil::{Horloge, Reveil, Sommeil};
 use crate::vue::{
-    AmiVue, AppareilVue, Connexion, DemandeVue, EcranVue, Instantane, ListeVue, PartageVue,
+    AmiVue, AppareilVue, Connexion, DemandeVue, EcranVue, FinVue, Instantane, ListeVue, PartageVue,
 };
 
 pub type Connecteur = Box<dyn Fn(&Config, &Coffre) -> Result<Jetons, ErreurCompte> + Send + Sync>;
@@ -49,11 +53,18 @@ pub struct Branchements {
     pub nom_machine: Option<String>,
     /// `HorlogeReelle` en production ; une horloge que le test avance à la main.
     pub horloge: Box<dyn Horloge>,
+    /// `PartageurReel` en production (`sky-partage`) ; un factice dans les
+    /// tests, qui ne capture aucun écran et n'ouvre aucune session NVENC.
+    pub partageur: Box<dyn Partageur>,
 }
 
 pub const MESSAGE_PENDANT_PARTAGE: &str =
     "Impossible pendant un partage ou une attente : arrête-le d'abord.";
 pub const MESSAGE_SESSION_EXPIREE: &str = "Session expirée — reconnecte-toi";
+/// Spec §4 : pas de repli logiciel x264 (question ouverte du projet). Une
+/// machine sans carte NVIDIA peut encore REGARDER.
+pub const MESSAGE_SANS_NVIDIA: &str =
+    "Partage impossible : aucune carte NVIDIA utilisable sur cette machine.";
 /// Ronde de correction 2 : une déconnexion demandée pendant l'authentification
 /// l'emporte sur elle. Un message, pas un `Ok` silencieux — la connexion
 /// demandée n'a pas eu lieu — et pas une alarme : l'utilisateur a eu ce qu'il
@@ -195,7 +206,11 @@ struct Donnees {
     derniere_synchro: Option<Instant>,
     visible: bool,
     partage: PartageVue,
-    nvenc: bool,
+    /// Le codec retenu pour cette machine, ou `None` sans carte NVIDIA.
+    nvenc: Option<Codec>,
+    /// Le signal d'arrêt du partage EN COURS, s'il y en a un. Posé sous le même
+    /// verrou que `partage` : « réserver le partage » est une seule écriture.
+    arret: Option<Arret>,
     ecrans: Vec<EcranVue>,
     demarrage_automatique: bool,
 }
@@ -230,13 +245,20 @@ impl Noyau {
                 derniere_synchro: None,
                 visible: true,
                 partage: PartageVue::Inactif,
-                nvenc: false,
+                nvenc: None,
+                arret: None,
                 ecrans: Vec::new(),
                 demarrage_automatique: false,
             }),
             synchro: Mutex::new(()),
             reveil: Reveil::default(),
         }
+    }
+
+    /// Pour `PartageurReel`, qui appelle `sky_partage::{heberger, regarder}` :
+    /// eux seuls ont besoin de l'URL du site hors du noyau.
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     pub fn coffre(&self) -> &Coffre {
@@ -306,7 +328,7 @@ impl Noyau {
                 })
                 .unwrap_or_default(),
             partage: d.partage.clone(),
-            nvenc: d.nvenc,
+            nvenc: d.nvenc.is_some(),
             ecrans: d.ecrans.clone(),
             demarrage_automatique: d.demarrage_automatique,
         }
@@ -1041,6 +1063,162 @@ impl Noyau {
         Ok(())
     }
 
+    // --- Partage (spec §4, décisions D2 et D3) ------------------------------
+
+    /// Le codec de cette machine, relevé une fois au lancement.
+    pub fn definir_nvenc(&self, codec: Option<Codec>) {
+        self.donnees().nvenc = codec;
+        self.publier();
+    }
+
+    /// Les écrans, relevés une fois au lancement par la coquille (l'ordre
+    /// d'`EnumDisplayMonitors`, celui qu'attend la capture).
+    pub fn definir_ecrans(&self, ecrans: Vec<EcranVue>) {
+        self.donnees().ecrans = ecrans;
+        self.publier();
+    }
+
+    /// Le partage affiché change : publier, et RÉVEILLER la boucle — la cadence
+    /// dépend de la phase (2 s pendant un partage ou une attente), et sans
+    /// réveil elle ne l'apprendrait qu'au bout des 5 min du sommeil en cours.
+    fn modifier_partage(&self, partage: PartageVue) {
+        self.donnees().partage = partage;
+        self.publier();
+        self.reveil.sonner();
+    }
+
+    /// « Partager mon écran » (spec D3) : disponible `FENETRE_HOTE`, une
+    /// demande honorée au plus. La réservation — vérification de la phase,
+    /// lecture du codec ET passage en attente — se fait sous UN SEUL verrou :
+    /// deux clics ne lancent jamais deux partages.
+    ///
+    /// Aucun appel réseau, aucun accès au trousseau ici : tout cela vit dans le
+    /// fil du partage, qui ne tient aucun verrou quand il appelle
+    /// `synchroniser`.
+    pub fn partager(self: &Arc<Self>, ecran: usize) -> Result<(), String> {
+        self.exiger_connexion()?;
+        let arret = Arret::nouveau();
+        let codec = {
+            let mut d = self.donnees();
+            permis_hors_partage(Phase::de(&d.partage))?;
+            let codec = d.nvenc.ok_or_else(|| MESSAGE_SANS_NVIDIA.to_string())?;
+            d.partage = PartageVue::Disponible {
+                debut_ms: maintenant_ms(),
+                fenetre_s: FENETRE_HOTE.as_secs(),
+                ecran,
+            };
+            d.arret = Some(arret.clone());
+            codec
+        };
+        self.branchements.coquille.icone_partage(true);
+        self.publier();
+        self.reveil.sonner();
+        let noyau = Arc::clone(self);
+        let lancement = std::thread::Builder::new().name("partage".into()).spawn(move || {
+            let issue = noyau.branchements.partageur.heberger(
+                &noyau,
+                codec,
+                ecran,
+                &arret,
+                &mut |e| noyau.sur_evenement(&e),
+            );
+            noyau.terminer(&issue);
+        });
+        if let Err(e) = lancement {
+            // La réservation est posée mais personne ne la tient : la rendre,
+            // par le MÊME chemin que la fin normale — icône au repos comprise.
+            self.terminer(&Err(ErreurPartage::Autre(anyhow::anyhow!("fil de partage : {e}"))));
+            return Err("Le partage n'a pas pu démarrer.".to_string());
+        }
+        Ok(())
+    }
+
+    /// « Regarder » : `ami` est un identifiant d'UTILISATEUR, jamais d'amitié.
+    ///
+    /// `lancement` est pris AVANT tout le reste : c'est de lui que `sky-partage`
+    /// mesure « connecté en X s depuis le lancement », et l'utilisateur compte
+    /// depuis son clic, pas depuis la fin de nos vérifications.
+    pub fn regarder(self: &Arc<Self>, ami: i64) -> Result<(), String> {
+        let lancement = Instant::now();
+        self.exiger_connexion()?;
+        let arret = Arret::nouveau();
+        {
+            let mut d = self.donnees();
+            permis_hors_partage(Phase::de(&d.partage))?;
+            // Le NOM, jamais l'identifiant, est ce que verra l'interface.
+            let nom = d
+                .etat
+                .as_ref()
+                .and_then(|e| e.amis.iter().find(|a| a.id == ami))
+                .map(|a| a.discord_name.clone())
+                .ok_or_else(|| MESSAGE_AMI_DISPARU.to_string())?;
+            d.partage = PartageVue::Demande { ami: nom, debut_ms: maintenant_ms() };
+            d.arret = Some(arret.clone());
+        }
+        self.publier();
+        self.reveil.sonner();
+        let noyau = Arc::clone(self);
+        let fil = std::thread::Builder::new().name("regarder".into()).spawn(move || {
+            let issue = noyau.branchements.partageur.regarder(
+                &noyau,
+                ami,
+                lancement,
+                &arret,
+                &mut |e| noyau.sur_evenement(&e),
+            );
+            noyau.terminer(&issue);
+        });
+        if let Err(e) = fil {
+            self.terminer(&Err(ErreurPartage::Autre(anyhow::anyhow!("fil de réception : {e}"))));
+            return Err("La demande n'a pas pu partir.".to_string());
+        }
+        Ok(())
+    }
+
+    /// « Arrêter » : lève le signal ; le fil du partage le voit en 50 ms au
+    /// plus (`PAS_D_ATTENTE`), ou au tour suivant du flux. Sans effet hors
+    /// partage — le bouton n'y est pas affiché, mais rien ne coûte de le dire.
+    pub fn arreter(&self) {
+        if let Some(arret) = self.donnees().arret.as_ref() {
+            arret.demander();
+        }
+    }
+
+    /// Un événement du fil de partage. Lecture et décision sous le verrou,
+    /// écriture et publication hors de lui : `appliquer` est pur.
+    fn sur_evenement(&self, evenement: &Evenement) {
+        let suivant = {
+            let d = self.donnees();
+            appliquer(&d.partage, evenement, maintenant_ms(), d.etat.as_ref())
+        };
+        if let Some(partage) = suivant {
+            self.modifier_partage(partage);
+        }
+    }
+
+    /// La fin d'un partage, quelle qu'elle soit : le signal est rendu, l'icône
+    /// revient au repos, la cause s'affiche.
+    ///
+    /// `SessionExpiree` est la seule fin qui touche à l'état de connexion : le
+    /// site a refusé nos jetons pendant la négociation, exactement comme dans
+    /// `apres_erreur`. Rien n'est nettoyé dans le coffre ici : `synchroniser`,
+    /// le seul chemin réseau du partage, tient déjà sa garde de génération et
+    /// son `oublier_les_orphelins`.
+    fn terminer(&self, issue: &Result<Fin, ErreurPartage>) {
+        let fin = fin_vue(issue);
+        {
+            let mut d = self.donnees();
+            d.arret = None;
+            if fin == FinVue::SessionExpiree {
+                d.connexion = Connexion::SessionExpiree;
+            }
+        }
+        // Appelée aussi à la fin d'un `regarder`, où l'icône est déjà au repos :
+        // sans effet visible, et le chemin reste unique.
+        self.branchements.coquille.icone_partage(false);
+        self.modifier_partage(PartageVue::Termine { fin });
+    }
+
     /// Un tour de boucle : synchronise (sauf pendant une attente, et sauf si le
     /// plancher n'est pas franchi), rend la durée du prochain sommeil.
     pub fn tour(&self) -> Duration {
@@ -1089,8 +1267,10 @@ mod tests {
     use crate::essais::{
         contexte, contexte_bloquant, contexte_bloquant_avec_renouvellement,
         contexte_connexion_bloquante, contexte_connexion_en_pause, contexte_deux_connexions,
-        HorlogeDeTest, MESSAGE_ONGLET_FERME,
+        HorlogeDeTest, FENETRE_FACTICE, MESSAGE_ONGLET_FERME,
     };
+    use crate::vue::FinVue;
+    use sky_encode::Codec;
     use std::sync::Arc;
 
     struct SommeilEspion {
@@ -2184,5 +2364,118 @@ mod tests {
         assert_eq!(c.noyau.instantane().connexion, Connexion::SessionExpiree);
         let publies = c.coquille.etats.lock().unwrap();
         assert_eq!(publies.last().map(|i| i.connexion), Some(Connexion::SessionExpiree));
+    }
+
+    // --- Partage (tâche 11) -------------------------------------------------
+
+    /// Attend que le fil du partage ait rendu la main. Aucune durée réelle
+    /// n'est ATTENDUE : la limite de 5 s ne sert qu'à rendre un test rouge
+    /// plutôt qu'une suite sans fin.
+    fn attendre_la_fin(noyau: &Noyau) {
+        let limite = std::time::Instant::now() + Duration::from_secs(5);
+        while noyau.phase() != Phase::Inactive {
+            assert!(std::time::Instant::now() < limite, "le partage ne s'est pas arrêté en 5 s");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn sans_carte_nvidia_partager_est_refuse_et_rien_ne_demarre() {
+        // Spec §4. Neutralisation : `d.nvenc.unwrap_or(Codec::Hevc444)` —
+        // le partage démarre, l'icône change.
+        let c = contexte("sky-test-app-sans-nvidia", true);
+        assert_eq!(c.noyau.partager(0), Err(MESSAGE_SANS_NVIDIA.to_string()));
+        assert_eq!(c.noyau.phase(), Phase::Inactive);
+        assert!(c.coquille.icones.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn l_icone_change_pendant_tout_le_partage_et_revient_a_l_arret() {
+        // Spec §4 : « on ne partage jamais sans le savoir ». Neutralisations,
+        // chacune seule : retirer `icone_partage(true)` de `partager` ; retirer
+        // `icone_partage(false)` de `terminer`.
+        let c = contexte("sky-test-app-icone", true);
+        c.noyau.definir_nvenc(Some(Codec::Hevc444));
+        c.noyau.partager(0).unwrap();
+        assert_eq!(*c.coquille.icones.lock().unwrap(), vec![true]);
+        assert_eq!(c.noyau.phase(), Phase::Attente);
+
+        // Pendant l'attente : ni second partage, ni (re)connexion (spec §6).
+        assert_eq!(c.noyau.partager(0), Err(MESSAGE_PENDANT_PARTAGE.to_string()));
+        assert_eq!(c.noyau.connexion(), Err(MESSAGE_PENDANT_PARTAGE.to_string()));
+        assert_eq!(*c.connexions.lock().unwrap(), 0);
+
+        c.noyau.arreter();
+        attendre_la_fin(&c.noyau);
+        assert_eq!(*c.coquille.icones.lock().unwrap(), vec![true, false]);
+        assert_eq!(c.noyau.instantane().partage, PartageVue::Termine { fin: FinVue::Arrete });
+    }
+
+    /// Le fil du partage pousse ses événements DANS l'instantané publié : c'est
+    /// le seul chemin par lequel l'interface apprend ce que devient un partage.
+    ///
+    /// La fenêtre annoncée par le factice est distincte de `FENETRE_HOTE`
+    /// EXPRÈS (voir `essais::FENETRE_FACTICE`) : `partager` pose déjà
+    /// `FENETRE_HOTE` au clic, et une valeur identique ferait passer ce test
+    /// alors même qu'`appliquer` ignorerait l'événement. Mesuré : écrit avec
+    /// `FENETRE_HOTE`, il restait VERT sous la neutralisation.
+    ///
+    /// Neutralisation : faire rendre `None` à `appliquer` pour
+    /// `Evenement::Disponible`.
+    #[test]
+    fn les_evenements_du_partage_arrivent_dans_l_instantane_publie() {
+        let c = contexte("sky-test-app-evenements", true);
+        c.noyau.definir_nvenc(Some(Codec::Hevc444));
+        c.noyau.partager(2).unwrap();
+        // Aucune durée réelle attendue : la limite ne sert qu'à rendre un test
+        // rouge plutôt qu'une suite sans fin.
+        let limite = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let PartageVue::Disponible { fenetre_s, ecran, .. } = c.noyau.instantane().partage {
+                if fenetre_s == FENETRE_FACTICE.as_secs() {
+                    assert_eq!(ecran, 2, "l'écran choisi au clic est celui qui reste affiché");
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < limite,
+                "la fenêtre annoncée par le partage n'a jamais atteint l'instantané"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        c.noyau.arreter();
+        attendre_la_fin(&c.noyau);
+    }
+
+    #[test]
+    fn regarder_un_ami_inconnu_est_refuse_sans_rien_demarrer() {
+        let c = contexte("sky-test-app-regarder-inconnu", true);
+        c.noyau.synchroniser().unwrap();
+        assert_eq!(c.noyau.regarder(99), Err(MESSAGE_AMI_DISPARU.to_string()));
+        assert_eq!(c.noyau.phase(), Phase::Inactive);
+        assert!(c.coquille.icones.lock().unwrap().is_empty());
+    }
+
+    /// Spec §6, arbitrage 1 du contrôleur : `login` révoque l'appareil courant
+    /// et en enregistre un neuf ; le faire pendant une négociation détruirait
+    /// les enveloppes en vol. Le test précédent le prouve pour une ATTENTE
+    /// d'hôte ; celui-ci pour un FLUX établi, l'autre phase non inactive.
+    ///
+    /// Neutralisation : retirer `permis_hors_partage` de `connexion` — la
+    /// connexion part, `connexions` passe à 1.
+    #[test]
+    fn pendant_un_flux_etabli_aucune_reconnexion_ne_part() {
+        let c = contexte("sky-test-app-flux-etabli", true);
+        c.noyau.forcer_partage(PartageVue::Regarde {
+            ami: "Bob".into(),
+            connecte_en_s: 0.6,
+            debit_mbps: 12.4,
+            images_par_s: 107,
+            gigue_ms: 5.0,
+            depuis_ms: 1,
+        });
+        assert_eq!(c.noyau.phase(), Phase::EnCours);
+        assert_eq!(c.noyau.connexion(), Err(MESSAGE_PENDANT_PARTAGE.to_string()));
+        assert_eq!(*c.connexions.lock().unwrap(), 0);
     }
 }

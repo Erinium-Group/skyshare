@@ -26,7 +26,9 @@ tauri-plugin-single-instance = "=2.4.4"
 tauri-plugin-autostart = "=2.5.1"
 serde.workspace = true
 serde_json.workspace = true
+anyhow.workspace = true
 sky-compte = { version = "0.0.0", path = "../sky-compte" }
+sky-encode = { version = "0.0.0", path = "../sky-encode" }
 sky-partage = { version = "0.0.0", path = "../sky-partage" }
 
 # Le serveur double de `sky-compte` (inclus par `#[path]` dans lib.rs, tests

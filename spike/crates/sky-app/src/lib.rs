@@ -7,6 +7,7 @@ pub mod coquille;
 pub mod demarrage;
 pub mod materiel;
 pub mod noyau;
+pub mod partage;
 pub mod reveil;
 pub mod vue;
 
@@ -59,6 +60,9 @@ pub fn lancer() {
             commandes::regenerer_code,
             commandes::revoquer_appareil,
             commandes::demarrage_automatique,
+            commandes::partager,
+            commandes::regarder,
+            commandes::arreter,
         ])
         .setup(move |app| {
             installer_icone(app.handle())?;
@@ -72,13 +76,19 @@ pub fn lancer() {
                     connecter: Box::new(sky_compte::connecter),
                     nom_machine: std::env::var("COMPUTERNAME").ok(),
                     horloge: Box::new(HorlogeReelle),
+                    partageur: Box::new(crate::partage::PartageurReel),
                 },
             ));
             noyau.definir_demarrage_automatique_connu(app.autolaunch().is_enabled().unwrap_or(false));
             noyau.definir_visible(!au_demarrage);
+            noyau.definir_ecrans(lister_ecrans(app.handle()));
             app.manage(Arc::clone(&noyau));
             // La boucle unique, sur son propre fil (spec §3).
             std::thread::Builder::new().name("synchronisation".into()).spawn(move || {
+                // Sur ce fil, jamais sur celui de `setup` : `probe_hardware`
+                // ouvre `nvcuda.dll` et interroge la carte, ce qui retarderait
+                // l'affichage de la fenêtre.
+                noyau.definir_nvenc(materiel::detecter_nvenc(sky_encode::probe_hardware));
                 noyau.demarrer();
                 noyau.boucle(&mut SommeilReel, None);
             })?;
@@ -125,6 +135,31 @@ fn montrer_fenetre(app: &AppHandle) {
     if let Some(noyau) = app.try_state::<Arc<Noyau>>() {
         noyau.definir_visible(true);
     }
+}
+
+/// Les écrans, dans l'ordre d'`EnumDisplayMonitors` — celui qu'attend
+/// `WgcCapture::new` (relevé : `tao` énumère par le même appel, dans le même
+/// ordre ; voir le brief de la tâche 11).
+///
+/// L'écran principal est reconnu par son NOM : `primary_monitor()` rend un
+/// `Monitor` distinct de ceux d'`available_monitors()`, jamais comparable par
+/// identité. Un écran sans nom n'est jamais dit principal, plutôt que de
+/// laisser `None == None` en désigner un au hasard.
+fn lister_ecrans(app: &AppHandle) -> Vec<crate::vue::EcranVue> {
+    let principal = app.primary_monitor().ok().flatten().and_then(|m| m.name().cloned());
+    app.available_monitors()
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(index, ecran)| {
+            let taille = ecran.size();
+            crate::vue::EcranVue {
+                index,
+                nom: format!("Écran {} — {}×{}", index + 1, taille.width, taille.height),
+                principal: ecran.name().is_some() && ecran.name().cloned() == principal,
+            }
+        })
+        .collect()
 }
 
 fn installer_icone(app: &AppHandle) -> tauri::Result<()> {
