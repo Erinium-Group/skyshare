@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { BarrePartage } from "./composants/BarrePartage";
+import { PanneauPartage } from "./composants/PanneauPartage";
 import { Disposition, type Ecran } from "./Disposition";
 import { Amis } from "./ecrans/Amis";
 import { Connexion } from "./ecrans/Connexion";
@@ -23,16 +25,17 @@ export function App() {
   // `!== "connecte"` et non `=== "deconnecte"` : `en_cours` et
   // `session_expiree` n'ont pas de session utilisable non plus.
   if (instantane.connexion !== "connecte") return <Connexion connexion={instantane.connexion} />;
+  // `BarrePartage` va dans `bas` — la barre latérale — et JAMAIS dans les
+  // enfants : c'est ce qui garde l'état d'un partage visible quel que soit
+  // l'écran choisi (arbitrage 3, « on ne partage jamais sans le savoir »). Le
+  // `PanneauPartage`, lui, est le détail de l'écran courant, en tête.
   return (
     <Disposition
       ecran={ecran}
       choisir={setEcran}
-      bas={
-        <button type="button" disabled className="w-full rounded-md bg-accent px-3 py-2 text-fond disabled:opacity-50">
-          Partager mon écran
-        </button>
-      }
+      bas={<BarrePartage instantane={instantane} />}
     >
+      <PanneauPartage instantane={instantane} />
       {ecran === "amis" && <Amis instantane={instantane} />}
       {ecran === "listes" && <Listes instantane={instantane} />}
       {ecran === "compte" && <MonCompte instantane={instantane} />}
