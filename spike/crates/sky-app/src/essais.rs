@@ -17,7 +17,7 @@ use crate::faux_serveur::FauxServeur;
 use crate::noyau::{Branchements, Noyau};
 use crate::partage::Partageur;
 use crate::reveil::Horloge;
-use crate::vue::Instantane;
+use crate::vue::{EcranVue, Instantane};
 
 #[derive(Default)]
 pub(crate) struct CoquilleEspion {
@@ -30,6 +30,9 @@ pub(crate) struct CoquilleEspion {
     /// l'horloge n'existe pas dans un test sans fenêtre, seul son pilotage se
     /// prouve.
     pub icones: Mutex<Vec<bool>>,
+    /// Ce que la coquille répond à `ecrans()`. Le test le change pour mettre en
+    /// scène un écran branché ou débranché, sans aucun matériel.
+    pub ecrans: Mutex<Vec<EcranVue>>,
 }
 
 impl Coquille for Arc<CoquilleEspion> {
@@ -44,6 +47,10 @@ impl Coquille for Arc<CoquilleEspion> {
 
     fn icone_partage(&self, actif: bool) {
         self.icones.lock().unwrap().push(actif);
+    }
+
+    fn ecrans(&self) -> Vec<EcranVue> {
+        self.ecrans.lock().unwrap().clone()
     }
 }
 

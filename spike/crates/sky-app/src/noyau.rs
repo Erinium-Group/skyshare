@@ -345,7 +345,40 @@ impl Noyau {
 
     pub fn definir_visible(&self, visible: bool) {
         self.donnees().visible = visible;
+        if visible {
+            self.rafraichir_ecrans();
+        }
         self.reveil.sonner();
+    }
+
+    /// Relève les écrans et ne publie QUE s'ils ont changé.
+    ///
+    /// AU RETOUR AU PREMIER PLAN, et pas au lancement seulement (ronde de
+    /// correction 1, constat I3) : la liste était figée par `setup`, donc un
+    /// écran branché ou débranché ensuite laissait `instantane.ecrans` périmé —
+    /// et `partager(rang)` visait alors un AUTRE moniteur que celui affiché.
+    /// C'est le moment juste : il n'existe aucune façon de cliquer « Partager »
+    /// sans que la fenêtre soit revenue devant, et l'énumération ne coûte qu'un
+    /// appel à Windows.
+    ///
+    /// Le « seulement si ça a changé » n'est pas une optimisation décorative :
+    /// chaque `Focused(true)` passe ici, et publier à chaque alt-tab noierait
+    /// l'interface sous des instantanés identiques.
+    fn rafraichir_ecrans(&self) {
+        // Hors verrou : c'est un appel à la coquille (règle de l'en-tête).
+        let ecrans = self.branchements.coquille.ecrans();
+        let change = {
+            let mut d = self.donnees();
+            if d.ecrans == ecrans {
+                false
+            } else {
+                d.ecrans = ecrans;
+                true
+            }
+        };
+        if change {
+            self.publier();
+        }
     }
 
     pub fn definir_demarrage_automatique_connu(&self, actif: bool) {
@@ -1068,13 +1101,6 @@ impl Noyau {
     /// Le codec de cette machine, relevé une fois au lancement.
     pub fn definir_nvenc(&self, codec: Option<Codec>) {
         self.donnees().nvenc = codec;
-        self.publier();
-    }
-
-    /// Les écrans, relevés une fois au lancement par la coquille (l'ordre
-    /// d'`EnumDisplayMonitors`, celui qu'attend la capture).
-    pub fn definir_ecrans(&self, ecrans: Vec<EcranVue>) {
-        self.donnees().ecrans = ecrans;
         self.publier();
     }
 
@@ -2368,6 +2394,49 @@ mod tests {
 
     // --- Partage (tâche 11) -------------------------------------------------
 
+    fn ecran(index: usize, nom: &str) -> EcranVue {
+        EcranVue { index, nom: nom.to_string(), principal: index == 0 }
+    }
+
+    /// RONDE DE CORRECTION 1, constat I3. La liste était relevée UNE fois, dans
+    /// `setup`. Un écran branché ou débranché ensuite laissait `instantane.ecrans`
+    /// périmé, et `partager(rang)` visait alors un autre moniteur que celui que
+    /// l'utilisateur voyait à l'écran — « partager le mauvais écran », par une
+    /// cause certaine et interne, pas seulement supposée.
+    ///
+    /// Neutralisations, chacune seule : retirer l'appel à `rafraichir_ecrans`
+    /// de `definir_visible` ; publier sans condition dans `rafraichir_ecrans`
+    /// (le troisième volet rougit).
+    #[test]
+    fn les_ecrans_sont_releves_a_chaque_retour_au_premier_plan() {
+        let c = contexte("sky-test-app-ecrans", true);
+        *c.coquille.ecrans.lock().unwrap() = vec![ecran(0, "A")];
+        c.noyau.definir_visible(true);
+        assert_eq!(c.noyau.instantane().ecrans, vec![ecran(0, "A")]);
+
+        // Un second écran est branché PENDANT que la fenêtre est cachée.
+        c.noyau.definir_visible(false);
+        *c.coquille.ecrans.lock().unwrap() = vec![ecran(0, "A"), ecran(1, "B")];
+        assert_eq!(
+            c.noyau.instantane().ecrans,
+            vec![ecran(0, "A")],
+            "rien ne doit changer tant que la fenêtre est cachée"
+        );
+
+        c.noyau.definir_visible(true);
+        let attendu = vec![ecran(0, "A"), ecran(1, "B")];
+        assert_eq!(c.noyau.instantane().ecrans, attendu);
+        // PUBLIÉE, pas seulement en mémoire : c'est l'interface qui affiche le
+        // choix d'écran.
+        assert_eq!(c.coquille.etats.lock().unwrap().last().unwrap().ecrans, attendu);
+
+        // Un retour au premier plan SANS changement ne republie rien : chaque
+        // alt-tab passe ici.
+        let avant = c.coquille.etats.lock().unwrap().len();
+        c.noyau.definir_visible(true);
+        assert_eq!(c.coquille.etats.lock().unwrap().len(), avant);
+    }
+
     /// Attend que le fil du partage ait rendu la main. Aucune durée réelle
     /// n'est ATTENDUE : la limite de 5 s ne sert qu'à rendre un test rouge
     /// plutôt qu'une suite sans fin.
@@ -2411,38 +2480,67 @@ mod tests {
         assert_eq!(c.noyau.instantane().partage, PartageVue::Termine { fin: FinVue::Arrete });
     }
 
-    /// Le fil du partage pousse ses événements DANS l'instantané publié : c'est
-    /// le seul chemin par lequel l'interface apprend ce que devient un partage.
+    /// Toutes les fenêtres `Disponible` PUBLIÉES vers l'interface, dans
+    /// l'ordre. `coquille.etats` et non `noyau.instantane()` : le second
+    /// reconstruit depuis `donnees` SANS rien publier, donc il répond aussi bien
+    /// quand plus personne ne publie (ronde de correction 1, constat I1).
+    fn fenetres_publiees(c: &crate::essais::Contexte) -> Vec<u64> {
+        c.coquille
+            .etats
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|i| match i.partage {
+                PartageVue::Disponible { fenetre_s, .. } => Some(fenetre_s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Le fil du partage pousse ses événements JUSQU'À L'INTERFACE : c'est le
+    /// seul chemin par lequel elle apprend ce que devient un partage — et c'est
+    /// ce qui justifie qu'il n'y ait pas de second canal d'événements.
     ///
-    /// La fenêtre annoncée par le factice est distincte de `FENETRE_HOTE`
-    /// EXPRÈS (voir `essais::FENETRE_FACTICE`) : `partager` pose déjà
-    /// `FENETRE_HOTE` au clic, et une valeur identique ferait passer ce test
-    /// alors même qu'`appliquer` ignorerait l'événement. Mesuré : écrit avec
-    /// `FENETRE_HOTE`, il restait VERT sous la neutralisation.
+    /// DEUX publications distinctes sont exigées, et chacune a son auteur :
+    /// - `FENETRE_HOTE`, posée par `partager` au clic, publiée par LUI ;
+    /// - `FENETRE_FACTICE`, annoncée par le partage, publiée par
+    ///   `modifier_partage`.
     ///
-    /// Neutralisation : faire rendre `None` à `appliquer` pour
-    /// `Evenement::Disponible`.
+    /// La valeur du factice est distincte de `FENETRE_HOTE` EXPRÈS (voir
+    /// `essais::FENETRE_FACTICE`) : une valeur identique rendrait les deux
+    /// auteurs indistinguables. Mesuré : écrit avec `FENETRE_HOTE`, et lu sur
+    /// `instantane()`, ce test restait VERT sous trois neutralisations
+    /// différentes.
+    ///
+    /// Neutralisations, chacune seule : faire rendre `None` à `appliquer` pour
+    /// `Evenement::Disponible` ; retirer `publier()` de `modifier_partage` ;
+    /// retirer `publier()` de `partager`.
     #[test]
-    fn les_evenements_du_partage_arrivent_dans_l_instantane_publie() {
+    fn les_evenements_du_partage_sont_publies_vers_l_interface() {
         let c = contexte("sky-test-app-evenements", true);
         c.noyau.definir_nvenc(Some(Codec::Hevc444));
         c.noyau.partager(2).unwrap();
         // Aucune durée réelle attendue : la limite ne sert qu'à rendre un test
         // rouge plutôt qu'une suite sans fin.
         let limite = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if let PartageVue::Disponible { fenetre_s, ecran, .. } = c.noyau.instantane().partage {
-                if fenetre_s == FENETRE_FACTICE.as_secs() {
-                    assert_eq!(ecran, 2, "l'écran choisi au clic est celui qui reste affiché");
-                    break;
-                }
-            }
+        while !fenetres_publiees(&c).contains(&FENETRE_FACTICE.as_secs()) {
             assert!(
                 std::time::Instant::now() < limite,
-                "la fenêtre annoncée par le partage n'a jamais atteint l'instantané"
+                "la fenêtre annoncée par le partage n'a jamais été PUBLIÉE vers l'interface : \
+                 publiées = {:?}",
+                fenetres_publiees(&c)
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+        assert!(
+            fenetres_publiees(&c).contains(&FENETRE_HOTE.as_secs()),
+            "la réservation posée au clic n'a jamais été publiée : publiées = {:?}",
+            fenetres_publiees(&c)
+        );
+        // L'écran choisi au clic est celui que l'interface continue de voir.
+        let publie = c.coquille.etats.lock().unwrap().last().unwrap().partage.clone();
+        assert!(matches!(publie, PartageVue::Disponible { ecran: 2, .. }), "{publie:?}");
+
         c.noyau.arreter();
         attendre_la_fin(&c.noyau);
     }
@@ -2454,6 +2552,50 @@ mod tests {
         assert_eq!(c.noyau.regarder(99), Err(MESSAGE_AMI_DISPARU.to_string()));
         assert_eq!(c.noyau.phase(), Phase::Inactive);
         assert!(c.coquille.icones.lock().unwrap().is_empty());
+    }
+
+    /// Le symétrique du test de l'icône, pour le DEUXIÈME verbe livré
+    /// (ronde de correction 1, constat I2). Sans lui, tout le chemin nominal de
+    /// `regarder` — la réservation `Demande`, le lancement du fil,
+    /// `PartageurFactice::regarder` et le `terminer` d'un visionnage — n'était
+    /// exécuté par aucun test : seul l'ami INCONNU l'était, qui s'arrête avant.
+    ///
+    /// Il prouve aussi que `arreter` arrête CE fil-là, et pas seulement celui
+    /// de l'hôte : les deux tiennent leur propre `Arret`.
+    ///
+    /// L'icône, elle, ne bouge PAS à l'allumage d'un visionnage — on ne partage
+    /// pas son écran quand on regarde celui d'un autre —, et c'est la seule
+    /// asymétrie voulue avec `partager`. `terminer` repose quand même l'icône,
+    /// par le même chemin pour les deux verbes : `[false]`, jamais `[true,
+    /// false]`.
+    ///
+    /// Neutralisation : ignorer `arret` dans `PartageurFactice::regarder`. Elle
+    /// prouve les deux choses à la fois — si le fil ne lançait PAS le
+    /// partageur, la boucle qu'on y neutralise ne tournerait pas, et le test
+    /// resterait vert.
+    #[test]
+    fn regarder_un_ami_connu_attend_puis_s_arrete_sans_toucher_a_l_icone() {
+        let c = contexte("sky-test-app-regarder", true);
+        let ami = crate::faux_serveur::AmiFaux::sans_appareil("bob");
+        let identifiant = ami.id;
+        c.serveur.etat_mut().amis.push(ami);
+        c.noyau.synchroniser().unwrap();
+
+        c.noyau.regarder(identifiant).unwrap();
+        assert_eq!(c.noyau.phase(), Phase::Attente);
+        // `debut_ms` est l'horloge murale : seul le NOM est comparable.
+        let PartageVue::Demande { ami, .. } = c.noyau.instantane().partage else {
+            panic!("la réservation d'un visionnage n'est pas posée");
+        };
+        assert_eq!(ami, "bob", "le NOM de l'ami est affiché, jamais son identifiant");
+        // Pendant l'attente d'un spectateur non plus, aucune reconnexion.
+        assert_eq!(c.noyau.connexion(), Err(MESSAGE_PENDANT_PARTAGE.to_string()));
+        assert!(c.coquille.icones.lock().unwrap().is_empty());
+
+        c.noyau.arreter();
+        attendre_la_fin(&c.noyau);
+        assert_eq!(c.noyau.instantane().partage, PartageVue::Termine { fin: FinVue::Arrete });
+        assert_eq!(*c.coquille.icones.lock().unwrap(), vec![false]);
     }
 
     /// Spec §6, arbitrage 1 du contrôleur : `login` révoque l'appareil courant

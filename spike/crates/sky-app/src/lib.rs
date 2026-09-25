@@ -80,8 +80,10 @@ pub fn lancer() {
                 },
             ));
             noyau.definir_demarrage_automatique_connu(app.autolaunch().is_enabled().unwrap_or(false));
+            // Relève aussi les écrans quand la fenêtre est visible ; lancée
+            // avec Windows (fenêtre cachée), la liste se remplit au premier
+            // retour au premier plan — le seul moment où elle peut servir.
             noyau.definir_visible(!au_demarrage);
-            noyau.definir_ecrans(lister_ecrans(app.handle()));
             app.manage(Arc::clone(&noyau));
             // La boucle unique, sur son propre fil (spec §3).
             std::thread::Builder::new().name("synchronisation".into()).spawn(move || {
@@ -137,31 +139,6 @@ fn montrer_fenetre(app: &AppHandle) {
     }
 }
 
-/// Les écrans, dans l'ordre d'`EnumDisplayMonitors` — celui qu'attend
-/// `WgcCapture::new` (relevé : `tao` énumère par le même appel, dans le même
-/// ordre ; voir le brief de la tâche 11).
-///
-/// L'écran principal est reconnu par son NOM : `primary_monitor()` rend un
-/// `Monitor` distinct de ceux d'`available_monitors()`, jamais comparable par
-/// identité. Un écran sans nom n'est jamais dit principal, plutôt que de
-/// laisser `None == None` en désigner un au hasard.
-fn lister_ecrans(app: &AppHandle) -> Vec<crate::vue::EcranVue> {
-    let principal = app.primary_monitor().ok().flatten().and_then(|m| m.name().cloned());
-    app.available_monitors()
-        .unwrap_or_default()
-        .into_iter()
-        .enumerate()
-        .map(|(index, ecran)| {
-            let taille = ecran.size();
-            crate::vue::EcranVue {
-                index,
-                nom: format!("Écran {} — {}×{}", index + 1, taille.width, taille.height),
-                principal: ecran.name().is_some() && ecran.name().cloned() == principal,
-            }
-        })
-        .collect()
-}
-
 fn installer_icone(app: &AppHandle) -> tauri::Result<()> {
     let ouvrir = MenuItem::with_id(app, "ouvrir", "Ouvrir SkyShare", true, None::<&str>)?;
     let quitter = MenuItem::with_id(app, "quitter", "Quitter", true, None::<&str>)?;
@@ -173,7 +150,18 @@ fn installer_icone(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, evenement| match evenement.id.as_ref() {
             "ouvrir" => montrer_fenetre(app),
-            "quitter" => app.exit(0),
+            "quitter" => {
+                // RONDE DE CORRECTION 1 (M1) : arrêter le partage AVANT de
+                // quitter. `exit` tue le fil sans dérouler ses `Drop` : ni la
+                // session NVENC ni la capture ne se fermeraient proprement, et
+                // le pair n'apprendrait la rupture qu'à l'expiration. Fermer la
+                // FENÊTRE, lui, laisse le partage courir — c'est voulu (spec
+                // D4 : l'application vit près de l'horloge).
+                if let Some(noyau) = app.try_state::<Arc<Noyau>>() {
+                    noyau.arreter();
+                }
+                app.exit(0)
+            }
             _ => {}
         })
         .on_tray_icon_event(|icone, evenement| {

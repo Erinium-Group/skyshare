@@ -31,7 +31,7 @@
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_autostart::ManagerExt;
 
-use crate::vue::Instantane;
+use crate::vue::{EcranVue, Instantane};
 
 pub trait Coquille: Send + Sync {
     /// Événement `etat` : l'instantané complet, après chaque changement.
@@ -46,6 +46,12 @@ pub trait Coquille: Send + Sync {
     /// on ne partage jamais sans le savoir. Rien ne remonte : une icône qui ne
     /// change pas n'empêche aucun partage, et il n'y a rien à faire d'un échec.
     fn icone_partage(&self, actif: bool);
+
+    /// Les écrans, relevés MAINTENANT. Le noyau les redemande à chaque retour
+    /// de la fenêtre au premier plan : un écran branché ou débranché entre-temps
+    /// rendrait périmé le rang qu'affiche l'interface, et « Partager » viserait
+    /// un autre moniteur que celui montré (ronde de correction 1, constat I3).
+    fn ecrans(&self) -> Vec<EcranVue>;
 }
 
 pub struct CoquilleTauri {
@@ -79,5 +85,31 @@ impl Coquille for CoquilleTauri {
             let _ = icone.set_icon(Some(image));
             let _ = icone.set_tooltip(Some(if actif { "SkyShare — en partage" } else { "SkyShare" }));
         }
+    }
+
+    /// Les écrans, dans l'ordre d'`EnumDisplayMonitors` — celui qu'attend
+    /// `WgcCapture::new` (relevé : `tao` énumère par le même appel, dans le même
+    /// ordre ; voir le brief de la tâche 11).
+    ///
+    /// L'écran principal est reconnu par son NOM : `primary_monitor()` rend un
+    /// `Monitor` distinct de ceux d'`available_monitors()`, jamais comparable
+    /// par identité. Un écran sans nom n'est jamais dit principal, plutôt que de
+    /// laisser `None == None` en désigner un au hasard.
+    fn ecrans(&self) -> Vec<EcranVue> {
+        let principal = self.app.primary_monitor().ok().flatten().and_then(|m| m.name().cloned());
+        self.app
+            .available_monitors()
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(index, ecran)| {
+                let taille = ecran.size();
+                EcranVue {
+                    index,
+                    nom: format!("Écran {} — {}×{}", index + 1, taille.width, taille.height),
+                    principal: ecran.name().is_some() && ecran.name().cloned() == principal,
+                }
+            })
+            .collect()
     }
 }
