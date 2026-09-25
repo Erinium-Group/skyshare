@@ -19,7 +19,6 @@ use crate::partage::Partageur;
 use crate::reveil::Horloge;
 use crate::vue::{EcranVue, Instantane};
 
-#[derive(Default)]
 pub(crate) struct CoquilleEspion {
     pub etats: Mutex<Vec<Instantane>>,
     /// Les valeurs reçues par `demarrage_automatique`, dans l'ordre : le seul
@@ -33,6 +32,30 @@ pub(crate) struct CoquilleEspion {
     /// Ce que la coquille répond à `ecrans()`. Le test le change pour mettre en
     /// scène un écran branché ou débranché, sans aucun matériel.
     pub ecrans: Mutex<Vec<EcranVue>>,
+}
+
+/// TROIS écrans par défaut, et non zéro (ronde de correction 2) : `partager`
+/// valide désormais le rang contre la liste relevée, donc un espion vide
+/// refuserait tous les partages et les tests de la tâche 11 changeraient de
+/// sujet sans le dire. Les tests qui mettent en scène un branchement posent
+/// leur propre liste.
+impl Default for CoquilleEspion {
+    fn default() -> CoquilleEspion {
+        CoquilleEspion {
+            etats: Mutex::new(Vec::new()),
+            demarrages: Mutex::new(Vec::new()),
+            icones: Mutex::new(Vec::new()),
+            ecrans: Mutex::new(
+                (0..3)
+                    .map(|index| EcranVue {
+                        index,
+                        nom: format!("Écran de test {}", index + 1),
+                        principal: index == 0,
+                    })
+                    .collect(),
+            ),
+        }
+    }
 }
 
 impl Coquille for Arc<CoquilleEspion> {

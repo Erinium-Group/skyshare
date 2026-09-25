@@ -65,6 +65,9 @@ pub const MESSAGE_SESSION_EXPIREE: &str = "Session expirée — reconnecte-toi";
 /// machine sans carte NVIDIA peut encore REGARDER.
 pub const MESSAGE_SANS_NVIDIA: &str =
     "Partage impossible : aucune carte NVIDIA utilisable sur cette machine.";
+/// L'écran choisi n'est plus dans la liste relevée à l'instant du clic — il a
+/// été débranché, ou la liste affichée avait vieilli.
+pub const MESSAGE_ECRAN_DISPARU: &str = "Cet écran n'existe plus : choisis-en un autre.";
 /// Ronde de correction 2 : une déconnexion demandée pendant l'authentification
 /// l'emporte sur elle. Un message, pas un `Ok` silencieux — la connexion
 /// demandée n'a pas eu lieu — et pas une alarme : l'utilisateur a eu ce qu'il
@@ -353,13 +356,23 @@ impl Noyau {
 
     /// Relève les écrans et ne publie QUE s'ils ont changé.
     ///
-    /// AU RETOUR AU PREMIER PLAN, et pas au lancement seulement (ronde de
-    /// correction 1, constat I3) : la liste était figée par `setup`, donc un
-    /// écran branché ou débranché ensuite laissait `instantane.ecrans` périmé —
-    /// et `partager(rang)` visait alors un AUTRE moniteur que celui affiché.
-    /// C'est le moment juste : il n'existe aucune façon de cliquer « Partager »
-    /// sans que la fenêtre soit revenue devant, et l'énumération ne coûte qu'un
-    /// appel à Windows.
+    /// DEUX APPELANTS, et il en faut deux (ronde de correction 1, constat I3 ;
+    /// ronde de correction 2) :
+    ///
+    /// - `definir_visible(true)` — pour l'AFFICHAGE. La liste était figée par
+    ///   `setup` ; un écran branché ensuite laissait `instantane.ecrans` périmé,
+    ///   donc la liste montrée fausse.
+    /// - `partager` — pour la DÉCISION, et c'est celui-là qui ferme le trou.
+    ///
+    /// RECTIFICATIF. Une version précédente de ce commentaire affirmait qu'il
+    /// n'existait « aucune façon de cliquer Partager sans que la fenêtre soit
+    /// revenue devant ». C'EST FAUX, et démontré par sonde à la re-revue :
+    /// « revenue devant » suppose une perte de focus PRÉALABLE, que rien
+    /// n'exige. Fenêtre restée au premier plan, écran branché, clic direct sur
+    /// « Partager » — aucun `Focused(true)` ne se déclenche, et le rang partait
+    /// avec une liste périmée. Un événement de fenêtre est un pari ; le relevé
+    /// de `partager` est déterministe. Ne pas retirer le second appelant au
+    /// motif que le premier « couvre déjà le cas ».
     ///
     /// Le « seulement si ça a changé » n'est pas une optimisation décorative :
     /// chaque `Focused(true)` passe ici, et publier à chaque alt-tab noierait
@@ -1123,11 +1136,22 @@ impl Noyau {
     /// `synchroniser`.
     pub fn partager(self: &Arc<Self>, ecran: usize) -> Result<(), String> {
         self.exiger_connexion()?;
+        // RONDE DE CORRECTION 2 : les écrans sont relevés ICI, au moment où le
+        // partage se décide, et pas seulement au retour au premier plan — voir
+        // le rectificatif de `rafraichir_ecrans`. Hors verrou : c'est un appel à
+        // la coquille.
+        self.rafraichir_ecrans();
         let arret = Arret::nouveau();
         let codec = {
             let mut d = self.donnees();
             permis_hors_partage(Phase::de(&d.partage))?;
             let codec = d.nvenc.ok_or_else(|| MESSAGE_SANS_NVIDIA.to_string())?;
+            // Le rang est validé contre la liste QU'ON VIENT DE RELEVER : sans
+            // cela, un rang périmé arriverait jusqu'à `WgcCapture::new`, qui
+            // partagerait un autre moniteur — ou échouerait loin de l'utilisateur.
+            if !d.ecrans.iter().any(|e| e.index == ecran) {
+                return Err(MESSAGE_ECRAN_DISPARU.to_string());
+            }
             d.partage = PartageVue::Disponible {
                 debut_ms: maintenant_ms(),
                 fenetre_s: FENETRE_HOTE.as_secs(),
@@ -2446,6 +2470,40 @@ mod tests {
             assert!(std::time::Instant::now() < limite, "le partage ne s'est pas arrêté en 5 s");
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    /// RONDE DE CORRECTION 2. Le scénario de la sonde du relecteur : la fenêtre
+    /// reste au premier plan, un écran est branché, l'utilisateur clique
+    /// « Partager ». AUCUN `Focused(true)` ne se déclenche — « revenir devant »
+    /// suppose une perte de focus préalable, que rien n'exige — donc le
+    /// rafraîchissement au premier plan ne sert à rien ici, et le rang partait
+    /// avec une liste périmée.
+    ///
+    /// Le second volet prouve l'autre moitié : un rang qui n'existe VRAIMENT
+    /// plus est refusé en clair, au lieu d'arriver jusqu'à la capture.
+    ///
+    /// Neutralisations, chacune seule : retirer `rafraichir_ecrans()` de
+    /// `partager` (premier volet) ; retirer la validation du rang (second).
+    #[test]
+    fn partager_releve_les_ecrans_avant_de_valider_le_rang() {
+        let c = contexte("sky-test-app-ecran-branche", true);
+        c.noyau.definir_nvenc(Some(Codec::Hevc444));
+        *c.coquille.ecrans.lock().unwrap() = vec![ecran(0, "A")];
+        // La fenêtre passe devant UNE fois, et n'en bouge plus.
+        c.noyau.definir_visible(true);
+        assert_eq!(c.noyau.instantane().ecrans, vec![ecran(0, "A")]);
+
+        // Un second écran est branché. Aucun changement de focus.
+        *c.coquille.ecrans.lock().unwrap() = vec![ecran(0, "A"), ecran(1, "B")];
+        c.noyau.partager(1).expect("le nouvel écran doit être partageable");
+        assert_eq!(c.noyau.instantane().ecrans, vec![ecran(0, "A"), ecran(1, "B")]);
+        c.noyau.arreter();
+        attendre_la_fin(&c.noyau);
+
+        // Le même écran est débranché : le rang est refusé en clair.
+        *c.coquille.ecrans.lock().unwrap() = vec![ecran(0, "A")];
+        assert_eq!(c.noyau.partager(1), Err(MESSAGE_ECRAN_DISPARU.to_string()));
+        assert_eq!(c.noyau.phase(), Phase::Inactive);
     }
 
     #[test]
