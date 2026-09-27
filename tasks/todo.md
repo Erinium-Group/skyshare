@@ -239,10 +239,15 @@ arbitrage : `.superpowers/sdd/2026-09-19-jalon-1-application/progress.md` (hors 
     instance unique, démarrage avec Windows, identifiant **et trousseau distincts** en développement.
   - `app/` : Connexion, Amis, Listes, Mon compte, panneau de partage. **321 tests Rust, 86 d'interface.**
 - [x] Revue finale de branche : **0 critique**, 1 important, 4 mineurs — corrigés, re-revue propre.
-- [ ] **Essai réel — DÛ.** Ni celui de la tâche 9 (connexion, ajout d'ami) ni le final n'ont été faits.
-  Le pont entre l'interface et le cœur Rust, et le rendu de la fenêtre, **n'ont jamais été exécutés** ; seule la
-  forme sérialisée est figée par un test. Installateur : `spike/target/release/bundle/nsis/`.
-- [ ] Fin de branche : fusion à décider par le propriétaire.
+- [x] **Premier usage réel, 27/09/2026** : le propriétaire a installé l'application et s'est connecté. Le code
+  ami, les appareils et les écrans s'affichent. Mesuré par instrumentation sur la build empaquetée : la boucle
+  démarre, la synchronisation réussit en **0,9 s**, l'interface reçoit l'état rempli **1,9 s** après le lancement.
+  Le pont cœur → interface fonctionne donc de bout en bout.
+  - **Les appareils révoqués sont désormais masqués** (`d197ca2`) : le site ne sait pas les supprimer, et chaque
+    connexion en crée un. Les supprimer vraiment demanderait une route de plus et un déploiement.
+- [ ] **Essai réel à deux machines — toujours dû** : partage et réception entre deux comptes, sur deux réseaux.
+  Installateur : `spike/target/release/bundle/nsis/`.
+- [x] Fin de branche : fusionnée dans `main` le 27/09/2026, sur décision du propriétaire.
 
 ### Limites connues, assumées
 - **Aucune image** : « Regarder » montre la connexion et ses mesures, le flux est mesuré puis jeté (spec D2).
