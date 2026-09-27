@@ -770,6 +770,15 @@ impl Noyau {
                 // vivante, et y toucher effacerait ses jetons valides — le
                 // défaut que la ronde 3 (Important 2) a fermé. NE PAS y ajouter
                 // d'oubli « par cohérence ».
+                //
+                // REVUE FINALE (parké C2) : cette garde-ci est là par SYMÉTRIE
+                // et par prudence, et AUCUN test ne la discrimine seule — la
+                // neutraliser laisse la suite verte, c'est mesuré. La couvrir
+                // demanderait de mettre en scène une connexion concurrente qui
+                // ÉCHOUE pendant qu'une autre change la génération, soit un
+                // montage plus lourd que la garde elle-même ; le commentaire
+                // ci-dessus dit ce qu'elle protège, il ne dit pas qu'elle est
+                // éprouvée.
                 if d.generation != generation {
                     return Err(message_erreur(&e));
                 }
@@ -2654,6 +2663,99 @@ mod tests {
         attendre_la_fin(&c.noyau);
         assert_eq!(c.noyau.instantane().partage, PartageVue::Termine { fin: FinVue::Arrete });
         assert_eq!(*c.coquille.icones.lock().unwrap(), vec![false]);
+    }
+
+    /// REVUE FINALE, CONSTAT I1 — la quatrième « serrure posée jamais
+    /// branchée ». Les deux `exiger_connexion()?` des commandes de partage
+    /// n'avaient aucun appelant de test : le relecteur les a neutralisées
+    /// TOUTES LES DEUX ensemble et les 56 tests sont restés verts.
+    ///
+    /// L'état mis en scène est celui du scénario réel, et il est le seul qui
+    /// discrimine : `SessionExpiree`. Les jetons sont dans le coffre mais le
+    /// site les refuse, et `Instantane` n'est PAS vidé — écrans et amis
+    /// continuent de s'afficher. Sans la garde, `partager` trouve donc son
+    /// codec, son rang d'écran valide, pose la réservation `Disponible`, ALLUME
+    /// L'ICÔNE près de l'horloge et lance le fil : l'application annonce à
+    /// l'utilisateur qu'elle partage son écran alors qu'aucune session ne le
+    /// permet — l'inverse exact de la promesse D4.
+    ///
+    /// CE QUI DISCRIMINE, MESURÉ : la réservation et l'ICÔNE, jamais le seul
+    /// message. Un test qui n'assènerait que `Err(MESSAGE_NON_CONNECTE)`
+    /// passerait aussi si la garde rendait son erreur APRÈS avoir posé la
+    /// réservation et allumé l'icône.
+    ///
+    /// Neutralisation, seule : retirer `self.exiger_connexion()?;` de
+    /// `partager` — ce test rougit, et lui seul.
+    #[test]
+    fn partager_exige_une_session() {
+        let c = contexte("sky-test-app-partager-sans-session", true);
+        c.noyau.definir_nvenc(Some(Codec::Hevc444));
+        // Une synchronisation RÉUSSIE d'abord : elle peuple l'instantané, et
+        // c'est elle qui rend la suite crédible (le double répond).
+        c.noyau.synchroniser().unwrap();
+        // La fenêtre passe devant : les écrans sont relevés et RESTENT affichés
+        // après le refus — c'est ce qui rend la garde nécessaire.
+        c.noyau.definir_visible(true);
+        c.serveur.etat_mut().refuser_tout = true;
+        assert!(matches!(c.noyau.synchroniser(), Err(ErreurCompte::Refuse)));
+        assert_eq!(c.noyau.instantane().connexion, Connexion::SessionExpiree);
+        assert!(!c.noyau.instantane().ecrans.is_empty(), "l'instantané n'est PAS vidé par le refus");
+
+        assert_eq!(c.noyau.partager(0), Err(MESSAGE_NON_CONNECTE.to_string()));
+        assert_eq!(c.noyau.instantane().partage, PartageVue::Inactif);
+        assert_eq!(c.noyau.phase(), Phase::Inactive);
+        assert!(
+            c.coquille.icones.lock().unwrap().is_empty(),
+            "l'icône de partage ne doit JAMAIS s'allumer sans session"
+        );
+
+        // CONTRÔLE POSITIF, sur le MÊME contexte : une fois la session rendue,
+        // le même clic passe et l'icône s'allume. Sans lui, les assertions
+        // ci-dessus passeraient aussi avec un noyau qui ne partage jamais rien.
+        c.serveur.etat_mut().refuser_tout = false;
+        c.noyau.connexion().unwrap();
+        c.noyau.partager(0).unwrap();
+        assert_eq!(*c.coquille.icones.lock().unwrap(), vec![true]);
+        c.noyau.arreter();
+        attendre_la_fin(&c.noyau);
+    }
+
+    /// Le symétrique pour le second verbe (constat I1, second volet). Mesuré
+    /// séparément : cette garde-ci retirée SEULE, ce test rougit seul.
+    ///
+    /// L'ami est TOUJOURS dans l'instantané après le refus — c'est ce qui rend
+    /// le test discriminant : sans la garde, `regarder` trouve son nom, pose la
+    /// réservation `Demande` et affiche « Demande envoyée à bob » pendant 60 s
+    /// sans qu'aucune enveloppe ne parte.
+    ///
+    /// Neutralisation, seule : retirer `self.exiger_connexion()?;` de
+    /// `regarder`.
+    #[test]
+    fn regarder_exige_une_session() {
+        let c = contexte("sky-test-app-regarder-sans-session", true);
+        let ami = crate::faux_serveur::AmiFaux::sans_appareil("bob");
+        let identifiant = ami.id;
+        c.serveur.etat_mut().amis.push(ami);
+        c.noyau.synchroniser().unwrap();
+        assert_eq!(c.noyau.instantane().amis.len(), 1);
+
+        c.serveur.etat_mut().refuser_tout = true;
+        assert!(matches!(c.noyau.synchroniser(), Err(ErreurCompte::Refuse)));
+        assert_eq!(c.noyau.instantane().connexion, Connexion::SessionExpiree);
+        assert_eq!(c.noyau.instantane().amis.len(), 1, "l'ami reste affiché après le refus");
+
+        assert_eq!(c.noyau.regarder(identifiant), Err(MESSAGE_NON_CONNECTE.to_string()));
+        assert_eq!(c.noyau.instantane().partage, PartageVue::Inactif);
+        assert_eq!(c.noyau.phase(), Phase::Inactive);
+        assert!(c.coquille.icones.lock().unwrap().is_empty());
+
+        // CONTRÔLE POSITIF, même contexte : session rendue, la demande part.
+        c.serveur.etat_mut().refuser_tout = false;
+        c.noyau.connexion().unwrap();
+        c.noyau.regarder(identifiant).unwrap();
+        assert_eq!(c.noyau.phase(), Phase::Attente);
+        c.noyau.arreter();
+        attendre_la_fin(&c.noyau);
     }
 
     /// Spec §6, arbitrage 1 du contrôleur : `login` révoque l'appareil courant
