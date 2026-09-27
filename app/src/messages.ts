@@ -32,10 +32,26 @@ export function messageDeFin(fin: FinVue): string {
     case "arrete":
       return "Partage arrêté.";
     case "aucune_demande":
-      return "Personne n'a demandé à regarder pendant 30 minutes.";
+      // REVUE FINALE, M4 : la durée vient du CŒUR (`FENETRE_HOTE`, portée par
+      // la variante), jamais d'un littéral recopié ici. Recopiée, elle aurait
+      // menti en silence au premier changement de la constante.
+      return `Personne n'a demandé à regarder pendant ${minutes(fin.fenetreS)}.`;
     case "autre":
       return fin.message;
   }
+}
+
+/**
+ * Une durée en secondes dite en minutes : « 30 minutes », « 1 minute ».
+ *
+ * Elle ne sert qu'à la fenêtre de disponibilité, qui vient du cœur en SECONDES
+ * (`FinVue::AucuneDemande { fenetreS }`). L'arrondi est celui de la minute la
+ * plus proche : la constante du cœur est un nombre de minutes entier, et une
+ * valeur qui ne le serait pas vaut mieux arrondie qu'affichée en décimales.
+ */
+function minutes(secondes: number): string {
+  const n = Math.max(1, Math.round(secondes / 60));
+  return `${n} ${n === 1 ? "minute" : "minutes"}`;
 }
 
 /**
@@ -56,7 +72,7 @@ export function decimale(valeur: number): string {
 
 /**
  * « 2 min 05 s ». Une durée négative vaut zéro : le temps restant se calcule par
- * soustraction, et la fenêtre de 30 minutes s'écoule pendant que l'instantané
+ * soustraction, et la fenêtre de disponibilité s'écoule pendant que l'instantané
  * précédent est encore à l'écran — « -1 min 55 s » n'a aucun sens pour qui le lit.
  */
 export function duree(ms: number): string {

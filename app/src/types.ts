@@ -44,7 +44,7 @@ export type FinVue =
   | { cause: "reseau_bloque" }
   | { cause: "trop_lente" }
   | { cause: "session_expiree" }
-  | { cause: "aucune_demande" }
+  | { cause: "aucune_demande"; fenetreS: number }
   | { cause: "autre"; message: string };
 
 export type PartageVue =

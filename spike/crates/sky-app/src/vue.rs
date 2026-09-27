@@ -66,7 +66,11 @@ pub enum FinVue {
     ReseauBloque,
     TropLente,
     SessionExpiree,
-    AucuneDemande,
+    /// La fenêtre de disponibilité VOYAGE avec la cause (revue finale, M4) :
+    /// l'interface écrivait « pendant 30 minutes » en dur, et changer
+    /// `FENETRE_HOTE` aurait rendu ce message faux en silence. Comme
+    /// `Disponible { fenetre_s }`, la durée vient du cœur, jamais d'une copie.
+    AucuneDemande { fenetre_s: u64 },
     Autre { message: String },
 }
 
@@ -258,7 +262,7 @@ mod contrat_typescript {
             FinVue::ReseauBloque,
             FinVue::TropLente,
             FinVue::SessionExpiree,
-            FinVue::AucuneDemande,
+            FinVue::AucuneDemande { fenetre_s: 1800 },
             FinVue::Autre { message: "quelque chose".to_string() },
         ];
         let connexions = [

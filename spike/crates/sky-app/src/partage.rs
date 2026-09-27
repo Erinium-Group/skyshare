@@ -14,6 +14,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use sky_compte::{ErreurCompte, Etat};
 use sky_encode::Codec;
+use sky_partage::rendez_vous::FENETRE_HOTE;
 use sky_partage::{
     Arret, Designation, ErreurPartage, Evenement, Fin, Mesures, ParametresHote,
     ParametresSpectateur, SourceImages,
@@ -127,7 +128,10 @@ pub fn fin_vue(issue: &Result<Fin, ErreurPartage>) -> FinVue {
                 .to_string(),
         },
         Ok(Fin::TamponSature { .. }) => FinVue::TropLente,
-        Ok(Fin::AucuneDemande) => FinVue::AucuneDemande,
+        // La durée affichée vient de la constante du cœur, jamais d'un littéral
+        // de l'interface (revue finale, M4) : `FENETRE_HOTE` est ce que `hote`
+        // a réellement attendu avant de rendre `AucuneDemande`.
+        Ok(Fin::AucuneDemande) => FinVue::AucuneDemande { fenetre_s: FENETRE_HOTE.as_secs() },
         Ok(Fin::AucunAppareilLocal) => FinVue::Autre {
             message: "Cette machine n'a pas d'appareil enregistré : reconnecte-toi.".to_string(),
         },
@@ -268,6 +272,13 @@ mod tests {
         assert_eq!(
             fin_vue(&Err(ErreurPartage::Compte(ErreurCompte::Refuse))),
             FinVue::SessionExpiree
+        );
+        // REVUE FINALE, M4 : la fenêtre affichée est la CONSTANTE du cœur, pas
+        // un littéral. Comparée à `FENETRE_HOTE` et non à 1800 : écrire le
+        // nombre ici recopierait le défaut d'un cran plus haut.
+        assert_eq!(
+            fin_vue(&Ok(Fin::AucuneDemande)),
+            FinVue::AucuneDemande { fenetre_s: FENETRE_HOTE.as_secs() }
         );
     }
 

@@ -52,8 +52,15 @@ describe("les autres fins", () => {
 
   it("un arrêt volontaire et une fenêtre écoulée ne se disent pas pareil", () => {
     expect(messageDeFin({ cause: "arrete" })).toBe("Partage arrêté.");
-    expect(messageDeFin({ cause: "aucune_demande" })).toBe(
+    expect(messageDeFin({ cause: "aucune_demande", fenetreS: 1800 })).toBe(
       "Personne n'a demandé à regarder pendant 30 minutes.",
+    );
+    // CE QUI DISCRIMINE (revue finale, M4) : la durée est celle que le CŒUR a
+    // portée, pas un littéral de l'interface. Sans cette seconde assertion,
+    // « pendant 30 minutes » écrit en dur passerait aussi bien — c'était
+    // précisément le défaut, et `FENETRE_HOTE` aurait pu changer en silence.
+    expect(messageDeFin({ cause: "aucune_demande", fenetreS: 600 })).toBe(
+      "Personne n'a demandé à regarder pendant 10 minutes.",
     );
   });
 });
