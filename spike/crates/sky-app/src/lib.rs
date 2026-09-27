@@ -151,12 +151,27 @@ fn installer_icone(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, evenement| match evenement.id.as_ref() {
             "ouvrir" => montrer_fenetre(app),
             "quitter" => {
-                // RONDE DE CORRECTION 1 (M1) : arrêter le partage AVANT de
-                // quitter. `exit` tue le fil sans dérouler ses `Drop` : ni la
-                // session NVENC ni la capture ne se fermeraient proprement, et
-                // le pair n'apprendrait la rupture qu'à l'expiration. Fermer la
-                // FENÊTRE, lui, laisse le partage courir — c'est voulu (spec
-                // D4 : l'application vit près de l'horloge).
+                // RONDE DE CORRECTION 1 (M1) : signaler l'arrêt du partage
+                // avant de quitter. Fermer la FENÊTRE, lui, laisse le partage
+                // courir — c'est voulu (spec D4 : l'application vit près de
+                // l'horloge).
+                //
+                // CE QUE CE CODE FAIT, EXACTEMENT (revue finale, M2) : il LÈVE
+                // le drapeau d'arrêt, et rien de plus. `arreter()` ne joint
+                // aucun fil, et `exit(0)` s'exécute à l'instruction suivante,
+                // bien avant que le fil du partage ne voie le drapeau (« en
+                // 50 ms au plus », `PAS_D_ATTENTE`). L'arrêt propre n'est donc
+                // PAS attendu : `exit` tue le fil sans dérouler ses `Drop`, la
+                // session NVENC et la capture ne se ferment pas proprement, et
+                // le pair n'apprend la rupture qu'à l'expiration.
+                //
+                // Ce n'est pas joint ici à dessein : le `Noyau` ne conserve
+                // aucun `JoinHandle` (les fils de `partager` et `regarder` sont
+                // détachés), donc joindre demande de le lui faire porter, et
+                // une attente bornée posée ici vivrait dans un rappel du menu
+                // que nul test ne peut atteindre. À reprendre au jalon 2, où le
+                // transport — et donc la façon d'annoncer la rupture au pair —
+                // change de toute manière.
                 if let Some(noyau) = app.try_state::<Arc<Noyau>>() {
                     noyau.arreter();
                 }

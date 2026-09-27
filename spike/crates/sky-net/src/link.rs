@@ -424,7 +424,7 @@ impl PeerLink {
     /// avancer le temps. Ne bloque jamais.
     pub fn poll(&mut self) -> anyhow::Result<LinkEvent> {
         if !self.rtc.is_alive() {
-            return Ok(LinkEvent::Failed("session declaree morte par l agent".into()));
+            return Ok(LinkEvent::Failed("session déclarée morte par l'agent".into()));
         }
 
         // Injecter d'abord ce qui a ete recueilli pendant l'attente patiente.
@@ -456,10 +456,10 @@ impl PeerLink {
                     // On nomme la CATEGORIE sans le message : celui-ci peut
                     // contenir du SDP, donc des adresses.
                     let categorie = match &e {
-                        str0m::RtcError::Dtls(_) => "poignee de main chiffree (DTLS)",
+                        str0m::RtcError::Dtls(_) => "poignée de main chiffrée (DTLS)",
                         str0m::RtcError::Ice(_) => "agent ICE",
-                        str0m::RtcError::Io(_) => "entree/sortie reseau",
-                        str0m::RtcError::Net(_) => "lecture d un paquet",
+                        str0m::RtcError::Io(_) => "entrée/sortie réseau",
+                        str0m::RtcError::Net(_) => "lecture d'un paquet",
                         str0m::RtcError::Sdp(_) => "description de session",
                         str0m::RtcError::RemoteSdp(_) => "description distante",
                         str0m::RtcError::Rtp(_) => "flux RTP",
@@ -543,7 +543,7 @@ impl PeerLink {
                             .handle_input(Input::Receive(instant, recu))
                             .is_err()
                         {
-                            return Ok(LinkEvent::Failed("erreur a l injection d un paquet recu".into()));
+                            return Ok(LinkEvent::Failed("erreur à l'injection d'un paquet reçu".into()));
                         }
                     }
                 }
