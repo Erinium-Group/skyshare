@@ -223,14 +223,49 @@ avec chaque arbitrage : `.superpowers/sdd/2026-09-11-jalon-c2-client-signaling/p
 - Un site malveillant qui substituerait une clé d'annuaire n'est pas détecté — inhérent à D2.
 - Cadences `CADENCE` 2 s, `FENETRE_HOTE` 30 min, `ATTENTE_SPECTATEUR` 60 s : **argumentées, pas mesurées**.
 
-### Dette de la tâche 8 (jalon 1), héritée de la tâche 7
-- **Nettoyer les jetons sur la sortie gardée de `demarrer`** (`sky-app/src/noyau.rs`) : elle détecte une
-  déconnexion survenue pendant le démarrage mais n'appelle pas `oublier_les_orphelins()`, seule des quatre
-  sorties gardées du module. Mesuré : écran « Déconnecté », coffre plein — donc le lancement suivant se croit
-  connecté. Une ligne, plus le doc-comment (« TROIS chemins » → quatre) et un test.
+---
+
+## Jalon 1 — l'application — développement terminé, essai réel dû
+
+Branche `jalon-1-application`, **non fusionnée**. Spec : `docs/superpowers/specs/2026-09-19-jalon-1-application-design.md`.
+Plan : `docs/superpowers/plans/2026-09-19-jalon-1-application.md` (13 tâches). Journal détaillé, avec chaque
+arbitrage : `.superpowers/sdd/2026-09-19-jalon-1-application/progress.md` (hors dépôt).
+
+### État au 27/09/2026
+- [x] **Tâches 1 à 12 closes**, chacune relue et corrigée jusqu'à revue propre (26 commits).
+  - Site : les membres des listes dans la synchronisation — **déployé en production** le 23/09 (`fe7af2d`).
+  - `sky-partage` : la négociation extraite de `sky-probe`, événements typés, signal d'arrêt.
+  - `sky-app` : cœur Tauri — boucle de synchronisation unique, dix-sept commandes, icône près de l'horloge,
+    instance unique, démarrage avec Windows, identifiant **et trousseau distincts** en développement.
+  - `app/` : Connexion, Amis, Listes, Mon compte, panneau de partage. **321 tests Rust, 86 d'interface.**
+- [x] Revue finale de branche : **0 critique**, 1 important, 4 mineurs — corrigés, re-revue propre.
+- [ ] **Essai réel — DÛ.** Ni celui de la tâche 9 (connexion, ajout d'ami) ni le final n'ont été faits.
+  Le pont entre l'interface et le cœur Rust, et le rendu de la fenêtre, **n'ont jamais été exécutés** ; seule la
+  forme sérialisée est figée par un test. Installateur : `spike/target/release/bundle/nsis/`.
+- [ ] Fin de branche : fusion à décider par le propriétaire.
+
+### Limites connues, assumées
+- **Aucune image** : « Regarder » montre la connexion et ses mesures, le flux est mesuré puis jeté (spec D2).
+  L'image arrive au jalon 2, avec le transport corrigé (écart 7).
+- **Application non signée** : avertissement « éditeur inconnu » à l'installation (signature : jalon 6).
+- **`sky-probe` en profil `debug` ouvre un coffre vide** : le lancer en `--release` pour retrouver l'identité
+  réelle, sinon il enregistrerait un second appareil sur le compte.
+- Pendant qu'un partage attend, aucune autre commande ne doit tourner sur la même machine : elle consommerait
+  les enveloppes de la négociation.
+- Le rang d'écran suppose l'ordre d'`EnumDisplayMonitors` — **relevé, pas mesuré** : à confirmer à l'essai réel
+  sur une machine à plusieurs écrans.
+
+### Reporté au jalon 2
+- Coalescer les synchronisations déclenchées par une commande (deux requêtes par clic aujourd'hui).
+- Joindre le fil de partage à la fermeture (le cœur ne garde aucun `JoinHandle` : changement structurel).
+- Erreur typée plutôt qu'une comparaison de chaîne pour `MESSAGE_SESSION_CHANGEE`.
+
+### Dette héritée, réglée
+- ~~Nettoyer les jetons sur la sortie gardée de `demarrer`~~ — **fait à la tâche 8 du jalon 1** (`10fbae1`),
+  avec son test et sa neutralisation.
 - **Supprimer l'appareil orphelin éventuel** : une déconnexion tombant pendant le tout premier enregistrement
   d'appareil peut laisser une ligne inutile sur le compte (au plus une par machine). Elle ne détourne aucun
-  partage ; l'écran « Mon compte » permettra de la révoquer.
+  partage ; l'écran « Mon compte » du jalon 1 permet de la révoquer.
 
 ### Reporté au jalon 2
 - Erreur typée rendue par `PeerLink::repondant` : `echec_local` classe aujourd'hui sur le texte du message.
