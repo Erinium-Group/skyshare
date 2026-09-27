@@ -43,11 +43,29 @@ c'est mesuré sur deux machines, deux réseaux, deux fournisseurs d'accès :
 
 **Le pari technique du projet tient.** Ne pas le re-questionner sans mesure contraire.
 
-Il n'existe **aucune application** — seulement `spike/`, un workspace de cinq crates :
-`sky-capture` (Windows Graphics Capture), `sky-encode` (NVENC), `sky-net` (str0m 0.23),
-`sky-crypto` (boîtes scellées), `sky-probe` (CLI clap). ~5 200 lignes. Windows uniquement.
+**Jalon 1 — l'application : TERMINÉ le 27/09/2026**, fusionné dans `main` (`65d4e21`).
+Première application graphique (Tauri 2 + React) : Connexion, Amis, Listes, Mon compte et
+panneau de partage ; icône près de l'horloge, instance unique, démarrage avec Windows.
+Installée et utilisée par le propriétaire : synchronisation en **0,9 s**, interface remplie
+**1,9 s** après le lancement. **323 tests Rust, 89 d'interface.** Journal des arbitrages :
+`.superpowers/sdd/2026-09-19-jalon-1-application/progress.md` (ignoré par git).
 
-Jalons 1 à 7 restent à faire (voir `tasks/todo.md`).
+Le workspace `spike/` compte désormais huit crates : `sky-capture` (Windows Graphics
+Capture), `sky-encode` (NVENC), `sky-net` (str0m 0.23), `sky-crypto` (boîtes scellées),
+`sky-compte` (compte, annuaire, boîte aux lettres), `sky-partage` (négociation, événements),
+`sky-app` (cœur Tauri), `sky-probe` (CLI clap) — plus l'interface dans `app/`.
+
+**Pièges de l'application, chèrement acquis :**
+- Une build de développement utilise un **identifiant et un trousseau distincts** (`.dev`) :
+  `sky-probe` lancé en `debug` ouvre un coffre **vide**. Le lancer en `--release`.
+- Seul `tauri build` embarque l'interface : un binaire de `cargo build` charge `devUrl` et
+  affiche « localhost a refusé de se connecter ». Ne jamais diagnostiquer l'application
+  autrement que sur la build empaquetée.
+- **Aucune image n'est encore affichée** : « Regarder » montre la connexion et ses mesures,
+  le flux est mesuré puis jeté. C'est le jalon 2 qui apporte le premier pixel.
+
+**Essai réel à deux machines : toujours dû** pour le partage et la réception.
+Jalons 2 à 7 restent à faire (voir `tasks/todo.md`).
 
 ### Site (`EriniumGroupWebsite`)
 
