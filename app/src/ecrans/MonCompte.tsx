@@ -11,6 +11,13 @@ export function codeAffiche(code: string | null): string {
 export function MonCompte({ instantane }: { instantane: Instantane }) {
   const { executer, enVol, message } = useActions();
 
+  // Un appareil révoqué ne partira jamais du compte — le site sait révoquer,
+  // pas supprimer — et chaque reconnexion en enregistre un nouveau
+  // (`rattacher_appareil`) : sans ce filtre, la liste ne fait que croître.
+  // Décision d'affichage seule : le cœur continue de connaître tous les
+  // appareils, l'instantané n'est pas modifié.
+  const appareilsAffiches = instantane.appareils.filter((appareil) => !appareil.revoque);
+
   return (
     <section className="flex max-w-2xl flex-col gap-6">
       <h1 className="font-titre text-4xl">Mon compte</h1>
@@ -49,7 +56,7 @@ export function MonCompte({ instantane }: { instantane: Instantane }) {
       <section aria-label="Appareils" className="flex flex-col gap-2">
         <h2 className="text-texte-2">Appareils</h2>
         <ul className="flex flex-col gap-2">
-          {instantane.appareils.map((appareil) => (
+          {appareilsAffiches.map((appareil) => (
             <li
               key={appareil.id}
               className="flex items-center gap-3 rounded-md bg-surface px-3 py-2"
@@ -63,9 +70,9 @@ export function MonCompte({ instantane }: { instantane: Instantane }) {
                 // appelable, et un refus du cœur seul laisserait croire à un
                 // bogue.
                 <span className="text-succes">cet appareil</span>
-              ) : appareil.revoque ? (
-                <span className="text-texte-3">révoqué</span>
               ) : (
+                // `appareilsAffiches` a déjà écarté les révoqués : plus
+                // besoin de branche « révoqué » ici, elle serait morte.
                 <BoutonDestructeur
                   libelle="Révoquer"
                   confirmer={`Révoquer définitivement ${appareil.nom}`}
@@ -77,7 +84,7 @@ export function MonCompte({ instantane }: { instantane: Instantane }) {
             </li>
           ))}
         </ul>
-        {instantane.appareils.length === 0 && (
+        {appareilsAffiches.length === 0 && (
           <p className="text-texte-3">Aucun appareil enregistré pour l'instant.</p>
         )}
         {/* Spec §4 : le nom d'un appareil n'est pas modifiable ici. Aucune route

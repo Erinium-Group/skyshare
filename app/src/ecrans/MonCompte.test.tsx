@@ -52,13 +52,50 @@ describe("Mon compte", () => {
     expect(pont.revoquerAppareil).toHaveBeenCalledWith(5);
   });
 
-  it("un appareil déjà révoqué le dit et n'offre plus rien", () => {
-    // Le site répond 204 à la révocation d'un appareil déjà révoqué : le geste
-    // serait sans effet et sans message utile. Neutralisation : retirer la
-    // branche `revoque` — le bouton réapparaît.
+  it("un appareil révoqué n'apparaît plus dans la liste", () => {
+    // Le site révoque un appareil, il ne le supprime jamais : sans ce filtre,
+    // un appareil révoqué (le propriétaire en a déjà un qui ne partira pas)
+    // reste affiché pour toujours. Neutralisation : inverser le filtre
+    // (`appareil.revoque` au lieu de `!appareil.revoque`) — VIEUX doit
+    // disparaître de « révoqué n'apparaît plus » et PORTABLE et BUREAU
+    // doivent disparaître des deux tests suivants ; celui-ci rougit sur
+    // VIEUX qui réapparaît.
     render(<MonCompte instantane={instantaneDeTest({ appareils: APPAREILS })} />);
-    expect(ligne("VIEUX").getByText("révoqué")).toBeInTheDocument();
-    expect(ligne("VIEUX").queryByRole("button", { name: "Révoquer" })).toBeNull();
+    expect(screen.queryByText("VIEUX")).toBeNull();
+  });
+
+  it("un appareil actif continue d'apparaître", () => {
+    // Contrôle positif du filtre : il ne doit pas devenir « rien n'apparaît ».
+    // Neutralisation : inverser le filtre — PORTABLE (actif, pas courant)
+    // disparaît, ce test rougit.
+    render(<MonCompte instantane={instantaneDeTest({ appareils: APPAREILS })} />);
+    expect(screen.getByText("PORTABLE")).toBeInTheDocument();
+  });
+
+  it("l'appareil courant apparaît et reste marqué comme tel malgré le filtre", () => {
+    // Le filtre ne porte que sur `revoque` : il ne doit jamais retirer
+    // l'appareil courant, qui n'est de toute façon jamais révoqué par le
+    // cœur. Neutralisation : inverser le filtre — BUREAU (courant) disparaît
+    // avec PORTABLE, ce test rougit sur l'absence de « cet appareil ».
+    render(<MonCompte instantane={instantaneDeTest({ appareils: APPAREILS })} />);
+    expect(ligne("BUREAU").getByText("cet appareil")).toBeInTheDocument();
+  });
+
+  it("le message d'absence reste juste quand tous les appareils sont révoqués", () => {
+    // Cas limite : le compte a un appareil enregistré, mais aucun actif à
+    // afficher — la liste filtrée est vide alors que `instantane.appareils`
+    // ne l'est pas. Neutralisation : revenir à la condition d'origine
+    // (`instantane.appareils.length === 0`, non filtrée) — avec un appareil
+    // révoqué présent, la longueur brute vaut 1 et le message ne s'affiche
+    // plus, ce test rougit.
+    render(
+      <MonCompte
+        instantane={instantaneDeTest({
+          appareils: [{ id: 6, nom: "VIEUX", courant: false, revoque: true }],
+        })}
+      />,
+    );
+    expect(screen.getByText("Aucun appareil enregistré pour l'instant.")).toBeInTheDocument();
   });
 
   it("la case de démarrage envoie l'inverse de l'état affiché", async () => {
