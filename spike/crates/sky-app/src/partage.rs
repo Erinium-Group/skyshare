@@ -129,7 +129,7 @@ pub fn fin_vue(issue: &Result<Fin, ErreurPartage>) -> FinVue {
         },
         Ok(Fin::TamponSature { .. }) => FinVue::TropLente,
         // La durée affichée vient de la constante du cœur, jamais d'un littéral
-        // de l'interface (revue finale, M4) : `FENETRE_HOTE` est ce que `hote`
+        // de l'interface (revue finale, M3) : `FENETRE_HOTE` est ce que `hote`
         // a réellement attendu avant de rendre `AucuneDemande`.
         Ok(Fin::AucuneDemande) => FinVue::AucuneDemande { fenetre_s: FENETRE_HOTE.as_secs() },
         Ok(Fin::AucunAppareilLocal) => FinVue::Autre {

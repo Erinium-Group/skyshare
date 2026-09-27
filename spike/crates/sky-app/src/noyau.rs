@@ -771,7 +771,7 @@ impl Noyau {
                 // défaut que la ronde 3 (Important 2) a fermé. NE PAS y ajouter
                 // d'oubli « par cohérence ».
                 //
-                // REVUE FINALE (parké C2) : cette garde-ci est là par SYMÉTRIE
+                // REVUE FINALE, CONSTAT M4 (parké C2 de la tâche 7) : cette garde-ci est là par SYMÉTRIE
                 // et par prudence, et AUCUN test ne la discrimine seule — la
                 // neutraliser laisse la suite verte, c'est mesuré. La couvrir
                 // demanderait de mettre en scène une connexion concurrente qui
@@ -2679,10 +2679,11 @@ mod tests {
     /// l'utilisateur qu'elle partage son écran alors qu'aucune session ne le
     /// permet — l'inverse exact de la promesse D4.
     ///
-    /// CE QUI DISCRIMINE, MESURÉ : la réservation et l'ICÔNE, jamais le seul
-    /// message. Un test qui n'assènerait que `Err(MESSAGE_NON_CONNECTE)`
-    /// passerait aussi si la garde rendait son erreur APRÈS avoir posé la
-    /// réservation et allumé l'icône.
+    /// CE QUI DISCRIMINE, MESURÉ : le message — c'est sur lui que les deux
+    /// neutralisations paniquent. Les assertions de réservation et d'icône ne
+    /// sont jamais atteintes dans ce cas ; elles sont là EN DÉFENSE d'une
+    /// future garde qui rendrait son erreur APRÈS avoir posé la réservation et
+    /// allumé l'icône. Ne pas les présenter comme mesurées (re-revue finale).
     ///
     /// Neutralisation, seule : retirer `self.exiger_connexion()?;` de
     /// `partager` — ce test rougit, et lui seul.

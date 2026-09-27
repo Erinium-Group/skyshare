@@ -55,7 +55,7 @@ describe("les autres fins", () => {
     expect(messageDeFin({ cause: "aucune_demande", fenetreS: 1800 })).toBe(
       "Personne n'a demandé à regarder pendant 30 minutes.",
     );
-    // CE QUI DISCRIMINE (revue finale, M4) : la durée est celle que le CŒUR a
+    // CE QUI DISCRIMINE (revue finale, M3) : la durée est celle que le CŒUR a
     // portée, pas un littéral de l'interface. Sans cette seconde assertion,
     // « pendant 30 minutes » écrit en dur passerait aussi bien — c'était
     // précisément le défaut, et `FENETRE_HOTE` aurait pu changer en silence.

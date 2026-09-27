@@ -156,7 +156,7 @@ fn installer_icone(app: &AppHandle) -> tauri::Result<()> {
                 // courir — c'est voulu (spec D4 : l'application vit près de
                 // l'horloge).
                 //
-                // CE QUE CE CODE FAIT, EXACTEMENT (revue finale, M2) : il LÈVE
+                // CE QUE CE CODE FAIT, EXACTEMENT (revue finale, M1) : il LÈVE
                 // le drapeau d'arrêt, et rien de plus. `arreter()` ne joint
                 // aucun fil, et `exit(0)` s'exécute à l'instruction suivante,
                 // bien avant que le fil du partage ne voie le drapeau (« en
