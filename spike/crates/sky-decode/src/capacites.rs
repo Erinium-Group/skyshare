@@ -30,6 +30,20 @@ pub enum ErreurDecodeur {
     )]
     QuatreQuatreQuatreNonPris,
 
+    #[error(
+        "cette carte ne sait pas décoder du {largeur}×{hauteur} : son décodeur s'arrête \
+         à {}×{}.\n\n\
+         Le HEVC 4:4:4 est bien pris en charge — c'est la résolution demandée qui est \
+         trop grande.",
+        maximum.0,
+        maximum.1
+    )]
+    ResolutionTropGrande {
+        largeur: u32,
+        hauteur: u32,
+        maximum: (u32, u32),
+    },
+
     #[error("le décodeur NVIDIA a refusé d'ouvrir une session (code {0})")]
     SessionRefusee(i32),
 }

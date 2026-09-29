@@ -5,6 +5,15 @@
 //! BT.709 au lieu de BT.601 plafonne à 36 dB — là où le décodage juste donne
 //! 89,78 dB contre cette même référence. Le seuil de 80 dB sépare donc les deux
 //! erreurs les plus probables de tout le jalon.
+//!
+//! **Cette implémentation-ci mesure 85,50 dB, et ce n'est pas une régression.**
+//! Les deux nombres mesurent la même propriété par deux chemins de conversion
+//! différents : la référence PNG est sortie du convertisseur en virgule fixe de
+//! swscale, cette implémentation convertit en `f64` exact. L'écart maximal entre
+//! les deux images est de **1 LSB** — 2 028 composantes sur 11 059 200 ici, 756
+//! pour les 89,78 dB. Les deux décodages sont justes au bit près, à un demi-LSB
+//! d'arrondi. C'est l'assertion `ECART_MAX_TOLERE` ci-dessous qui le prouve ; le
+//! seuil en dB, plus grossier à ce niveau, ne sert qu'à la robustesse.
 
 // `nvidia-video-codec-sdk` référence `NvEncodeAPICreateInstance` et
 // `NvEncodeAPIGetMaxSupportedVersion` dans un bloc `extern "C"` lié
@@ -22,17 +31,33 @@ const FLUX: &str = "../../cmp-hevc-444.h265";
 const REFERENCE: &str = "../../mesures/frame120-hevc-444.png";
 const IMAGE_COMPAREE: usize = 120;
 const SEUIL_DB: f64 = 80.0;
+/// Écart maximal toléré sur une composante, en niveaux.
+///
+/// C'est la vraie preuve, et elle est bien plus fine que le seuil en dB : à 1,
+/// seul un demi-LSB d'arrondi est admis. Toute erreur structurelle — matrice,
+/// chrominance, décalage de plan, mauvaise image — produit au moins un écart de
+/// plusieurs dizaines de niveaux quelque part, que la moyenne d'un PSNR dilue.
+const ECART_MAX_TOLERE: u8 = 1;
+
+/// Ouvre le décodeur, ou fait échouer le test en disant que le matériel manque.
+///
+/// Ce test est celui du **receveur** : le jalon 0 a établi qu'une machine sans
+/// carte NVIDIA ne peut qu'émettre. Se taire en vert sans décodeur serait « une
+/// preuve qui passerait aussi bien dans le cas négatif » — la faute que ce dépôt
+/// documente nommément.
+fn decodeur_ou_echouer() -> Decodeur {
+    match Decodeur::nouveau(2560, 1440) {
+        Ok(decodeur) => decodeur,
+        Err(e) => {
+            panic!("ce test exige un décodeur NVIDIA HEVC 4:4:4, et cette machine n'en a pas : {e}")
+        }
+    }
+}
 
 #[test]
 fn l_image_120_est_identique_a_la_reference_du_jalon_0() {
     let flux = std::fs::read(FLUX).expect("le flux du jalon 0 doit être présent");
-    let mut decodeur = match Decodeur::nouveau(2560, 1440) {
-        Ok(d) => d,
-        Err(e) => {
-            println!("décodage impossible sur cette machine, test non concluant : {e}");
-            return;
-        }
-    };
+    let mut decodeur = decodeur_ou_echouer();
 
     let mut rendues = Vec::new();
     for (rang, unite) in unites_acces(&flux).into_iter().enumerate() {
@@ -47,19 +72,23 @@ fn l_image_120_est_identique_a_la_reference_du_jalon_0() {
     let obtenue = &rendues[IMAGE_COMPAREE];
     let attendue = lire_png(REFERENCE);
     let db = psnr(obtenue, &attendue);
-    println!("PSNR mesuré : {db:.2} dB");
+    let ecart_max = ecart_maximal(obtenue, &attendue);
+    println!("PSNR mesuré : {db:.2} dB, écart maximal : {ecart_max} niveau(x)");
     assert!(
         db >= SEUIL_DB,
         "PSNR {db:.2} dB sous le seuil de {SEUIL_DB} dB"
+    );
+    assert!(
+        ecart_max <= ECART_MAX_TOLERE,
+        "écart maximal de {ecart_max} niveaux, l'arrondi ne l'explique plus"
     );
 }
 
 #[test]
 fn les_entetes_seuls_ne_rendent_aucune_image_et_ce_n_est_pas_une_erreur() {
     let flux = std::fs::read(FLUX).expect("flux présent");
-    let Ok(mut decodeur) = Decodeur::nouveau(2560, 1440) else {
-        return;
-    };
+    // Même exigence de matériel que le test de référence, et pour la même raison.
+    let mut decodeur = decodeur_ou_echouer();
     // Les trois premières unités d'accès d'un flux NVENC sont VPS, SPS, PPS.
     for (rang, unite) in unites_acces(&flux).into_iter().take(3).enumerate() {
         let rendu = decodeur
@@ -111,6 +140,20 @@ fn psnr(a: &[u8], b: &[u8]) -> f64 {
         return f64::INFINITY;
     }
     10.0 * (255.0f64 * 255.0 / eqm).log10()
+}
+
+/// Plus grand écart entre deux composantes de même rang.
+fn ecart_maximal(a: &[u8], b: &[u8]) -> u8 {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "les deux images doivent avoir la même taille"
+    );
+    a.iter()
+        .zip(b)
+        .map(|(x, y)| x.abs_diff(*y))
+        .max()
+        .unwrap_or(0)
 }
 
 fn lire_png(chemin: &str) -> Vec<u8> {

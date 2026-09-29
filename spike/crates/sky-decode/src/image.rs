@@ -16,9 +16,19 @@ use crate::decodeur::SessionNvdec;
 ///
 /// C'est de la plomberie opaque : un pointeur de périphérique CUDA et le pas
 /// de ligne, tels que `cuvidMapVideoFrame64` les a rendus. Les trois plans se
-/// suivent verticalement dans la même allocation, chacun de `hauteur` lignes
-/// de `pas` octets : Y à `pointeur`, U à `pointeur + pas × hauteur`, V à
-/// `pointeur + 2 × pas × hauteur`.
+/// suivent verticalement dans la même allocation :
+///
+/// - Y à `pointeur`,
+/// - U à `pointeur + pas × hauteur_surface`,
+/// - V à `pointeur + 2 × pas × hauteur_surface`.
+///
+/// L'espacement des plans est `hauteur_surface`, la hauteur **codée**, et non la
+/// hauteur affichée de l'image : les deux coïncident en 1440, mais pas en 1080,
+/// dont la hauteur codée vaut 1088. Confondre les deux ne provoque ni erreur ni
+/// dépassement de tampon — seulement un décalage de chrominance silencieux, à
+/// certaines résolutions seulement. `cuviddec.h` ne documente pas cette
+/// disposition ; la seule source est l'échantillon `NvDecoder` de NVIDIA, qui
+/// calcule l'offset de chrominance depuis `coded_height`.
 ///
 /// Aucun octet de pixel ne traverse cette frontière : seul le GPU sait lire ce
 /// pointeur.
@@ -28,6 +38,9 @@ pub struct SurfaceCuda {
     pub pointeur: u64,
     /// Pas de ligne en octets, commun aux trois plans.
     pub pas: u32,
+    /// Nombre de lignes séparant le début d'un plan du début du suivant, soit la
+    /// hauteur codée de la surface. Supérieure ou égale à la hauteur de l'image.
+    pub hauteur_surface: u32,
 }
 
 /// Une image sortie du décodeur, encore sur le GPU.
@@ -80,30 +93,42 @@ impl ImageDecodee {
         let hauteur = self.hauteur as usize;
         let plan = largeur * hauteur;
 
-        // Les trois plans se suivent verticalement avec le même pas : une seule
-        // copie 2D de `3 × hauteur` lignes les ramène tous, déjà compactés.
+        // `cuMemcpy2D_v2` lit le contexte courant du fil : le reposer avant. Voir
+        // `SessionNvdec::rendre_contexte_courant` pour pourquoi `!Send` n'y suffit
+        // pas.
+        self.session.rendre_contexte_courant()?;
+
+        // Un plan à la fois, et non une copie de `3 × hauteur` lignes : les plans
+        // sont espacés de `hauteur_surface` lignes, qui dépasse `hauteur` dès que
+        // la résolution n'est pas alignée. Une copie unique confondrait les deux.
         let mut yuv = vec![0u8; plan * 3];
-        let copie = CUDA_MEMCPY2D {
-            srcXInBytes: 0,
-            srcY: 0,
-            srcMemoryType: CUmemorytype::CU_MEMORYTYPE_DEVICE,
-            srcHost: std::ptr::null(),
-            srcDevice: self.surface.pointeur,
-            srcArray: std::ptr::null_mut(),
-            srcPitch: self.surface.pas as usize,
-            dstXInBytes: 0,
-            dstY: 0,
-            dstMemoryType: CUmemorytype::CU_MEMORYTYPE_HOST,
-            dstHost: yuv.as_mut_ptr().cast(),
-            dstDevice: 0,
-            dstArray: std::ptr::null_mut(),
-            dstPitch: largeur,
-            WidthInBytes: largeur,
-            Height: hauteur * 3,
-        };
-        let code = unsafe { cuMemcpy2D_v2(&copie) };
-        if code != CUresult::CUDA_SUCCESS {
-            anyhow::bail!("cuMemcpy2D a échoué (code {})", code as i32);
+        let saut_de_plan = self.surface.pas as u64 * u64::from(self.surface.hauteur_surface);
+        for numero in 0..3u64 {
+            let copie = CUDA_MEMCPY2D {
+                srcXInBytes: 0,
+                srcY: 0,
+                srcMemoryType: CUmemorytype::CU_MEMORYTYPE_DEVICE,
+                srcHost: std::ptr::null(),
+                srcDevice: self.surface.pointeur + numero * saut_de_plan,
+                srcArray: std::ptr::null_mut(),
+                srcPitch: self.surface.pas as usize,
+                dstXInBytes: 0,
+                dstY: 0,
+                dstMemoryType: CUmemorytype::CU_MEMORYTYPE_HOST,
+                dstHost: yuv[numero as usize * plan..].as_mut_ptr().cast(),
+                dstDevice: 0,
+                dstArray: std::ptr::null_mut(),
+                dstPitch: largeur,
+                WidthInBytes: largeur,
+                Height: hauteur,
+            };
+            let code = unsafe { cuMemcpy2D_v2(&copie) };
+            if code != CUresult::CUDA_SUCCESS {
+                anyhow::bail!(
+                    "cuMemcpy2D a échoué sur le plan {numero} (code {})",
+                    code as i32
+                );
+            }
         }
 
         let (plan_y, reste) = yuv.split_at(plan);
@@ -134,6 +159,10 @@ impl ImageDecodee {
 
 impl Drop for ImageDecodee {
     fn drop(&mut self) {
+        // Même exigence de contexte courant que pour la copie, et même
+        // impossibilité de signaler : un contexte qu'on n'arrive pas à reposer
+        // rendra de toute façon le démappage inopérant.
+        let _ = self.session.rendre_contexte_courant();
         // Rien à faire du code de retour : on ne peut pas signaler d'erreur
         // depuis un `Drop`, et un démappage raté ne se répare pas.
         unsafe {
@@ -145,9 +174,15 @@ impl Drop for ImageDecodee {
     }
 }
 
-/// Arrondit au plus proche et borne à l'intervalle d'un octet.
+/// Arrondit au plus proche, puis convertit en octet.
+///
+/// Pas de `.clamp` : depuis Rust 1.45, un cast de flottant vers entier **sature**
+/// au lieu d'être indéfini, donc le bornage est déjà fait — un `.clamp` serait du
+/// code mort, et un code mort qu'un test aurait l'air de prouver. C'est bien un
+/// bornage dont on a besoin : la matrice BT.601 sort de l'intervalle `0..=255`
+/// sur des couples YUV que rien n'interdit au flux de contenir.
 fn arrondir_octet(valeur: f64) -> u8 {
-    valeur.round().clamp(0.0, 255.0) as u8
+    valeur.round() as u8
 }
 
 #[cfg(test)]
@@ -155,9 +190,19 @@ mod tests {
     use super::arrondir_octet;
 
     #[test]
-    fn la_conversion_borne_les_debordements_des_deux_cotes() {
+    fn l_arrondi_va_au_plus_proche() {
+        // La seule assertion qui discrimine : sans `.round()`, le cast tronque et
+        // 127,5 donnerait 127.
+        assert_eq!(arrondir_octet(127.5), 128);
+        assert_eq!(arrondir_octet(127.4), 127);
+    }
+
+    #[test]
+    fn le_cast_sature_hors_intervalle_et_c_est_ce_qui_borne() {
+        // Épingle le comportement de Rust sur lequel `arrondir_octet` s'appuie à
+        // la place d'un `.clamp`. Ce test ne prouve pas une garde qu'on aurait
+        // écrite : il prouve celle du langage, dont on dépend.
         assert_eq!(arrondir_octet(-42.0), 0);
         assert_eq!(arrondir_octet(300.0), 255);
-        assert_eq!(arrondir_octet(127.5), 128);
     }
 }

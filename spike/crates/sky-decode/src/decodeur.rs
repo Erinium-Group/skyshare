@@ -30,10 +30,15 @@ use crate::nvcuvid_sys::NvcuvidApi;
 
 /// Nombre de surfaces de sortie mappables simultanément.
 ///
-/// Une image mappée en immobilise une : deux suffisent pour le régime normal
-/// (une unité d'accès rend au plus une image, consommée aussitôt) tout en
-/// laissant la marge d'un chevauchement.
-const SURFACES_DE_SORTIE: u32 = 2;
+/// Quatre, et pas deux, parce que l'épuisement ne se signale pas : `cuviddec.h`
+/// (« cuvidDecodePicture may block the calling thread if there are too many
+/// pictures pending in the decode queue ») prévient qu'on n'obtiendrait pas une
+/// erreur mais un **blocage du fil appelant** — et ce fil est celui du rendu,
+/// donc une interface figée sans message. Le flux de données recommandé par ce
+/// même en-tête mappe `N-4`, soit quatre images en vol ; c'est aussi ce que
+/// demande le double tampon d'un afficheur, qui présente l'image *n* pendant
+/// qu'il décode *n+1*. Chaque surface coûte environ 11 Mo de mémoire vidéo.
+const SURFACES_DE_SORTIE: u32 = 4;
 
 /// La DLL NVDEC, le contexte CUDA et le décodeur matériel.
 ///
@@ -42,8 +47,9 @@ const SURFACES_DE_SORTIE: u32 = 2;
 /// [`Decodeur`] a déjà disparu.
 pub(crate) struct SessionNvdec {
     pub(crate) api: NvcuvidApi,
-    /// Le contexte CUDA doit rester vivant : NVDEC décode dedans.
-    _contexte: Arc<CudaContext>,
+    /// Le contexte CUDA dans lequel NVDEC décode. Gardé nommé, et non `_`, parce
+    /// qu'on s'en sert : voir [`SessionNvdec::rendre_contexte_courant`].
+    pub(crate) contexte: Arc<CudaContext>,
     /// Nul jusqu'au rappel de séquence, qui seul connaît la taille codée.
     /// `Cell` parce que ce rappel ne reçoit qu'un accès partagé à la session.
     decodeur: std::cell::Cell<CUvideodecoder>,
@@ -52,6 +58,20 @@ pub(crate) struct SessionNvdec {
 impl SessionNvdec {
     pub(crate) fn decodeur(&self) -> CUvideodecoder {
         self.decodeur.get()
+    }
+
+    /// Rend le contexte de cette session courant sur le fil appelant.
+    ///
+    /// À appeler avant tout appel qui lit le contexte courant : NVDEC et
+    /// `cuMemcpy2D`. `Decodeur` est `!Send`, donc il ne change pas de fil — mais
+    /// cela ne dit rien du **contexte courant de ce fil**, que n'importe quel
+    /// autre code du même fil peut remplacer par un `cuCtxSetCurrent`. C'est
+    /// pourquoi on le repose ici plutôt que de s'appuyer sur `!Send`.
+    /// `bind_to_thread` ne fait rien quand le contexte est déjà courant.
+    pub(crate) fn rendre_contexte_courant(&self) -> Result<(), ErreurDecodeur> {
+        self.contexte
+            .bind_to_thread()
+            .map_err(|e| ErreurDecodeur::SessionRefusee(e.0 as i32))
     }
 }
 
@@ -75,6 +95,11 @@ struct EtatPartage {
     /// Taille de la zone affichée, connue seulement au rappel de séquence.
     largeur_affichee: u32,
     hauteur_affichee: u32,
+    /// Hauteur de la SURFACE, c'est-à-dire `coded_height` : le nombre de lignes
+    /// qui séparent le début d'un plan du début du suivant. Distincte de la
+    /// hauteur affichée dès que la résolution n'est pas alignée — en 1080, la
+    /// hauteur codée vaut 1088.
+    hauteur_surface: u32,
     /// Nombre de surfaces de décodage retenu, redonné à chaque rappel de
     /// séquence : NVDEC interprète cette valeur de retour comme la taille de
     /// son pool, et un 0 signifierait « échec ».
@@ -109,12 +134,20 @@ impl Decodeur {
         // taille demandée tient dans ce que la carte sait décoder.
         let capacites = sonder_materiel()?;
         if largeur > capacites.largeur_max || hauteur > capacites.hauteur_max {
-            return Err(ErreurDecodeur::QuatreQuatreQuatreNonPris);
+            // Sa propre variante, et non `QuatreQuatreQuatreNonPris` : ce dernier
+            // annoncerait à une carte parfaitement capable qu'elle ne sait pas
+            // recevoir, alors que seule la résolution est en cause. Ce projet n'a
+            // aucun autre moyen de diagnostic qu'un message juste.
+            return Err(ErreurDecodeur::ResolutionTropGrande {
+                largeur,
+                hauteur,
+                maximum: (capacites.largeur_max, capacites.hauteur_max),
+            });
         }
 
-        // `CudaContext::new` lie le contexte au fil courant ; NVDEC et
-        // `cuMemcpy2D` l'exigent courant, et `Decodeur` étant `!Send`, il le
-        // reste.
+        // `CudaContext::new` lie le contexte au fil courant. Ce lien n'est pas
+        // acquis pour la suite — voir `SessionNvdec::rendre_contexte_courant`, que
+        // `decoder` rappelle à chaque fois.
         let contexte =
             CudaContext::new(0).map_err(|e| ErreurDecodeur::AucuneCarteNvidia(e.to_string()))?;
         let api =
@@ -122,7 +155,7 @@ impl Decodeur {
 
         let session = Rc::new(SessionNvdec {
             api,
-            _contexte: contexte,
+            contexte,
             decodeur: std::cell::Cell::new(std::ptr::null_mut()),
         });
 
@@ -132,6 +165,7 @@ impl Decodeur {
             hauteur_annoncee: hauteur,
             largeur_affichee: 0,
             hauteur_affichee: 0,
+            hauteur_surface: 0,
             surfaces_de_decodage: 1,
             file: VecDeque::new(),
             erreur: None,
@@ -183,6 +217,10 @@ impl Decodeur {
         paquet.payload = unite.as_ptr();
         paquet.timestamp = horodatage_ms as i64;
 
+        // NVDEC lit le contexte courant du fil, y compris depuis les rappels
+        // (`cuvidDecodePicture`, `cuvidMapVideoFrame64`) : on le repose avant.
+        self.session.rendre_contexte_courant()?;
+
         // Aucune référence Rust vers `*self.etat` n'est vivante pendant cet
         // appel : les rappels en fabriquent une, et ils sont seuls à le faire.
         let code = unsafe { (self.session.api.cuvid_parse_video_data)(self.parseur, &mut paquet) };
@@ -213,6 +251,21 @@ impl Drop for Decodeur {
     }
 }
 
+/// Le verdict de la décision D8, séparé de l'appel matériel pour être prouvable
+/// sans GPU — exactement comme `Capacites::depuis_brut` à la tâche 1.
+///
+/// On refuse plutôt que de dégrader en silence : un flux 4:2:0 ou 10 bits serait
+/// décodable, mais pas dans le format que le rendu attend, et convertir sans le
+/// dire produirait des couleurs fausses que personne ne saurait diagnostiquer.
+fn verifier_format_de_sequence(format: &CUVIDEOFORMAT) -> Result<(), ErreurDecodeur> {
+    if format.chroma_format != cudaVideoChromaFormat::cudaVideoChromaFormat_444
+        || format.bit_depth_luma_minus8 != 0
+    {
+        return Err(ErreurDecodeur::QuatreQuatreQuatreNonPris);
+    }
+    Ok(())
+}
+
 /// Rappel de séquence : NVDEC a lu les en-têtes et annonce le format.
 ///
 /// Valeur de retour attendue par le SDK : 0 pour échouer, sinon le nombre de
@@ -227,12 +280,8 @@ unsafe extern "C" fn rappel_sequence(donnees: *mut c_void, format: *mut CUVIDEOF
         return etat.surfaces_de_decodage as c_int;
     }
 
-    // Décision D8 : on refuse plutôt que de dégrader en silence. Un flux 4:2:0
-    // ou 10 bits serait décodable, mais pas dans le format que le rendu attend.
-    if format.chroma_format != cudaVideoChromaFormat::cudaVideoChromaFormat_444
-        || format.bit_depth_luma_minus8 != 0
-    {
-        etat.erreur = Some(ErreurDecodeur::QuatreQuatreQuatreNonPris);
+    if let Err(refus) = verifier_format_de_sequence(format) {
+        etat.erreur = Some(refus);
         return 0;
     }
 
@@ -240,6 +289,7 @@ unsafe extern "C" fn rappel_sequence(donnees: *mut c_void, format: *mut CUVIDEOF
     let hauteur = (format.display_area.bottom - format.display_area.top).max(0) as u32;
     etat.largeur_affichee = largeur;
     etat.hauteur_affichee = hauteur;
+    etat.hauteur_surface = format.coded_height;
     etat.surfaces_de_decodage = u32::from(format.min_num_decode_surfaces).max(1);
 
     let mut creation: CUVIDDECODECREATEINFO = std::mem::zeroed();
@@ -325,7 +375,52 @@ unsafe extern "C" fn rappel_affichage(
         etat.largeur_affichee,
         etat.hauteur_affichee,
         info.timestamp as u64,
-        SurfaceCuda { pointeur, pas },
+        SurfaceCuda {
+            pointeur,
+            pas,
+            hauteur_surface: etat.hauteur_surface,
+        },
     ));
     1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fabrique un format de séquence conforme ; chaque test n'en change qu'un
+    /// champ. Même motif que `brut_capable` de `capacites.rs`.
+    fn format_conforme() -> CUVIDEOFORMAT {
+        let mut format: CUVIDEOFORMAT = unsafe { std::mem::zeroed() };
+        format.codec = cudaVideoCodec::cudaVideoCodec_HEVC;
+        format.chroma_format = cudaVideoChromaFormat::cudaVideoChromaFormat_444;
+        format.bit_depth_luma_minus8 = 0;
+        format.coded_width = 2560;
+        format.coded_height = 1440;
+        format
+    }
+
+    #[test]
+    fn un_flux_444_8_bits_est_accepte() {
+        verifier_format_de_sequence(&format_conforme()).expect("doit être accepté");
+    }
+
+    #[test]
+    fn un_flux_420_est_refuse_au_lieu_d_etre_degrade() {
+        // Décision D8 : NVDEC saurait le décoder, et c'est précisément le piège —
+        // le rendu attend de la chrominance pleine résolution. Refuser, jamais
+        // convertir en silence.
+        let mut format = format_conforme();
+        format.chroma_format = cudaVideoChromaFormat::cudaVideoChromaFormat_420;
+        let refus = verifier_format_de_sequence(&format).expect_err("doit être refusé");
+        assert!(matches!(refus, ErreurDecodeur::QuatreQuatreQuatreNonPris));
+    }
+
+    #[test]
+    fn un_flux_10_bits_est_refuse_au_lieu_d_etre_degrade() {
+        let mut format = format_conforme();
+        format.bit_depth_luma_minus8 = 2;
+        let refus = verifier_format_de_sequence(&format).expect_err("doit être refusé");
+        assert!(matches!(refus, ErreurDecodeur::QuatreQuatreQuatreNonPris));
+    }
 }
