@@ -1,0 +1,17 @@
+[package]
+name = "sky-decode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror = "2.0.20"
+cudarc = { version = "0.16", default-features = false, features = ["driver", "dynamic-loading"] }
+libloading = "0.8"
+# Mêmes liaisons que sky-encode : `ci-check` fournit les types sans exiger le SDK
+# à la compilation. La DLL est chargée à l'exécution par `libloading`, comme le
+# fait sky-encode pour nvEncodeAPI64.dll.
+nvidia-video-codec-sdk = { version = "0.4.0", features = ["ci-check"] }
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D11"] }

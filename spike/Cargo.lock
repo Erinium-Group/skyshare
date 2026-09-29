@@ -4017,6 +4017,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sky-decode"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "cudarc",
+ "libloading 0.8.9",
+ "nvidia-video-codec-sdk",
+ "thiserror 2.0.20",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "sky-encode"
 version = "0.0.0"
 dependencies = [
