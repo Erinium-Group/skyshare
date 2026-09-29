@@ -161,7 +161,11 @@ La négociation annonce le profil **Main 4:4:4** via
 correctement avec le profil Main par défaut, parce que la paquetisation ne lit pas le contenu du
 NAL : **aucun test de transport ne verra jamais cette erreur** (§9).
 
-### `sky-partage` — messages de contrôle
+### `sky-net` — messages de contrôle
+
+Le type vit dans `sky-net` (`src/controle.rs`), **pas** dans `sky-partage` : `LinkEvent::Controle`
+le nomme, et `sky-partage` dépend de `sky-net`, donc l'inverse serait une dépendance circulaire.
+`sky-net` a déjà `serde` et `serde_json` dans ses dépendances.
 
 ```rust
 #[derive(Serialize, Deserialize)]
