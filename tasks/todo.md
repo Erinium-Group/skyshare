@@ -275,3 +275,47 @@ arbitrage : `.superpowers/sdd/2026-09-19-jalon-1-application/progress.md` (hors 
 ### Reporté au jalon 2
 - Erreur typée rendue par `PeerLink::repondant` : `echec_local` classe aujourd'hui sur le texte du message.
 - Agent HTTP recréé à chaque appel : aucune connexion réutilisée, coût non mesuré.
+
+---
+
+## Jalon 2 — le premier pixel — en cadrage
+
+Afficher réellement l'image chez le spectateur. Deux sondes de faisabilité ont été lancées **avant**
+d'écrire la spec, parce que deux des trois inconnues du jalon ne reposaient sur aucune mesure.
+Résultats complets, avec ce qui est mesuré et ce qui ne l'est pas :
+`docs/superpowers/notes/2026-09-27-sondes-jalon-2-decodage-et-transport.md`.
+
+### Tranché sur mesure (27/09/2026)
+- [x] **NVDEC décode notre HEVC 4:4:4.** 901 images sur 901, **569 im/s**, latence **1,57 ms médiane**
+  (p99 3,39 ms), 8,2 % d'un cœur, décodeur à ~89 %. Justesse contre la référence du jalon 0 :
+  **89,78 dB, 99,979 % de pixels identiques**. Le 4:4:4 est préservé, prouvé de trois façons dont une
+  discriminante (un aller-retour 4:2:0 forcé perd 19–20 dB et altère 14 % des échantillons).
+  - **Le flux est en BT.601 pleine échelle, pas BT.709** (BT.709 plafonne à 36 dB). À porter dans le
+    code de rendu, avec le chiffre en commentaire.
+  - Piège écarté : mpv en `--hwdec=nvdec` **se replie silencieusement sur le logiciel** sur ce flux.
+    Un lecteur qui « décode » ne prouve rien du matériel.
+- [x] **Le transport passe aux pistes média de `str0m` 0.23.1** — pas de passage à `webrtc-rs`.
+  HEVC est actif par défaut dans str0m (`enable_h265(true)`), son paquetiseur consomme de l'**Annex-B**,
+  donc aucune conversion. **0 refus d'écriture sur 2593 à 12 Mbps et sur 21552 à 100 Mbps**, contre 16 %
+  aujourd'hui — et c'est structurel : la contre-pression SCTP qui produit les 16 % n'existe pas sur ce
+  chemin. Intégrité vérifiée : 61 NAL émis, 61 reçus, identiques octet pour octet.
+  - Argument décisif : sans `enable_bwe`, str0m installe un **`NullPacer`** — le projet garde
+    intégralement son contrôle de congestion, sans rien contourner. Coût : **400 à 450 lignes**, dont
+    ~140 supprimées, contre 1200 à 3500 pour `webrtc-rs` (async dans une application synchrone).
+
+### Reste à trancher
+- [ ] **L'écart 7 n'est PAS clos.** Les 115,7 ms ont été mesurés entre deux machines et deux réseaux ;
+  la sonde n'a mesuré qu'une boucle locale, **sans valeur comparative**. Ce qui est établi, c'est que la
+  cause supposée disparaît. **Un essai réel à deux machines reste dû** — le même dispositif que le C2.
+- [ ] `Pacer` maison contre `str0m::bwe` : mutuellement exclusifs en pratique (`enable_bwe` installe
+  aussi le `LeakyBucketPacer`). Commencer sans BWE, comparer les deux à l'essai réel.
+- [ ] **Latence décodeur → pixel affiché** : le vrai risque restant. Une image décodée pèse 11,06 Mio,
+  le chemin doit rester sur le GPU.
+- [ ] Décodage **pendant** un encodage NVENC sur le même moteur : non mesuré, sonde courte.
+- [ ] Profil HEVC annoncé dans le `fmtp` : la sonde a utilisé Main par défaut, le projet encode en
+  **Main 4:4:4** — `add_h265` avec le bon `profile_id`.
+- [ ] Écart 3 (en-têtes de séquence émis une seule fois — confirmé côté décodeur : **un seul IDR pour
+  901 images**) et écart 5 (le régulateur ne pilote pas le débit : `nvEncReconfigureEncoder` absent de
+  l'API de `sky-encode`).
+- [ ] Décision D1 (machines sans NVIDIA récente) : direction fixée le 23/08 (voie A, empaquetage), ses
+  neuf inconnues restent entières et demandent du matériel AMD/Intel absent à ce jour.

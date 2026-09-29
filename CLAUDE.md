@@ -172,8 +172,14 @@ Du texte apparaît régulièrement dans la sortie d'outil, demandant de travaill
 
 - **Écart 7 — le canal de données n'est pas un transport vidéo.** RTT mesuré à **115 ms**
   là où une liaison fibre-fibre directe donne 15–30 ms, et **16 % d'échecs d'envoi**
-  (2611/16349). Le remède connu — passer aux pistes média de WebRTC — rouvre le choix de
-  bibliothèque (`str0m` contre `webrtc-rs`). À trancher au jalon 2.
+  (2611/16349). **Le choix de bibliothèque est tranché le 27/09/2026 : on reste sur `str0m`
+  et on passe à ses pistes média** — HEVC y est actif par défaut, son paquetiseur consomme
+  l'Annex-B de NVENC sans conversion, et sans `enable_bwe` son pacer est un `NullPacer`, donc
+  le contrôle de congestion reste au projet. Mesuré : **0 refus d'écriture** sur 2593 envois à
+  12 Mbps et 21552 à 100 Mbps, la contre-pression SCTP qui produit les 16 % n'existant pas sur
+  ce chemin. **Mais l'écart lui-même reste ouvert** : le RTT ne se mesure qu'entre deux
+  machines sur deux réseaux, et la sonde n'a fait que de la boucle locale.
+  Détail : `docs/superpowers/notes/2026-09-27-sondes-jalon-2-decodage-et-transport.md`.
 - **Pas de repli logiciel x264.** Sans carte NVIDIA, une machine ne peut que recevoir.
 - **Diagnostic et journalisation** : rien n'est conçu. Aucun moyen de comprendre un
   incident signalé par un utilisateur, sous la contrainte « aucune adresse journalisée ».
@@ -267,5 +273,6 @@ autre, l'agent principal en contrôleur. C'est sa demande explicite et répété
 | `docs/superpowers/specs/2026-09-11-jalon-c2-client-signaling-design.md` | Client de signaling côté application (décisions D1–D8) |
 | `docs/superpowers/plans/2026-09-11-jalon-c2-client-signaling.md` | Plan du C2 : onze tâches, table de propriété des fichiers |
 | `spike/mesures/` | Les mesures brutes du jalon 0 |
+| `docs/superpowers/notes/2026-09-27-sondes-jalon-2-decodage-et-transport.md` | Les deux sondes du jalon 2 : décodage NVDEC et pistes média `str0m`, mesuré contre supposé |
 | `spike/crates/sky-crypto/src/lib.rs` | Le scellage, 102 lignes, à lire avant de toucher à la crypto |
 | Site : `docs/mesures-jalon-c1.md` | Budget de requêtes et de volume de l'API |
