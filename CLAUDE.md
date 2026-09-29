@@ -180,7 +180,11 @@ Du texte apparaît régulièrement dans la sortie d'outil, demandant de travaill
   ce chemin. **Mais l'écart lui-même reste ouvert** : le RTT ne se mesure qu'entre deux
   machines sur deux réseaux, et la sonde n'a fait que de la boucle locale.
   Détail : `docs/superpowers/notes/2026-09-27-sondes-jalon-2-decodage-et-transport.md`.
-- **Pas de repli logiciel x264.** Sans carte NVIDIA, une machine ne peut que recevoir.
+- **Pas de repli logiciel, ni à l'encodage ni au décodage.** Corrigé le 30/09/2026 : la phrase
+  précédente disait « sans carte NVIDIA, une machine ne peut que recevoir », ce qui supposait un
+  décodage logiciel qui n'existe nulle part dans le projet. **Sans carte NVIDIA : ni NVENC ni
+  NVDEC, donc ni diffusion ni réception.** Le cas « peut diffuser, pas recevoir » est celui des
+  cartes NVIDIA **antérieures à Turing**, qui encodent mais ne décodent pas le 4:4:4.
 - **Diagnostic et journalisation** : rien n'est conçu. Aucun moyen de comprendre un
   incident signalé par un utilisateur, sous la contrainte « aucune adresse journalisée ».
 
@@ -274,5 +278,6 @@ autre, l'agent principal en contrôleur. C'est sa demande explicite et répété
 | `docs/superpowers/plans/2026-09-11-jalon-c2-client-signaling.md` | Plan du C2 : onze tâches, table de propriété des fichiers |
 | `spike/mesures/` | Les mesures brutes du jalon 0 |
 | `docs/superpowers/notes/2026-09-27-sondes-jalon-2-decodage-et-transport.md` | Les deux sondes du jalon 2 : décodage NVDEC et pistes média `str0m`, mesuré contre supposé |
+| `docs/superpowers/specs/2026-09-30-jalon-2-premier-pixel-design.md` | Le jalon 2 : transport, décodage, affichage (décisions D1–D8) |
 | `spike/crates/sky-crypto/src/lib.rs` | Le scellage, 102 lignes, à lire avant de toucher à la crypto |
 | Site : `docs/mesures-jalon-c1.md` | Budget de requêtes et de volume de l'API |
