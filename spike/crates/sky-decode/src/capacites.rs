@@ -56,12 +56,31 @@ impl Capacites {
     }
 }
 
+/// Bibliothèque du pilote CUDA, installée avec le pilote NVIDIA.
+const PILOTE_CUDA_DLL: &str = "nvcuda.dll";
+
+/// Vérifie qu'une bibliothèque se charge, recherchée dans `System32` seulement
+/// (comme `NvcuvidApi::load`, contre le « DLL planting »). Le nom est un
+/// paramètre pour que le cas d'absence soit testable sur une machine NVIDIA.
+fn verifier_bibliotheque(nom: &str) -> Result<(), ErreurDecodeur> {
+    use libloading::os::windows::{Library, LOAD_LIBRARY_SEARCH_SYSTEM32};
+    unsafe { Library::load_with_flags(nom, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+        .map(drop)
+        .map_err(|e| ErreurDecodeur::AucuneCarteNvidia(e.to_string()))
+}
+
 /// Interroge le décodeur NVIDIA de cette machine sur le HEVC 4:4:4 8 bits.
 ///
 /// Une absence de pilote, de carte ou de `nvcuvid.dll` devient
 /// [`ErreurDecodeur::AucuneCarteNvidia`] : pour l'utilisateur c'est la même
 /// situation, et le détail technique reste dans le message.
 pub fn sonder_materiel() -> Result<Capacites, ErreurDecodeur> {
+    // `CudaContext::new` appelle `cuInit`, qui PANIQUE (au lieu de rendre une
+    // erreur) quand `nvcuda.dll` est absente, en `dynamic-loading`. On vérifie
+    // donc le pilote avant, pour que l'absence de carte soit une erreur
+    // ordinaire et non un plantage.
+    verifier_bibliotheque(PILOTE_CUDA_DLL)?;
+
     // `cuvidGetDecoderCaps` exige un contexte CUDA courant sur ce fil : le
     // contexte doit donc vivre jusqu'à la fin de l'appel.
     let _contexte = cudarc::driver::CudaContext::new(0)
@@ -123,6 +142,19 @@ mod tests {
         brut.bIsSupported = 0;
         let refus = Capacites::depuis_brut(&brut).expect_err("doit être refusée");
         assert!(matches!(refus, ErreurDecodeur::QuatreQuatreQuatreNonPris));
+    }
+
+    #[test]
+    fn une_bibliotheque_absente_donne_aucune_carte_nvidia() {
+        let refus = verifier_bibliotheque("cette_bibliotheque_n_existe_pas.dll")
+            .expect_err("doit être refusée");
+        assert!(matches!(refus, ErreurDecodeur::AucuneCarteNvidia(_)));
+    }
+
+    #[test]
+    fn le_pilote_cuda_se_charge_sur_cette_machine() {
+        verifier_bibliotheque(PILOTE_CUDA_DLL)
+            .expect("nvcuda.dll doit se charger : le pilote NVIDIA est installé ici");
     }
 
     #[test]
