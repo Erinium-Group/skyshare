@@ -75,11 +75,18 @@ fn verifier_bibliotheque(nom: &str) -> Result<(), ErreurDecodeur> {
 /// [`ErreurDecodeur::AucuneCarteNvidia`] : pour l'utilisateur c'est la même
 /// situation, et le détail technique reste dans le message.
 pub fn sonder_materiel() -> Result<Capacites, ErreurDecodeur> {
+    sonder_materiel_avec(PILOTE_CUDA_DLL)
+}
+
+/// Corps de [`sonder_materiel`], avec le nom de la bibliothèque du pilote en
+/// paramètre : c'est ce qui permet de prouver, sur n'importe quelle machine,
+/// que la vérification est bien branchée avant l'appel à `cudarc`.
+fn sonder_materiel_avec(pilote_cuda: &str) -> Result<Capacites, ErreurDecodeur> {
     // `CudaContext::new` appelle `cuInit`, qui PANIQUE (au lieu de rendre une
     // erreur) quand `nvcuda.dll` est absente, en `dynamic-loading`. On vérifie
     // donc le pilote avant, pour que l'absence de carte soit une erreur
     // ordinaire et non un plantage.
-    verifier_bibliotheque(PILOTE_CUDA_DLL)?;
+    verifier_bibliotheque(pilote_cuda)?;
 
     // `cuvidGetDecoderCaps` exige un contexte CUDA courant sur ce fil : le
     // contexte doit donc vivre jusqu'à la fin de l'appel.
@@ -148,6 +155,16 @@ mod tests {
     fn une_bibliotheque_absente_donne_aucune_carte_nvidia() {
         let refus = verifier_bibliotheque("cette_bibliotheque_n_existe_pas.dll")
             .expect_err("doit être refusée");
+        assert!(matches!(refus, ErreurDecodeur::AucuneCarteNvidia(_)));
+    }
+
+    #[test]
+    fn sans_pilote_la_sonde_rend_une_erreur_et_ne_panique_pas() {
+        // Prouve le branchement : si `sonder_materiel_avec` n'appelait plus la
+        // vérification, `CudaContext::new` serait atteint et, sans pilote,
+        // paniquerait ; avec un pilote présent, la sonde réussirait. Dans les
+        // deux cas ce test rougit, sur n'importe quelle machine.
+        let refus = sonder_materiel_avec("absente.dll").expect_err("doit être refusée");
         assert!(matches!(refus, ErreurDecodeur::AucuneCarteNvidia(_)));
     }
 
