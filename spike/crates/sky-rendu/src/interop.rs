@@ -156,27 +156,29 @@ impl Pont {
         // n'est pas un choix libre ici, c'est celui que `sky-decode` décode sur.
         let contexte = CudaContext::new(0).context("contexte CUDA")?;
 
-        let mut plans = Vec::with_capacity(3);
+        // `Pont` n'existe pas encore, donc son `Drop` ne s'exécutera pas : sur
+        // échec au milieu de l'enregistrement, les plans déjà pris doivent être
+        // désenregistrés À LA MAIN, sans quoi ils fuient. Même motif que
+        // `Fenetre::creer`, qui libère sa boîte et détruit sa fenêtre par la même
+        // logique. Ce chemin n'a rien de rare : il est rejoué à chaque changement
+        // de taille de la fenêtre.
+        let mut plans: Vec<Plan> = Vec::with_capacity(3);
         for numero in 0..3 {
-            let (texture, vue) = creer_texture_de_plan(appareil, largeur, hauteur)
-                .with_context(|| format!("texture du plan {numero}"))?;
-            let mut ressource: cu::CUgraphicsResource = std::ptr::null_mut();
-            // `as_raw` rend le pointeur d'interface ; `ID3D11Texture2D` hérite de
-            // `ID3D11Resource`, que CUDA attend.
-            let code = unsafe {
-                (api.enregistrer_ressource)(&mut ressource, texture.as_raw(), REGISTER_FLAGS_NONE)
-            };
-            verifier(code)
-                .with_context(|| format!("cuGraphicsD3D11RegisterResource sur le plan {numero}"))?;
-            // La poignée Rust de la texture peut tomber : la vue et
-            // l'enregistrement CUDA en détiennent chacun une référence COM. Voir
-            // `struct Plan`.
-            drop(texture);
-            plans.push(Plan { vue, ressource });
+            match enregistrer_un_plan(appareil, &api, largeur, hauteur) {
+                Ok(plan) => plans.push(plan),
+                Err(e) => {
+                    desenregistrer(&contexte, &plans);
+                    return Err(e.context(format!("plan {numero}")));
+                }
+            }
         }
-        let plans: [Plan; 3] = plans
-            .try_into()
-            .map_err(|_| anyhow!("trois plans attendus"))?;
+        let plans: [Plan; 3] = match plans.try_into() {
+            Ok(plans) => plans,
+            Err(deja_pris) => {
+                desenregistrer(&contexte, &deja_pris);
+                return Err(anyhow!("trois plans attendus"));
+            }
+        };
 
         Ok(Self {
             contexte,
@@ -262,28 +264,13 @@ impl Pont {
             })
             .with_context(|| format!("cuGraphicsSubResourceGetMappedArray sur le plan {numero}"))?;
 
-            let copie = cu::CUDA_MEMCPY2D {
-                srcXInBytes: 0,
-                srcY: 0,
-                srcMemoryType: cu::CUmemorytype::CU_MEMORYTYPE_DEVICE,
-                srcHost: std::ptr::null(),
-                srcDevice: surface.pointeur + numero * saut_de_plan,
-                srcArray: std::ptr::null_mut(),
-                srcPitch: surface.pas as usize,
-                dstXInBytes: 0,
-                dstY: 0,
-                // Le tableau vit dans la texture Direct3D : la destination est
-                // sur le périphérique, tout comme la source. Aucun octet de pixel
-                // ne touche la mémoire centrale (décision D5).
-                dstMemoryType: cu::CUmemorytype::CU_MEMORYTYPE_ARRAY,
-                dstHost: std::ptr::null_mut(),
-                dstDevice: 0,
-                dstArray: tableau,
-                // Ignoré pour une destination de type tableau.
-                dstPitch: 0,
-                WidthInBytes: self.largeur as usize,
-                Height: self.hauteur as usize,
-            };
+            let copie = decrire_copie_de_plan(
+                surface.pointeur + numero * saut_de_plan,
+                surface.pas,
+                tableau,
+                self.largeur,
+                self.hauteur,
+            );
             verifier(unsafe { cu::cuMemcpy2D_v2(&copie) })
                 .with_context(|| format!("cuMemcpy2D sur le plan {numero}"))?;
         }
@@ -293,16 +280,92 @@ impl Pont {
 
 impl Drop for Pont {
     fn drop(&mut self) {
-        // Désenregistrer exige le contexte courant. Sans lui, rien à faire : on
-        // ne peut pas signaler depuis un `Drop`, et l'échec se répare encore
-        // moins.
-        if self.contexte.bind_to_thread().is_err() {
-            return;
-        }
-        for plan in &self.plans {
-            unsafe { cu::cuGraphicsUnregisterResource(plan.ressource) };
-        }
+        desenregistrer(&self.contexte, &self.plans);
     }
+}
+
+/// Décrit la copie d'un plan : source sur le périphérique, destination dans le
+/// tableau CUDA que la texture Direct3D expose.
+///
+/// **Fonction pure, et séparée exprès.** Ce que la décision D5 exige de CETTE
+/// copie tient dans quatre champs — les deux types de mémoire et les deux
+/// pointeurs hôte. Les sortir ici les rend affirmables par un test **sans GPU**,
+/// qui rougit en nommant D5 au lieu de rendre un code d'erreur CUDA opaque.
+///
+/// **Portée exacte de cette garantie, mesurée et non supposée.** Le test épingle
+/// la forme de cette copie-ci : changer un `DEVICE` en `HOST` le fait rougir. Il
+/// ne prouve **pas** l'absence d'autres copies — un aller-retour par l'hôte ajouté
+/// *autour* de ce descripteur le laisse vert, c'est vérifié. Ne pas croire D5
+/// scellée par ce seul test : il ferme la porte la plus probable, pas toutes. Le
+/// reste dépend de la relecture et de la mesure de débit de la tâche 11.
+fn decrire_copie_de_plan(
+    source: cu::CUdeviceptr,
+    pas: u32,
+    destination: cu::CUarray,
+    largeur: u32,
+    hauteur: u32,
+) -> cu::CUDA_MEMCPY2D {
+    cu::CUDA_MEMCPY2D {
+        srcXInBytes: 0,
+        srcY: 0,
+        srcMemoryType: cu::CUmemorytype::CU_MEMORYTYPE_DEVICE,
+        srcHost: std::ptr::null(),
+        srcDevice: source,
+        srcArray: std::ptr::null_mut(),
+        srcPitch: pas as usize,
+        dstXInBytes: 0,
+        dstY: 0,
+        // Le tableau vit dans la texture Direct3D : la destination est sur le
+        // périphérique, tout comme la source.
+        dstMemoryType: cu::CUmemorytype::CU_MEMORYTYPE_ARRAY,
+        dstHost: std::ptr::null_mut(),
+        dstDevice: 0,
+        dstArray: destination,
+        // Ignoré pour une destination de type tableau.
+        dstPitch: 0,
+        WidthInBytes: largeur as usize,
+        Height: hauteur as usize,
+    }
+}
+
+/// Désenregistre des plans auprès de CUDA.
+///
+/// Partagée entre `Drop` et le chemin d'échec de [`Pont::nouveau`], où le `Pont`
+/// n'existe pas encore et où son `Drop` ne passera donc jamais. Une seule
+/// implémentation, pour qu'on ne corrige pas un jour l'une en croyant l'autre
+/// identique.
+///
+/// Désenregistrer exige le contexte courant. Sans lui, rien à faire : cette
+/// fonction est appelée depuis un `Drop`, qui ne peut rien signaler, et un
+/// désenregistrement raté ne se répare pas.
+fn desenregistrer(contexte: &CudaContext, plans: &[Plan]) {
+    if contexte.bind_to_thread().is_err() {
+        return;
+    }
+    for plan in plans {
+        unsafe { cu::cuGraphicsUnregisterResource(plan.ressource) };
+    }
+}
+
+/// Crée la texture d'un plan et l'enregistre auprès de CUDA.
+fn enregistrer_un_plan(
+    appareil: &ID3D11Device,
+    api: &ApiD3D11,
+    largeur: u32,
+    hauteur: u32,
+) -> anyhow::Result<Plan> {
+    let (texture, vue) = creer_texture_de_plan(appareil, largeur, hauteur).context("texture")?;
+    let mut ressource: cu::CUgraphicsResource = std::ptr::null_mut();
+    // `as_raw` rend le pointeur d'interface ; `ID3D11Texture2D` hérite de
+    // `ID3D11Resource`, que CUDA attend.
+    let code = unsafe {
+        (api.enregistrer_ressource)(&mut ressource, texture.as_raw(), REGISTER_FLAGS_NONE)
+    };
+    verifier(code).context("cuGraphicsD3D11RegisterResource")?;
+    // La poignée Rust de la texture peut tomber : la vue et l'enregistrement CUDA
+    // en détiennent chacun une référence COM. Voir `struct Plan`.
+    drop(texture);
+    Ok(Plan { vue, ressource })
 }
 
 /// Une texture à un canal pour un plan, et sa vue de lecture.
@@ -345,5 +408,55 @@ pub(crate) fn verifier(code: cu::CUresult) -> anyhow::Result<()> {
         Ok(())
     } else {
         Err(anyhow!("appel CUDA en échec (code {})", code as i32))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Décision D5 : aucun octet de pixel ne traverse la mémoire centrale dans le
+    /// chemin normal.
+    ///
+    /// Ce qui, précisément, ferait échouer ce test : faire passer cette copie par
+    /// la mémoire centrale, ce qui exige `CU_MEMORYTYPE_HOST` d'un côté et le
+    /// pointeur hôte correspondant. Vérifié par neutralisation.
+    ///
+    /// Ce qu'il ne prouve pas, et c'est mesuré : l'absence d'autres copies. Un
+    /// aller-retour hôte ajouté autour de ce descripteur laisse ce test vert. Voir
+    /// la note de portée sur [`decrire_copie_de_plan`].
+    ///
+    /// Aucun GPU requis : c'est le seul test de D5 qui tourne partout.
+    #[test]
+    fn la_copie_d_un_plan_ne_touche_jamais_la_memoire_centrale() {
+        // Des valeurs quelconques : la fonction est pure, et ce test ne porte que
+        // sur les types de mémoire et les pointeurs hôte. Le tableau de
+        // destination est non nul pour qu'une destination oubliée se distingue
+        // d'une destination correcte.
+        let destination = 0x2000_usize as cu::CUarray;
+        let copie = decrire_copie_de_plan(0x1000, 1024, destination, 640, 360);
+
+        assert_eq!(
+            copie.srcMemoryType,
+            cu::CUmemorytype::CU_MEMORYTYPE_DEVICE,
+            "la source doit être la mémoire du périphérique, pas celle de l'hôte (D5)"
+        );
+        assert_eq!(
+            copie.dstMemoryType,
+            cu::CUmemorytype::CU_MEMORYTYPE_ARRAY,
+            "la destination doit être le tableau de la texture Direct3D (D5)"
+        );
+        assert!(
+            copie.srcHost.is_null(),
+            "un pointeur hôte en source signifierait une copie depuis la mémoire centrale (D5)"
+        );
+        assert!(
+            copie.dstHost.is_null(),
+            "un pointeur hôte en destination signifierait une copie vers la mémoire centrale (D5)"
+        );
+        assert_eq!(
+            copie.dstArray, destination,
+            "la destination doit être la texture qu'on a mappée"
+        );
     }
 }
