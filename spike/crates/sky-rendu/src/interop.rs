@@ -415,8 +415,16 @@ pub(crate) fn verifier(code: cu::CUresult) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// Décision D5 : aucun octet de pixel ne traverse la mémoire centrale dans le
-    /// chemin normal.
+    /// Le descripteur d'une copie de plan désigne la mémoire du périphérique en
+    /// source et le tableau de la texture en destination — ce que la décision D5
+    /// exige de cette copie.
+    ///
+    /// **Le nom dit la portée, et c'est délibéré.** Il a d'abord été
+    /// `la_copie_d_un_plan_ne_touche_jamais_la_memoire_centrale`, ce qui promettait
+    /// une propriété globale que ce test ne prouve pas. À un vert de `cargo test`
+    /// on ne lit que le nom, jamais la note de portée : un nom qui promet plus que
+    /// sa preuve est le mécanisme même par lequel ce dépôt a laissé passer des
+    /// tests verts pour la mauvaise raison.
     ///
     /// Ce qui, précisément, ferait échouer ce test : faire passer cette copie par
     /// la mémoire centrale, ce qui exige `CU_MEMORYTYPE_HOST` d'un côté et le
@@ -428,11 +436,11 @@ mod tests {
     ///
     /// Aucun GPU requis : c'est le seul test de D5 qui tourne partout.
     #[test]
-    fn la_copie_d_un_plan_ne_touche_jamais_la_memoire_centrale() {
+    fn d5_la_copie_d_un_plan_est_decrite_de_peripherique_a_tableau() {
         // Des valeurs quelconques : la fonction est pure, et ce test ne porte que
-        // sur les types de mémoire et les pointeurs hôte. Le tableau de
-        // destination est non nul pour qu'une destination oubliée se distingue
-        // d'une destination correcte.
+        // sur la désignation des deux extrémités. Le tableau de destination est non
+        // nul pour qu'une destination oubliée se distingue d'une destination
+        // correcte.
         let destination = 0x2000_usize as cu::CUarray;
         let copie = decrire_copie_de_plan(0x1000, 1024, destination, 640, 360);
 
@@ -457,6 +465,33 @@ mod tests {
         assert_eq!(
             copie.dstArray, destination,
             "la destination doit être la texture qu'on a mappée"
+        );
+
+        // Les deux champs symétriques de ceux ci-dessus, et il faut être franc sur
+        // ce qu'ils ajoutent : rien à la détection de D5. Les deux types de mémoire
+        // sont déjà épinglés, et ce sont eux qui décident quelle mémoire est
+        // touchée ; par ailleurs un `CUarray` vit lui aussi sur le périphérique,
+        // donc même un descripteur qui en désignerait un en source ne violerait pas
+        // D5. Ce que ces deux assertions interdisent, c'est un descripteur
+        // AMBIGU — deux sources ou deux destinations à la fois — c'est-à-dire un
+        // champ laissé en place par une modification future. Garde-fou de lisibilité,
+        // pas détection de plus.
+        //
+        // Que CUDA ignore bien ces champs est MESURÉ, et non repris de la
+        // documentation (le SDK n'est pas installé, `cuda.h` n'est pas sur la
+        // machine) : en posant `srcArray: destination` ici, seul ce test rougit —
+        // les copies réelles de `tests/couleur.rs` et de `tests/image_reelle.rs`
+        // continuent de rendre les pixels justes, à 1 niveau près. Le pilote n'a
+        // donc pas lu ce champ.
+        assert!(
+            copie.srcArray.is_null(),
+            "un tableau source en plus d'une mémoire de périphérique rendrait la \
+             source ambiguë"
+        );
+        assert_eq!(
+            copie.dstDevice, 0,
+            "une mémoire de périphérique en destination en plus du tableau rendrait \
+             la destination ambiguë"
         );
     }
 }
