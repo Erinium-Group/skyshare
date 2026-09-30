@@ -1,0 +1,531 @@
+//! La fenêtre native, son appareil Direct3D 11 et sa chaîne d'échange DXGI.
+//!
+//! Le rendu passe par une texture intermédiaire (`Cible`) recopiée dans le
+//! tampon arrière à chaque présentation. Deux raisons : en modèle « flip », le
+//! contenu du tampon arrière est indéfini après `Present`, donc on ne pourrait
+//! jamais le relire pour le tester ; et la tâche suivante y déposera l'image
+//! décodée sans toucher à la présentation.
+
+use std::cell::RefCell;
+
+use anyhow::{anyhow, Context};
+use windows::core::{w, Interface, HSTRING};
+use windows::Win32::Foundation::{
+    GetLastError, ERROR_CLASS_ALREADY_EXISTS, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+};
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
+};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1CreateFactory, ID2D1Factory, ID2D1RenderTarget, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
+    D2D1_RENDER_TARGET_USAGE_NONE,
+};
+use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::{
+    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_F11;
+use windows::Win32::UI::WindowsAndMessaging::{
+    AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GetClientRect, GetWindowLongPtrW, LoadCursorW, PeekMessageW, RegisterClassExW,
+    SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MSG, PM_REMOVE, SIZE_MINIMIZED, SW_SHOW,
+    WINDOW_EX_STYLE, WM_CLOSE, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_SIZE, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW,
+};
+
+use crate::etat::{dessiner, EtatVisionnage};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvenementFenetre {
+    /// L'utilisateur a fermé la fenêtre. Elle reste ouverte : c'est à l'appelant
+    /// de la laisser tomber.
+    FermetureDemandee,
+    /// F11 : à l'appelant de décider ce que « plein écran » veut dire.
+    PleinEcranBascule,
+}
+
+/// Ce que la procédure de fenêtre dépose pour `pompe_messages`.
+#[derive(Default)]
+struct Boite {
+    evenements: Vec<EvenementFenetre>,
+    /// Dernière taille de zone cliente demandée, à appliquer à la chaîne.
+    taille: Option<(u32, u32)>,
+}
+
+/// La texture où l'on dessine, et le moyen d'y dessiner.
+struct Cible {
+    texture: ID3D11Texture2D,
+    rendu: ID2D1RenderTarget,
+}
+
+pub struct Fenetre {
+    hwnd: HWND,
+    /// Partagée avec la procédure de fenêtre par `GWLP_USERDATA`. Libérée dans
+    /// `Drop`, après la destruction de la fenêtre.
+    boite: *mut RefCell<Boite>,
+    appareil: ID3D11Device,
+    contexte: ID3D11DeviceContext,
+    chaine: IDXGISwapChain1,
+    fabrique_d2d: ID2D1Factory,
+    format_texte: IDWriteTextFormat,
+    cible: Cible,
+    largeur: u32,
+    hauteur: u32,
+    /// Pour repeindre après un redimensionnement.
+    dernier_etat: Option<EtatVisionnage>,
+}
+
+impl Fenetre {
+    /// Ouvre une fenêtre visible.
+    pub fn ouvrir(titre: &str, largeur: u32, hauteur: u32) -> anyhow::Result<Self> {
+        Self::creer(titre, largeur, hauteur, true)
+    }
+
+    /// Crée la fenêtre sans jamais l'afficher. C'est la seule voie des tests : ils
+    /// ne doivent rien montrer sur la machine de qui les lance.
+    pub fn ouvrir_masquee(titre: &str, largeur: u32, hauteur: u32) -> anyhow::Result<Self> {
+        Self::creer(titre, largeur, hauteur, false)
+    }
+
+    /// L'appareil Direct3D 11 de la fenêtre. Le décodeur et l'interopérabilité
+    /// doivent travailler sur celui-ci : une copie de périphérique à périphérique
+    /// n'existe pas entre deux appareils.
+    pub fn appareil(&self) -> &ID3D11Device {
+        &self.appareil
+    }
+
+    /// Peint un des états sans image, puis présente.
+    pub fn afficher_etat(&mut self, etat: EtatVisionnage) -> anyhow::Result<()> {
+        self.dernier_etat = Some(etat);
+        dessiner(
+            &self.cible.rendu,
+            &self.format_texte,
+            etat,
+            self.largeur,
+            self.hauteur,
+        )?;
+        self.presenter()
+    }
+
+    /// Traite les messages en attente sans bloquer et rend les événements utiles.
+    pub fn pompe_messages(&mut self) -> Vec<EvenementFenetre> {
+        let mut msg = MSG::default();
+        unsafe {
+            while PeekMessageW(&mut msg, Some(self.hwnd), 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        let (evenements, taille) = {
+            let mut boite = unsafe { &*self.boite }.borrow_mut();
+            (std::mem::take(&mut boite.evenements), boite.taille.take())
+        };
+        if let Some((largeur, hauteur)) = taille {
+            if (largeur, hauteur) != (self.largeur, self.hauteur)
+                && self.redimensionner(largeur, hauteur).is_ok()
+            {
+                // Un tampon redimensionné est noir jusqu'à la prochaine présentation :
+                // on repeint l'état courant. Un échec ici n'est pas perdu, le
+                // prochain `afficher_etat` rencontrera le même et le remontera.
+                if let Some(etat) = self.dernier_etat {
+                    let _ = self.afficher_etat(etat);
+                }
+            }
+        }
+        evenements
+    }
+
+    fn creer(titre: &str, largeur: u32, hauteur: u32, visible: bool) -> anyhow::Result<Self> {
+        if largeur == 0 || hauteur == 0 {
+            return Err(anyhow!("taille de fenêtre nulle : {largeur}×{hauteur}"));
+        }
+        let (appareil, contexte) = creer_appareil()?;
+        let boite = Box::into_raw(Box::new(RefCell::new(Boite::default())));
+        let hwnd = match creer_hwnd(titre, largeur, hauteur, boite) {
+            Ok(hwnd) => hwnd,
+            Err(e) => {
+                // Aucune fenêtre ne détient plus la boîte.
+                drop(unsafe { Box::from_raw(boite) });
+                return Err(e);
+            }
+        };
+        // `Fenetre` n'existe pas encore, donc pas de `Drop` : sur échec, on
+        // détruit la fenêtre et libère la boîte à la main.
+        let fenetre = match Self::assembler(hwnd, boite, appareil, contexte) {
+            Ok(fenetre) => fenetre,
+            Err(e) => {
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                    drop(Box::from_raw(boite));
+                }
+                return Err(e);
+            }
+        };
+        if visible {
+            unsafe {
+                let _ = ShowWindow(fenetre.hwnd, SW_SHOW);
+            }
+        }
+        Ok(fenetre)
+    }
+
+    fn assembler(
+        hwnd: HWND,
+        boite: *mut RefCell<Boite>,
+        appareil: ID3D11Device,
+        contexte: ID3D11DeviceContext,
+    ) -> anyhow::Result<Self> {
+        let mut client = RECT::default();
+        unsafe { GetClientRect(hwnd, &mut client) }.context("taille de la zone cliente")?;
+        let (largeur, hauteur) = (
+            (client.right - client.left).max(0) as u32,
+            (client.bottom - client.top).max(0) as u32,
+        );
+        let (largeur, hauteur) = if largeur == 0 || hauteur == 0 {
+            (1, 1)
+        } else {
+            (largeur, hauteur)
+        };
+
+        let dxgi: IDXGIDevice = appareil.cast()?;
+        let fabrique: IDXGIFactory2 =
+            unsafe { dxgi.GetAdapter()?.GetParent() }.context("fabrique DXGI")?;
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: largeur,
+            Height: hauteur,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            // Deux tampons et FLIP_DISCARD : décision D7, la latence prime sur
+            // l'absence de déchirement. On regarde quelqu'un travailler, pas un film.
+            BufferCount: 2,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            ..Default::default()
+        };
+        let chaine = unsafe { fabrique.CreateSwapChainForHwnd(&appareil, hwnd, &desc, None, None) }
+            .context("création de la chaîne d'échange")?;
+
+        let fabrique_d2d: ID2D1Factory =
+            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None) }
+                .context("fabrique Direct2D")?;
+        let fabrique_texte: IDWriteFactory =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
+                .context("fabrique DirectWrite")?;
+        let format_texte = unsafe {
+            let format = fabrique_texte
+                .CreateTextFormat(
+                    w!("Segoe UI"),
+                    None,
+                    DWRITE_FONT_WEIGHT_NORMAL,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    28.0,
+                    w!("fr-FR"),
+                )
+                .context("format de texte")?;
+            format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            format
+        };
+        let cible = creer_cible(&appareil, &fabrique_d2d, largeur, hauteur)?;
+
+        Ok(Self {
+            hwnd,
+            boite,
+            appareil,
+            contexte,
+            chaine,
+            fabrique_d2d,
+            format_texte,
+            cible,
+            largeur,
+            hauteur,
+            dernier_etat: None,
+        })
+    }
+
+    /// Recopie la cible dans le tampon arrière et présente.
+    fn presenter(&self) -> anyhow::Result<()> {
+        unsafe {
+            let arriere: ID3D11Texture2D = self.chaine.GetBuffer(0).context("tampon arrière")?;
+            self.contexte.CopyResource(&arriere, &self.cible.texture);
+            // Intervalle de synchronisation 0 : on ne guette pas la synchro
+            // verticale, la latence prime (D7).
+            self.chaine
+                .Present(0, DXGI_PRESENT(0))
+                .ok()
+                .context("présentation")?;
+        }
+        Ok(())
+    }
+
+    /// Recrée la chaîne et la cible à la nouvelle taille. L'ancienne cible n'est
+    /// remplacée qu'une fois la nouvelle construite : un échec la laisse intacte.
+    fn redimensionner(&mut self, largeur: u32, hauteur: u32) -> anyhow::Result<()> {
+        // Aucune référence au tampon arrière n'est conservée entre deux
+        // présentations, donc `ResizeBuffers` n'est pas gêné.
+        unsafe {
+            self.chaine.ResizeBuffers(
+                0,
+                largeur,
+                hauteur,
+                DXGI_FORMAT_B8G8R8A8_UNORM,
+                DXGI_SWAP_CHAIN_FLAG(0),
+            )
+        }
+        .context("redimensionnement de la chaîne")?;
+        self.cible = creer_cible(&self.appareil, &self.fabrique_d2d, largeur, hauteur)?;
+        self.largeur = largeur;
+        self.hauteur = hauteur;
+        Ok(())
+    }
+
+    /// Somme de contrôle (FNV-1a 64 bits) des pixels de la cible. Sert aux
+    /// tests, qui comparent des rendus sans les afficher.
+    #[cfg(test)]
+    pub(crate) fn empreinte_du_tampon(&self) -> anyhow::Result<u64> {
+        Ok(self
+            .pixels_de_la_cible()?
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |somme, octet| {
+                (somme ^ u64::from(*octet)).wrapping_mul(0x0000_0100_0000_01b3)
+            }))
+    }
+
+    /// Les pixels de la cible (BGRA, lignes contiguës), lus côté processeur.
+    #[cfg(test)]
+    pub(crate) fn pixels_de_la_cible(&self) -> anyhow::Result<Vec<u8>> {
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_USAGE_STAGING,
+        };
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { self.cible.texture.GetDesc(&mut desc) };
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        let mut lisible = None;
+        unsafe {
+            self.appareil
+                .CreateTexture2D(&desc, None, Some(&mut lisible))
+        }
+        .context("texture de lecture")?;
+        let lisible = lisible.ok_or_else(|| anyhow!("texture de lecture nulle"))?;
+        unsafe {
+            self.contexte.CopyResource(&lisible, &self.cible.texture);
+            let mut lecture = D3D11_MAPPED_SUBRESOURCE::default();
+            self.contexte
+                .Map(&lisible, 0, D3D11_MAP_READ, 0, Some(&mut lecture))
+                .context("lecture de la texture")?;
+            let mut pixels = Vec::with_capacity(desc.Width as usize * desc.Height as usize * 4);
+            for ligne in 0..desc.Height as usize {
+                let debut = (lecture.pData as *const u8).add(ligne * lecture.RowPitch as usize);
+                pixels
+                    .extend_from_slice(std::slice::from_raw_parts(debut, desc.Width as usize * 4));
+            }
+            self.contexte.Unmap(&lisible, 0);
+            Ok(pixels)
+        }
+    }
+}
+
+impl Drop for Fenetre {
+    fn drop(&mut self) {
+        unsafe {
+            // La destruction envoie WM_NCDESTROY, qui retire la boîte de la
+            // fenêtre : on peut ensuite la libérer sans risque.
+            let _ = DestroyWindow(self.hwnd);
+            drop(Box::from_raw(self.boite));
+        }
+    }
+}
+
+fn creer_appareil() -> anyhow::Result<(ID3D11Device, ID3D11DeviceContext)> {
+    let mut appareil = None;
+    let mut contexte = None;
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            // BGRA : exigé pour que Direct2D dessine sur nos textures. Pas de
+            // couche de débogage.
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&mut appareil),
+            None,
+            Some(&mut contexte),
+        )
+    }
+    .context("création de l'appareil Direct3D 11")?;
+    Ok((
+        appareil.ok_or_else(|| anyhow!("appareil Direct3D 11 nul"))?,
+        contexte.ok_or_else(|| anyhow!("contexte Direct3D 11 nul"))?,
+    ))
+}
+
+fn creer_cible(
+    appareil: &ID3D11Device,
+    fabrique_d2d: &ID2D1Factory,
+    largeur: u32,
+    hauteur: u32,
+) -> anyhow::Result<Cible> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: largeur,
+        Height: hauteur,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+        ..Default::default()
+    };
+    let mut texture = None;
+    unsafe { appareil.CreateTexture2D(&desc, None, Some(&mut texture)) }
+        .context("création de la cible de rendu")?;
+    let texture = texture.ok_or_else(|| anyhow!("cible de rendu nulle"))?;
+    let surface: IDXGISurface = texture.cast()?;
+    let proprietes = D2D1_RENDER_TARGET_PROPERTIES {
+        r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        usage: D2D1_RENDER_TARGET_USAGE_NONE,
+        minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+    };
+    let rendu = unsafe { fabrique_d2d.CreateDxgiSurfaceRenderTarget(&surface, &proprietes) }
+        .context("cible Direct2D sur la texture")?;
+    Ok(Cible { texture, rendu })
+}
+
+fn creer_hwnd(
+    titre: &str,
+    largeur: u32,
+    hauteur: u32,
+    boite: *mut RefCell<Boite>,
+) -> anyhow::Result<HWND> {
+    let classe = w!("SkyShareRendu");
+    unsafe {
+        let instance = GetModuleHandleW(None)?.into();
+        let description = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+            style: CS_HREDRAW | CS_VREDRAW,
+            lpfnWndProc: Some(procedure),
+            hInstance: instance,
+            hCursor: LoadCursorW(None, IDC_ARROW)?,
+            lpszClassName: classe,
+            ..Default::default()
+        };
+        // La classe est enregistrée une fois par processus : les ouvertures
+        // suivantes rencontrent « déjà existante », qui n'est pas une erreur.
+        if RegisterClassExW(&description) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
+            return Err(anyhow!(
+                "enregistrement de la classe de fenêtre : {:?}",
+                GetLastError()
+            ));
+        }
+        // On veut une zone cliente de la taille demandée : on agrandit d'autant
+        // que les bordures et la barre de titre.
+        let mut cadre = RECT {
+            left: 0,
+            top: 0,
+            right: largeur as i32,
+            bottom: hauteur as i32,
+        };
+        AdjustWindowRectEx(&mut cadre, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0))
+            .context("dimensionnement de la fenêtre")?;
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            classe,
+            &HSTRING::from(titre),
+            // Redimensionnable, jamais affichée ici : `ouvrir` s'en charge.
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            cadre.right - cadre.left,
+            cadre.bottom - cadre.top,
+            None,
+            None,
+            Some(instance),
+            Some(boite as *const _),
+        )
+    }
+    .context("création de la fenêtre")
+}
+
+/// Procédure de fenêtre. Elle ne fait que déposer dans la `Boite` ce qu'elle
+/// voit passer : c'est `pompe_messages` qui en tire les événements.
+unsafe extern "system" fn procedure(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    unsafe {
+        if message == WM_NCCREATE {
+            let creation = lparam.0 as *const CREATESTRUCTW;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*creation).lpCreateParams as isize);
+            return DefWindowProcW(hwnd, message, wparam, lparam);
+        }
+        let boite = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const RefCell<Boite>;
+        if let Some(boite) = boite.as_ref() {
+            match message {
+                WM_CLOSE => {
+                    boite
+                        .borrow_mut()
+                        .evenements
+                        .push(EvenementFenetre::FermetureDemandee);
+                    // On ne détruit pas : la fenêtre est à l'appelant.
+                    return LRESULT(0);
+                }
+                WM_KEYDOWN if wparam.0 == usize::from(VK_F11.0) => {
+                    // Bit 30 : la touche était déjà enfoncée (répétition).
+                    if lparam.0 & (1 << 30) == 0 {
+                        boite
+                            .borrow_mut()
+                            .evenements
+                            .push(EvenementFenetre::PleinEcranBascule);
+                    }
+                    return LRESULT(0);
+                }
+                WM_SIZE if wparam.0 != SIZE_MINIMIZED as usize => {
+                    let largeur = (lparam.0 & 0xffff) as u32;
+                    let hauteur = ((lparam.0 >> 16) & 0xffff) as u32;
+                    if largeur > 0 && hauteur > 0 {
+                        boite.borrow_mut().taille = Some((largeur, hauteur));
+                    }
+                }
+                WM_NCDESTROY => {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                }
+                _ => {}
+            }
+        }
+        DefWindowProcW(hwnd, message, wparam, lparam)
+    }
+}

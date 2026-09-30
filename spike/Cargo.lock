@@ -4088,6 +4088,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sky-rendu"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
