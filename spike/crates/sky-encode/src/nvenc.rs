@@ -212,12 +212,15 @@ impl NvencEncoder {
                 h264.intraRefreshCnt = compte_refresh;
                 // ATTENTION à la sémantique : NVENC émet SPS/PPS « à chaque
                 // image IDR », et `idrPeriod = INFINITE` n'en produit qu'une.
-                // Ce drapeau est donc SANS EFFET ici — mesuré : 1 seul SPS sur
-                // 1201 images. On le garde parce qu'il redevient correct si
-                // `idrPeriod` change, mais il ne rend PAS le flux rejoignable
-                // en cours de route. Voir le rapport de la Tâche 3 : le jalon 2
-                // devra passer par `NV_ENC_PIC_FLAG_OUTPUT_SPSPPS` ou
+                // Ce drapeau est donc SANS EFFET tant qu'aucun IDR n'est produit,
+                // ce qui est le régime normal ici — mesuré : 1 seul SPS sur 1201
+                // images. Il ne rend PAS le flux rejoignable en cours de route.
+                // Voir le rapport de la Tâche 3 : le jalon 2 passe par
                 // `nvEncGetSequenceParams` pour un spectateur qui arrive tard.
+                // Mais il REDEVIENT ACTIF dès qu'un IDR est forcé : en HEVC, il
+                // produit alors les en-têtes à lui seul, comme
+                // `NV_ENC_PIC_FLAG_OUTPUT_SPSPPS` — voir `encoder_mappee`, où la
+                // redondance est expliquée. (Mesuré en HEVC ; en H.264, non.)
                 h264.set_repeatSPSPPS(1);
                 appliquer_vui(&mut h264.h264VUIParameters);
             } else if codec_guid == NV_ENC_CODEC_HEVC_GUID {
