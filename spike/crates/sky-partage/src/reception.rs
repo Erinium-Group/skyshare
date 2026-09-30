@@ -4,7 +4,15 @@
 //! qui décide de l'écrire ou de la jeter.
 
 use crate::evenement::Quantiles;
-use crate::hote::EN_TETE_MORCEAU;
+
+/// Dernier vestige du découpage maison : l'en-tête de 9 octets (horodatage sur
+/// 8, drapeau de premier morceau sur 1) que l'hôte préfixait à chaque morceau
+/// envoyé par le canal de données. L'hôte ne l'écrit plus depuis la tâche 8 —
+/// il écrit des unités d'accès entières sur la piste média — et cette
+/// comptabilité-ci disparaît avec la migration du spectateur (tâche 9). La
+/// constante est descendue ici, où vit son unique appelant, pour que `hote` soit
+/// débarrassé du découpage sans attendre.
+const EN_TETE_MORCEAU: usize = 9;
 
 #[derive(Default)]
 pub struct Reception {

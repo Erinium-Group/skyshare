@@ -3,17 +3,18 @@
 //! chaque `println!` y est devenu un `Evenement`, chaque `return Ok(())` une
 //! `Fin`, chaque `?` est resté un `?`.
 //!
-//! `WgcCapture::next_frame()` → `NvencEncoder::encode()` → `link.envoyer_octets_bruts()`,
+//! `WgcCapture::next_frame()` → `NvencEncoder::encode()` → `PeerLink::ecrire_image()`,
 //! avec le débit réellement piloté par `Pacer::target_bps()`.
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
 use sky_capture::wgc::WgcCapture;
 use sky_capture::CapturedFrame;
 use sky_compte::{deposer, relever, Coffre, Config, ErreurCompte, Etat};
 use sky_crypto::Identity;
 use sky_encode::{nvenc::NvencEncoder, Codec};
-use sky_net::{LinkEvent, Pacer, PeerLink};
+use sky_net::{ErreurEnvoi, LinkEvent, MessageControle, Pacer, PeerLink};
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 
 use crate::arret::{synchroniser_sauf_arret, Arret, ErreurAttente, HorlogeArretable};
@@ -23,33 +24,6 @@ use crate::rendez_vous::{echec_local, interroger, offres_recevables, CADENCE, FE
 
 /// Cadence visée pour l'encodage. `sky-probe` la reprend (`cmd_encode::FPS`).
 pub const FPS: u32 = 60;
-
-/// En-tête préfixé à chaque MORCEAU de message envoyé : 8 octets
-/// d'horodatage (microsecondes depuis l'époque Unix, horloge **système** —
-/// pas `Instant`, propre à un seul processus) puis 1 octet drapeau (non nul
-/// = premier morceau d'une image encodée).
-///
-/// Les deux bords tournent sur la même machine pendant ce spike, donc
-/// l'horloge système est directement comparable entre eux — c'est ce qui
-/// permet au spectateur de mesurer un temps de transit, et à nous de calculer
-/// un RTT quand il nous renvoie l'horodatage tel quel dans son retour.
-///
-/// Ce préfixe ne quitte jamais le processus spectateur : `cmd_view` l'ôte
-/// avant d'écrire quoi que ce soit dans `recu.h265`, qui reste un flux HEVC
-/// brut, structurellement valide pour `ffprobe` — le découpage en morceaux
-/// est un détail de transport, invisible dans le fichier écrit.
-pub const EN_TETE_MORCEAU: usize = 9;
-
-/// Taille maximale de la charge utile d'un morceau — reprend la taille de
-/// message (1200 octets) avec laquelle la Tâche 7 a mesuré un débit soutenu
-/// de 182 à 246 Mbps en boucle locale. Découverte de ce banc de test :
-/// envoyer un paquet NVENC entier en un seul message (jusqu'à ~40 Ko à
-/// 20 Mbps/60 i/s, plafonné par le tampon VBV d'une image) sature le tampon
-/// d'émission de `str0m` de façon soutenue et fait échouer des envois — alors
-/// que des messages de cette taille-ci s'écoulent sans accroc. Chaque paquet
-/// NVENC est donc redécoupé ici ; le spectateur ne fait que recoller les
-/// morceaux dans l'ordre, le flux Annex B écrit sur disque est identique.
-pub const TAILLE_MORCEAU_PAYLOAD: usize = 1200 - EN_TETE_MORCEAU;
 
 /// Granularité à laquelle le lien est servi pendant les attentes de la
 /// boucle principale (cadence FPS, capture écran, relance d'un envoi en
@@ -64,18 +38,62 @@ pub const TAILLE_MORCEAU_PAYLOAD: usize = 1200 - EN_TETE_MORCEAU;
 /// retombent à des valeurs de boucle locale plausibles (voir le rapport).
 const GRANULARITE_SERVICE_RESEAU: Duration = Duration::from_millis(1);
 
-/// Budget de relance pour un morceau déjà encodé qui échoue à partir — voir
-/// `envoyer_ou_abandonner`. Généreux par rapport aux quelques millisecondes
-/// de résorption observées en boucle locale une fois les morceaux réduits à
-/// `TAILLE_MORCEAU_PAYLOAD` : ce budget n'est atteint qu'en cas de congestion
-/// soutenue et anormale.
+/// Temps pendant lequel le lien est encore servi après l'annonce de l'arrêt,
+/// pour que le message ait le temps de partir — voir
+/// `EnvoiVideo::annoncer_l_arret`. Un aller simple sur un chemin direct se
+/// compte en dizaines de millisecondes ; ce délai s'ajoute une seule fois, à la
+/// toute fin d'un partage.
+const DRAINAGE_ARRET: Duration = Duration::from_millis(50);
+
+/// Budget de relance pour une image déjà encodée que la piste média refuse
+/// encore — voir `EnvoiVideo::envoyer_image`. Le seul refus possible y est
+/// `TropDImagesEnAttente`, et il se résorbe d'un `poll` par place ; ce budget
+/// n'est donc atteint que si le correspondant ne consomme plus rien du tout.
+/// Mesuré sur le chemin média : 0 refus sur 2593 écritures à 12 Mbps et 0 sur
+/// 21552 à 100 Mbps quand la boucle sert le réseau entre deux images.
 pub const BUDGET_RETRY_ENVOI: Duration = Duration::from_millis(300);
 
-pub fn epoch_us() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64
+/// Ce que la boucle d'envoi attend du lien pair-à-pair. `PeerLink` en est la
+/// seule implémentation réelle ; `doublure::LienFactice` l'imite dans les
+/// tests, où il n'y a ni réseau ni correspondant.
+pub trait LienVideo {
+    fn ecrire_image(&mut self, unite: &[u8], horodatage_ms: u64) -> Result<(), ErreurEnvoi>;
+    fn envoyer_controle(&mut self, message: &MessageControle) -> Result<(), ErreurEnvoi>;
+    fn poll(&mut self) -> anyhow::Result<LinkEvent>;
+}
+
+impl LienVideo for PeerLink {
+    fn ecrire_image(&mut self, unite: &[u8], horodatage_ms: u64) -> Result<(), ErreurEnvoi> {
+        PeerLink::ecrire_image(self, unite, horodatage_ms)
+    }
+
+    fn envoyer_controle(&mut self, message: &MessageControle) -> Result<(), ErreurEnvoi> {
+        PeerLink::envoyer_controle(self, message)
+    }
+
+    fn poll(&mut self) -> anyhow::Result<LinkEvent> {
+        PeerLink::poll(self)
+    }
+}
+
+/// Les deux gestes de l'encodeur dont la boucle d'envoi a besoin pour qu'un
+/// spectateur puisse prendre le flux en cours de route — ou le reprendre.
+///
+/// L'encodage lui-même reste sur `NvencEncoder` : il consomme une texture
+/// Direct3D, que rien ne double. Ces deux appels-ci n'en ont pas besoin.
+pub trait Reprise {
+    fn entetes_de_sequence(&self) -> anyhow::Result<Vec<u8>>;
+    fn forcer_image_cle(&mut self);
+}
+
+impl Reprise for NvencEncoder {
+    fn entetes_de_sequence(&self) -> anyhow::Result<Vec<u8>> {
+        NvencEncoder::entetes_de_sequence(self)
+    }
+
+    fn forcer_image_cle(&mut self) {
+        NvencEncoder::forcer_image_cle(self)
+    }
 }
 
 /// Une source d'images sur le device de la capture — la texture synthétique
@@ -235,23 +253,19 @@ fn diffuser(
     let mut prochaine_image = Instant::now();
     let mut budget_octets = 0.0f64;
     let mut dernier_budget = Instant::now();
-    let mut envoyes_octets = 0u64;
+    let mut envoi = EnvoiVideo::nouveau();
     let mut images_encodees = 0u64;
     let mut images_sautees = 0u64;
-    let mut retours = 0u64;
-    let mut echecs_send = 0u64;
-    let mut tentatives_send = 0u64;
     let mut echantillons_encode_us: Vec<u64> = Vec::new();
-    let mut dernier_rtt_ms: f64 = 0.0;
-    let mut echantillons_rtt: Vec<f64> = Vec::new();
     let mut dernier_feedback = Instant::now();
-    let mut fenetre_tentatives = 0u64;
-    let mut fenetre_echecs = 0u64;
     let mut dernier_affichage = Instant::now();
     let mut octets_precedent = 0u64;
 
     loop {
         if arret.est_demande() {
+            // L'annonce est un service rendu au spectateur, pas une garantie :
+            // un lien déjà tombé ne peut plus rien porter.
+            let _ = envoi.annoncer_l_arret(link);
             return Ok(Fin::Arrete);
         }
         if fin.is_some_and(|f| Instant::now() >= f) {
@@ -273,7 +287,7 @@ fn diffuser(
                     if m >= prochaine_image {
                         break;
                     }
-                    if let Some(raison) = servir_reseau(link, &mut retours, &mut dernier_rtt_ms, &mut echantillons_rtt)? {
+                    if let Some(raison) = envoi.servir(link, &mut enc)? {
                         return Ok(Fin::LienTombe(raison));
                     }
                     std::thread::sleep(GRANULARITE_SERVICE_RESEAU.min(prochaine_image.saturating_duration_since(m)));
@@ -285,7 +299,7 @@ fn diffuser(
                 let mut trouvee = None;
                 let echeance = Instant::now() + Duration::from_millis(50);
                 while Instant::now() < echeance {
-                    if let Some(raison) = servir_reseau(link, &mut retours, &mut dernier_rtt_ms, &mut echantillons_rtt)? {
+                    if let Some(raison) = envoi.servir(link, &mut enc)? {
                         return Ok(Fin::LienTombe(raison));
                     }
                     if let Some(f) = cap.next_frame(GRANULARITE_SERVICE_RESEAU)? {
@@ -307,81 +321,78 @@ fn diffuser(
                 budget_octets -= pkt.data.len() as f64;
                 echantillons_encode_us.push(pkt.encode_us);
 
-                let horodatage = epoch_us();
-                let nb_morceaux = pkt.data.chunks(TAILLE_MORCEAU_PAYLOAD).count().max(1);
-                for (i, morceau) in pkt.data.chunks(TAILLE_MORCEAU_PAYLOAD).enumerate() {
-                    let mut charge = Vec::with_capacity(EN_TETE_MORCEAU + morceau.len());
-                    charge.extend_from_slice(&horodatage.to_le_bytes());
-                    charge.push(if i == 0 { 1 } else { 0 });
-                    charge.extend_from_slice(morceau);
-
-                    tentatives_send += 1;
-                    match envoyer_ou_abandonner(
-                        link,
-                        &charge,
-                        &mut envoyes_octets,
-                        &mut echecs_send,
-                        &mut fenetre_tentatives,
-                        &mut fenetre_echecs,
-                        &mut retours,
-                        &mut dernier_rtt_ms,
-                        &mut echantillons_rtt,
-                    )? {
-                        ResultatEnvoi::Envoye => {}
-                        ResultatEnvoi::Abandonne => {
-                            return Ok(Fin::TamponSature { morceau: i + 1, morceaux: nb_morceaux });
-                        }
-                        ResultatEnvoi::LienTombe(raison) => return Ok(Fin::LienTombe(raison)),
+                // Une unité d'accès ENTIÈRE. Le découpage en paquets est le
+                // travail du paquetiseur RFC 7798 de `str0m` (décision D1) :
+                // l'en-tête maison de 9 octets et la relance morceau par morceau
+                // n'ont plus d'objet, puisqu'il n'y a plus de tampon d'émission
+                // à saturer — mesuré, 0 refus d'écriture sur 21552 envois à
+                // 100 Mbps, contre 16 % sur le canal de données au jalon 0.
+                //
+                // L'horodatage est une durée depuis le début de la diffusion, en
+                // millisecondes : c'est ce que porte l'horloge RTP, et le
+                // spectateur n'a aucun besoin de notre heure système.
+                let horodatage_ms = t0.elapsed().as_millis() as u64;
+                match envoi.envoyer_image(link, &mut enc, &pkt.data, horodatage_ms)? {
+                    IssueEnvoi::Envoyee => {}
+                    IssueEnvoi::FilePleine => {
+                        let _ = envoi.annoncer_l_arret(link);
+                        // Une image est désormais une unité indivisible : « le
+                        // morceau 1 sur 1 » est la seule lecture honnête de ces
+                        // deux champs, hérités du découpage maison. Ce sont eux
+                        // qu'il faudra renommer, pas cet appel.
+                        return Ok(Fin::TamponSature { morceau: 1, morceaux: 1 });
                     }
+                    IssueEnvoi::LienTombe(raison) => return Ok(Fin::LienTombe(raison)),
                 }
             }
         }
 
         // 3. Un dernier service réseau après l'encodage/envoi.
-        if let Some(raison) = servir_reseau(link, &mut retours, &mut dernier_rtt_ms, &mut echantillons_rtt)? {
+        if let Some(raison) = envoi.servir(link, &mut enc)? {
             return Ok(Fin::LienTombe(raison));
         }
 
         // 4. Nourrir le régulateur de débit à ~10 Hz.
         if dernier_feedback.elapsed() >= Duration::from_millis(100) {
-            let perte_pct = if fenetre_tentatives > 0 {
-                fenetre_echecs as f32 / fenetre_tentatives as f32 * 100.0
+            let perte_pct = if envoi.fenetre_images > 0 {
+                envoi.fenetre_refus as f32 / envoi.fenetre_images as f32 * 100.0
             } else {
                 0.0
             };
-            pacer.on_feedback(perte_pct, dernier_rtt_ms.round() as u32, dernier_feedback.elapsed());
-            fenetre_tentatives = 0;
-            fenetre_echecs = 0;
+            // RTT nul : depuis la tâche 5, plus aucun écho d'horodatage ne
+            // revient à l'hôte — le canal de données ne porte que du contrôle et
+            // la piste média ne remonte rien ici. Le `Pacer` ne juge donc plus
+            // que sur le retard de paquetisation (`SEUIL_RTT_MS` jamais franchi).
+            pacer.on_feedback(perte_pct, 0, dernier_feedback.elapsed());
+            envoi.fenetre_images = 0;
+            envoi.fenetre_refus = 0;
             dernier_feedback = Instant::now();
         }
 
         // 5. Une mesure par seconde.
         if dernier_affichage.elapsed() >= Duration::from_secs(1) {
-            let delta = envoyes_octets - octets_precedent;
+            let delta = envoi.octets - octets_precedent;
             let ecoule = dernier_affichage.elapsed().as_secs_f64();
             evenements(Evenement::Mesures(Mesures::Envoi {
                 debit_mbps: delta as f64 * 8.0 / ecoule / 1e6,
                 cible_mbps: pacer.target_bps() as f64 / 1e6,
                 images_sautees,
-                rtt_ms: dernier_rtt_ms,
+                // Sans écho, aucun RTT à annoncer — 0 dit « pas de mesure »,
+                // comme `rtt_ms: None` dans le bilan final.
+                rtt_ms: 0.0,
             }));
-            octets_precedent = envoyes_octets;
+            octets_precedent = envoi.octets;
             dernier_affichage = Instant::now();
         }
     }
 
+    let _ = envoi.annoncer_l_arret(link);
     let duree_s = t0.elapsed().as_secs_f64();
-    echantillons_rtt.sort_by(|a, b| a.partial_cmp(b).unwrap());
     echantillons_encode_us.sort_unstable();
     let encodage_ms = (!echantillons_encode_us.is_empty()).then(|| Quantiles {
         p50: percentile_u64(&echantillons_encode_us, 50) as f64 / 1000.0,
         p99: percentile_u64(&echantillons_encode_us, 99) as f64 / 1000.0,
         echantillons: echantillons_encode_us.len(),
-    });
-    let rtt_ms = (!echantillons_rtt.is_empty()).then(|| Quantiles {
-        p50: percentile_f64(&echantillons_rtt, 50),
-        p99: percentile_f64(&echantillons_rtt, 99),
-        echantillons: echantillons_rtt.len(),
     });
     let (_, vers_internet) = link.destinations();
     Ok(Fin::DureeEcoulee(Box::new(Bilan::Envoi(BilanEnvoi {
@@ -389,128 +400,190 @@ fn diffuser(
         images_encodees,
         images_sautees,
         encodage_ms,
-        envoyes_octets,
+        envoyes_octets: envoi.octets,
         cible_finale_bps: pacer.target_bps(),
-        retours,
-        echecs_envoi: echecs_send,
-        tentatives_envoi: tentatives_send,
-        rtt_ms,
+        // Deux champs sans source côté hôte depuis que la vidéo est passée sur
+        // la piste média : le spectateur ne nous renvoie plus l'horodatage, donc
+        // ni retour à compter ni RTT à mesurer. Les laisser vides plutôt que de
+        // les remplir d'un zéro déguisé en mesure.
+        retours: 0,
+        echecs_envoi: envoi.refus_absorbes,
+        tentatives_envoi: envoi.images,
+        rtt_ms: None,
         vers_internet,
     }))))
 }
 
-/// Un tour de service réseau : vide un événement de `link`, compte les
-/// retours et met à jour l'échantillon de RTT (l'horodatage que le
-/// spectateur renvoie tel quel). Factorisée parce qu'elle est appelée à
-/// plusieurs points de la boucle principale — voir `GRANULARITE_SERVICE_RESEAU`
-/// pour pourquoi la fréquence d'appel compte ici.
-///
-/// Rend `Some(raison)` si le lien est tombé ; l'appelant doit alors arrêter.
-///
-/// TRANSITOIRE (jalon 2, tâche 5) : le canal de données ne porte plus que des
-/// messages de contrôle, donc l'écho d'horodatage qui alimentait le RTT n'arrive
-/// plus. Les trois compteurs ne bougent plus jusqu'à la tâche 6, qui remplace ce
-/// banc par la piste média.
-fn servir_reseau(
-    link: &mut PeerLink,
-    _retours: &mut u64,
-    _dernier_rtt_ms: &mut f64,
-    _echantillons_rtt: &mut Vec<f64>,
-) -> anyhow::Result<Option<String>> {
-    match link.poll()? {
-        LinkEvent::Failed(raison) => Ok(Some(raison)),
-        _ => Ok(None),
-    }
-}
-
-/// Issue d'une tentative d'envoi d'un morceau déjà encodé.
-enum ResultatEnvoi {
-    /// Parti — au premier coup ou après relance.
-    Envoye,
-    /// Le tampon d'émission est resté plein au-delà de `BUDGET_RETRY_ENVOI`.
-    Abandonne,
-    /// Le lien est tombé pendant l'attente ; raison déjà rédigée pour
-    /// l'utilisateur, sans adresse.
+/// Issue d'une écriture d'image sur la piste média.
+enum IssueEnvoi {
+    /// Partie — au premier coup, ou après avoir laissé la file se dépiler.
+    Envoyee,
+    /// La file de paquetisation est restée pleine au-delà de
+    /// `BUDGET_RETRY_ENVOI` : le correspondant ne consomme plus rien.
+    FilePleine,
+    /// Le lien est tombé, ou la piste s'est refermée. Raison déjà rédigée pour
+    /// l'utilisateur, et sans adresse.
     LienTombe(String),
 }
 
-/// Envoie un morceau déjà découpé, en relançant tant que le tampon
-/// d'émission est plein, jusqu'à `BUDGET_RETRY_ENVOI`. Sert le lien entre
-/// chaque tentative (`servir_reseau`) : c'est ce service qui vide le tampon
-/// en traitant les accusés de réception de `str0m`.
+/// L'émission vidéo vers un spectateur : ce qu'il lui reste à apprendre du
+/// flux, ce que ses demandes déclenchent, et ce que l'envoi a coûté.
 ///
-/// Un morceau déjà encodé DOIT partir : NVENC vient de chaîner l'image dont
-/// il fait partie sur la dernière qu'il a réellement encodée (GOP infini,
-/// frameIntervalP = 1), et sous ce régime aucune image de référence ne
-/// revient jamais. L'abandonner silencieusement casserait cette chaîne pour
-/// tout le reste du flux — c'est précisément ce qu'a révélé un premier essai
-/// de ce banc de test : ffprobe rapportait des « ref POC introuvable » en
-/// cascade dès le premier échec d'envoi ignoré. D'où la relance, et l'arrêt
-/// propre plutôt qu'une mesure sur un flux qu'on sait corrompu.
-// `envoyer_octets_bruts` est obsolète (retrait à la tâche 8) : la piste média et
-// `PeerLink::ecrire_image` existent depuis la tâche 6, c'est ce banc vidéo qui
-// reste à y migrer.
-#[allow(clippy::too_many_arguments, deprecated)]
-fn envoyer_ou_abandonner(
-    link: &mut PeerLink,
-    charge: &[u8],
-    envoyes_octets: &mut u64,
-    echecs_send: &mut u64,
-    fenetre_tentatives: &mut u64,
-    fenetre_echecs: &mut u64,
-    retours: &mut u64,
-    dernier_rtt_ms: &mut f64,
-    echantillons_rtt: &mut Vec<f64>,
-) -> anyhow::Result<ResultatEnvoi> {
-    let debut = Instant::now();
-    let mut retente = false;
-    loop {
-        match link.envoyer_octets_bruts(charge) {
-            Ok(()) => {
-                *envoyes_octets += charge.len() as u64;
-                if retente {
-                    // Congestion réelle, résorbée : signal légitime pour le
-                    // Pacer, même si le morceau est finalement parti.
-                    *echecs_send += 1;
-                    *fenetre_echecs += 1;
-                }
-                *fenetre_tentatives += 1;
-                // `envoyer_octets_bruts` ne fait que déposer le morceau dans le tampon
-                // interne de `str0m` : les octets ne partent réellement sur
-                // le socket que pendant `poll()`. Découverte de banc de test :
-                // sans ce drainage après CHAQUE morceau, une rafale de
-                // plusieurs dizaines de morceaux d'une même image s'empile
-                // sans jamais être poussée sur le fil, jusqu'à saturer le
-                // tampon — RTT en centaines de ms puis échec, en boucle
-                // locale. Un morceau parti selon `str0m` n'est pas encore un
-                // morceau émis sur le réseau.
-                if let Some(raison) =
-                    servir_reseau(link, retours, dernier_rtt_ms, echantillons_rtt)?
-                {
-                    return Ok(ResultatEnvoi::LienTombe(raison));
-                }
-                return Ok(ResultatEnvoi::Envoye);
-            }
-            Err(_) if debut.elapsed() < BUDGET_RETRY_ENVOI => {
-                retente = true;
-                if let Some(raison) =
-                    servir_reseau(link, retours, dernier_rtt_ms, echantillons_rtt)?
-                {
-                    return Ok(ResultatEnvoi::LienTombe(raison));
-                }
-                std::thread::sleep(GRANULARITE_SERVICE_RESEAU);
-            }
-            Err(_) => return Ok(ResultatEnvoi::Abandonne),
-        }
-    }
+/// Le découpage n'est plus ici : une unité d'accès part ENTIÈRE, et c'est le
+/// paquetiseur RFC 7798 de `str0m` qui la met en paquets RTP (décision D1).
+struct EnvoiVideo {
+    /// Vrai jusqu'à ce que les en-têtes de séquence aient accompagné une image.
+    ///
+    /// Sous rafraîchissement intra progressif (GOP et `idrPeriod` infinis),
+    /// l'encodeur n'émet VPS, SPS et PPS qu'avec son tout premier IDR — que ce
+    /// spectateur-ci n'a pas reçu s'il arrive après. Sans eux, mesuré à la
+    /// tâche 7 : 0 image décodée sur 9 paquets ; avec eux, au moins une.
+    entetes_a_joindre: bool,
+    /// Octets d'unités d'accès réellement acceptés par la piste.
+    octets: u64,
+    /// Images écrites avec succès, et refus absorbés en les réécrivant.
+    images: u64,
+    refus_absorbes: u64,
+    /// Les deux mêmes, sur la fenêtre de 100 ms du `Pacer`.
+    fenetre_images: u64,
+    fenetre_refus: u64,
 }
 
-fn percentile_f64(tries: &[f64], p: usize) -> f64 {
-    if tries.is_empty() {
-        return 0.0;
+impl EnvoiVideo {
+    fn nouveau() -> EnvoiVideo {
+        EnvoiVideo {
+            entetes_a_joindre: true,
+            octets: 0,
+            images: 0,
+            refus_absorbes: 0,
+            fenetre_images: 0,
+            fenetre_refus: 0,
+        }
     }
-    let idx = (tries.len() * p / 100).min(tries.len() - 1);
-    tries[idx]
+
+    /// Écrit une unité d'accès ENTIÈRE sur la piste média.
+    ///
+    /// Le seul refus possible sur ce chemin est `TropDImagesEnAttente`, et il
+    /// est RÉCUPÉRABLE : le geste attendu est de poller puis de réécrire la
+    /// MÊME image. Mesuré : un `poll` ne libère qu'une place, pas la file —
+    /// plusieurs refus d'affilée sont donc normaux quand on a du retard, et ne
+    /// sont pas un signe d'échec. Une image déjà encodée DOIT partir : sous GOP
+    /// infini elle est chaînée sur la précédente, et l'abandonner casserait la
+    /// chaîne pour tout le reste du flux (« ref POC introuvable » en cascade).
+    ///
+    /// Tout autre refus dit que la piste n'est plus écrivable : rien ne se
+    /// rattrape en réessayant, l'appel rend `LienTombe`.
+    fn envoyer_image(
+        &mut self,
+        lien: &mut dyn LienVideo,
+        encodeur: &mut dyn Reprise,
+        unite: &[u8],
+        horodatage_ms: u64,
+    ) -> anyhow::Result<IssueEnvoi> {
+        // Les en-têtes voyagent DANS la première unité d'accès, et non dans une
+        // écriture à part : c'est exactement ce que NVENC produit lui-même devant
+        // un IDR forcé (`repeatSPSPPS`), et cela évite de confier au paquetiseur
+        // une unité d'accès sans tranche, que rien n'oblige un décodeur à
+        // accepter.
+        let a_ecrire: Cow<[u8]> = if self.entetes_a_joindre {
+            let mut avec_entetes = encodeur.entetes_de_sequence()?;
+            avec_entetes.extend_from_slice(unite);
+            Cow::Owned(avec_entetes)
+        } else {
+            Cow::Borrowed(unite)
+        };
+
+        let debut = Instant::now();
+        let mut refuse = false;
+        loop {
+            match lien.ecrire_image(&a_ecrire, horodatage_ms) {
+                Ok(()) => {
+                    // Après l'acceptation, jamais avant : une image refusée est
+                    // réécrite telle quelle, en-têtes compris.
+                    self.entetes_a_joindre = false;
+                    self.octets += a_ecrire.len() as u64;
+                    self.images += 1;
+                    self.fenetre_images += 1;
+                    if refuse {
+                        // Retard réel, résorbé : signal légitime pour le Pacer,
+                        // même si l'image est finalement partie.
+                        self.refus_absorbes += 1;
+                        self.fenetre_refus += 1;
+                    }
+                    // `ecrire_image` ne fait que confier l'unité au paquetiseur :
+                    // les octets ne partent sur le socket que pendant `poll`.
+                    // Servir le lien après chaque image est aussi ce qui évite
+                    // le refus ci-dessous (mesuré : 0 refus sur 21552 écritures
+                    // à 100 Mbps avec ce service, des refus sans lui).
+                    if let Some(raison) = self.servir(lien, encodeur)? {
+                        return Ok(IssueEnvoi::LienTombe(raison));
+                    }
+                    return Ok(IssueEnvoi::Envoyee);
+                }
+                Err(ErreurEnvoi::TropDImagesEnAttente) => {
+                    if debut.elapsed() >= BUDGET_RETRY_ENVOI {
+                        return Ok(IssueEnvoi::FilePleine);
+                    }
+                    refuse = true;
+                    // Un `poll` par place à libérer, et la même image réécrite.
+                    if let Some(raison) = self.servir(lien, encodeur)? {
+                        return Ok(IssueEnvoi::LienTombe(raison));
+                    }
+                    std::thread::sleep(GRANULARITE_SERVICE_RESEAU);
+                }
+                Err(autre) => return Ok(IssueEnvoi::LienTombe(autre.to_string())),
+            }
+        }
+    }
+
+    /// Un tour de service réseau : `str0m` est sans-IO, rien n'avance sans cet
+    /// appel — voir `GRANULARITE_SERVICE_RESEAU` pour pourquoi sa fréquence
+    /// compte. Traite au passage ce que le spectateur nous dit.
+    ///
+    /// Rend `Some(raison)` si le lien est tombé ; l'appelant doit alors arrêter.
+    fn servir(
+        &mut self,
+        lien: &mut dyn LienVideo,
+        encodeur: &mut dyn Reprise,
+    ) -> anyhow::Result<Option<String>> {
+        match lien.poll()? {
+            LinkEvent::Failed(raison) => Ok(Some(raison)),
+            LinkEvent::Controle(MessageControle::DemandeImageCle) => {
+                // Sans délai, et devant tout budget de débit ou saut d'image :
+                // sous rafraîchissement intra progressif (GOP et `idrPeriod`
+                // infinis), un spectateur sans image clé reçoit des images mais
+                // affiche du faux SANS le savoir — le décodeur ne signale rien.
+                // Cette demande est sa seule sortie de secours.
+                //
+                // L'encodeur fait le reste : la prochaine image sort en IDR,
+                // précédée de ses en-têtes, et plusieurs demandes rapprochées ne
+                // coûtent qu'un IDR.
+                encodeur.forcer_image_cle();
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Annonce au spectateur que le partage s'arrête, puis sert le lien le temps
+    /// que l'annonce quitte réellement la machine : `envoyer_controle` ne fait
+    /// que déposer le message dans le tampon de `str0m`, dont les octets ne
+    /// partent sur le socket que pendant `poll`. Sans ce drainage, l'annonce
+    /// mourrait avec le processus — et le spectateur resterait devant une image
+    /// figée, sans savoir pourquoi.
+    fn annoncer_l_arret(&mut self, lien: &mut dyn LienVideo) -> Result<(), ErreurEnvoi> {
+        lien.envoyer_controle(&MessageControle::PartageArrete)?;
+        let jusqu_a = Instant::now() + DRAINAGE_ARRET;
+        while Instant::now() < jusqu_a {
+            // Rien à traiter à ce stade : ni une chute du lien ni une demande
+            // d'image clé ne changent plus quoi que ce soit.
+            if lien.poll().is_err() {
+                break;
+            }
+            std::thread::sleep(GRANULARITE_SERVICE_RESEAU);
+        }
+        Ok(())
+    }
 }
 
 fn percentile_u64(tries: &[u64], p: usize) -> u64 {
@@ -524,7 +597,172 @@ fn percentile_u64(tries: &[u64], p: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::doublure::{LienFactice, RepriseFactice};
     use std::sync::mpsc;
+
+    /// Trois NAL Annex-B de types 32, 33 et 34 — VPS, SPS, PPS — réduits à leur
+    /// en-tête de deux octets. La boucle d'envoi ne lit jamais leur contenu ;
+    /// seul leur type est observable, et c'est ce que les tests vérifient.
+    fn entetes_factices() -> Vec<u8> {
+        let mut octets = Vec::new();
+        for type_nal in [32u8, 33, 34] {
+            octets.extend_from_slice(&[0, 0, 0, 1, type_nal << 1, 1]);
+        }
+        octets
+    }
+
+    /// Une unité d'accès : un seul NAL de type 1 (tranche non-IDR).
+    fn unite_factice() -> Vec<u8> {
+        vec![0, 0, 0, 1, 1 << 1, 1, 0xAB, 0xCD]
+    }
+
+    /// Les types de NAL d'un flux Annex-B, dans l'ordre. Reconnaît les
+    /// délimiteurs de 3 et de 4 octets ; le type est sur 6 bits, décalé de 1
+    /// dans le premier octet de l'en-tête HEVC (ITU-T H.265, 7.3.1.2).
+    fn types_de_nal(flux: &[u8]) -> Vec<u8> {
+        let mut types = Vec::new();
+        let mut i = 0;
+        while i + 4 <= flux.len() {
+            let debut = if flux[i..i + 3] == [0, 0, 1] {
+                Some(i + 3)
+            } else if i + 4 < flux.len() && flux[i..i + 4] == [0, 0, 0, 1] {
+                Some(i + 4)
+            } else {
+                None
+            };
+            match debut {
+                Some(d) => {
+                    types.push((flux[d] >> 1) & 0x3F);
+                    i = d + 1;
+                }
+                None => i += 1,
+            }
+        }
+        types
+    }
+
+    #[test]
+    fn les_entetes_de_sequence_precedent_la_premiere_image() {
+        // Sous rafraîchissement intra progressif, un spectateur qui n'a pas reçu
+        // VPS/SPS/PPS ne décode rien : mesuré à la tâche 7, 0 image sur 9
+        // paquets sans eux. Ils doivent donc partir AVANT toute image, et pas
+        // seulement « un jour ».
+        let mut lien = LienFactice::nouveau();
+        let mut encodeur = RepriseFactice::avec_entetes(entetes_factices());
+        let mut envoi = EnvoiVideo::nouveau();
+
+        envoi
+            .envoyer_image(&mut lien, &mut encodeur, &unite_factice(), 0)
+            .expect("première image");
+
+        let premiere = lien.ecritures().first().cloned().expect("une écriture");
+        let types = types_de_nal(&premiere.unite);
+        assert!(
+            types.contains(&32) && types.contains(&33) && types.contains(&34),
+            "la première écriture doit porter VPS, SPS et PPS : {types:?}"
+        );
+    }
+
+    #[test]
+    fn les_entetes_ne_sont_joints_qu_une_fois() {
+        // Les rejoindre à chaque image gonflerait le débit sans rien apporter :
+        // le spectateur les a déjà.
+        let mut lien = LienFactice::nouveau();
+        let mut encodeur = RepriseFactice::avec_entetes(entetes_factices());
+        let mut envoi = EnvoiVideo::nouveau();
+
+        for _ in 0..2 {
+            envoi
+                .envoyer_image(&mut lien, &mut encodeur, &unite_factice(), 0)
+                .expect("image");
+        }
+
+        let seconde = &lien.ecritures()[1];
+        assert_eq!(
+            types_de_nal(&seconde.unite),
+            vec![1],
+            "la seconde écriture ne porte que la tranche"
+        );
+    }
+
+    #[test]
+    fn une_demande_d_image_cle_force_un_idr() {
+        // C'est la seule sortie de secours d'un spectateur qui affiche du faux
+        // sans le savoir : sous GOP infini, le décodeur ne signale RIEN.
+        let mut lien = LienFactice::nouveau();
+        let mut encodeur = RepriseFactice::avec_entetes(entetes_factices());
+        let mut envoi = EnvoiVideo::nouveau();
+
+        lien.injecter(LinkEvent::Controle(MessageControle::DemandeImageCle));
+        let tombe = envoi.servir(&mut lien, &mut encodeur).expect("service");
+
+        assert!(tombe.is_none(), "une demande d'image clé n'est pas une chute du lien");
+        assert_eq!(encodeur.images_cle_forcees(), 1);
+    }
+
+    #[test]
+    fn l_arret_annonce_le_partage_arrete() {
+        let mut lien = LienFactice::nouveau();
+        let mut envoi = EnvoiVideo::nouveau();
+
+        envoi.annoncer_l_arret(&mut lien).expect("arrêt");
+
+        assert!(
+            lien.messages_envoyes().contains(&MessageControle::PartageArrete),
+            "le spectateur doit apprendre l'arrêt : {:?}",
+            lien.messages_envoyes()
+        );
+    }
+
+    #[test]
+    fn une_file_pleine_se_resorbe_en_pollant_et_en_reecrivant_la_meme_image() {
+        // Mesuré : un `poll` ne libère qu'UNE place. Deux images de retard
+        // demandent donc deux tours, et ces refus ne sont pas un échec — la même
+        // image doit finir par partir, intacte et une seule fois.
+        let mut lien = LienFactice::nouveau();
+        let mut encodeur = RepriseFactice::avec_entetes(entetes_factices());
+        let mut envoi = EnvoiVideo::nouveau();
+        lien.saturer(2);
+
+        let unite = unite_factice();
+        let issue = envoi
+            .envoyer_image(&mut lien, &mut encodeur, &unite, 7)
+            .expect("envoi");
+
+        assert!(matches!(issue, IssueEnvoi::Envoyee), "l'image doit finir par partir");
+        assert_eq!(lien.ecritures().len(), 1, "une seule fois, pas deux");
+        assert_eq!(lien.ecritures()[0].horodatage_ms, 7, "le même horodatage qu'au premier essai");
+        assert!(lien.polls() >= 2, "un poll par place à libérer : {}", lien.polls());
+        assert_eq!(envoi.refus_absorbes, 1, "un retard résorbé, signalé une fois au Pacer");
+    }
+
+    #[test]
+    fn une_piste_fermee_n_est_pas_retentee() {
+        // `PisteFermee` ne se résorbe pas : réessayer 300 ms ne ferait que
+        // retarder le diagnostic.
+        struct PisteMorte;
+        impl LienVideo for PisteMorte {
+            fn ecrire_image(&mut self, _: &[u8], _: u64) -> Result<(), ErreurEnvoi> {
+                Err(ErreurEnvoi::PisteFermee)
+            }
+            fn envoyer_controle(&mut self, _: &MessageControle) -> Result<(), ErreurEnvoi> {
+                Ok(())
+            }
+            fn poll(&mut self) -> anyhow::Result<LinkEvent> {
+                Ok(LinkEvent::Idle)
+            }
+        }
+        let mut encodeur = RepriseFactice::avec_entetes(entetes_factices());
+        let mut envoi = EnvoiVideo::nouveau();
+        let debut = Instant::now();
+
+        let issue = envoi
+            .envoyer_image(&mut PisteMorte, &mut encodeur, &unite_factice(), 0)
+            .expect("envoi");
+
+        assert!(matches!(issue, IssueEnvoi::LienTombe(_)), "la piste fermée fait tomber le lien");
+        assert!(debut.elapsed() < BUDGET_RETRY_ENVOI, "rendu sans consommer le budget de relance");
+    }
 
     #[test]
     fn un_arret_pendant_l_attente_termine_heberger_sans_attendre_la_fenetre() {

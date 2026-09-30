@@ -5,6 +5,9 @@
 //! événements typés et accepte un signal d'arrêt.
 
 pub mod arret;
+/// Doublures du transport, partagées par les tests de `hote` et de `reception`.
+#[cfg(test)]
+pub mod doublure;
 pub mod etablissement;
 pub mod evenement;
 pub mod hote;

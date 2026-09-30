@@ -301,12 +301,10 @@ impl PeerLink {
         // on l'avait rendu non ordonne avec une duree de vie de 150 ms, ce qui
         // avait fait passer le debit a 12,4 Mbps.
         //
-        // ATTENTION, jusqu'a la tache 8 : ce canal porte ENCORE la video du banc
-        // de sky-partage, par `envoyer_octets_bruts` (API deprecee). La piste
-        // media existe depuis la tache 6 et `ecrire_image` est la ; ce sont les
-        // appelants de `hote.rs` qui restent a migrer. Dans cet intervalle, le
-        // pire cas du jalon 0 est donc reproduit sur ce banc. Ce reglage, lui,
-        // n'est justifie que par le controle seul.
+        // Depuis la tache 8, ce canal ne porte PLUS de video : l'hote ecrit ses
+        // unites d'acces sur la piste media (`ecrire_image`), et son dernier
+        // appelant de `envoyer_octets_bruts` a disparu avec le decoupage maison.
+        // Ce reglage n'est donc justifie que par le controle.
         //
         // Garder l'ancien reglage ferait perdre definitivement un message
         // arrive trop tard — un `PartageArrete` jamais reemis laisserait le
@@ -764,20 +762,6 @@ impl PeerLink {
         // donnée) ; le cas est nommé pour ce qu'il est si elle évolue.
         let octets = serde_json::to_vec(message).map_err(|_| ErreurEnvoi::Serialisation)?;
         self.ecrire(&octets)
-    }
-
-    /// Écrit des octets tels quels sur le canal de données.
-    ///
-    /// Existe uniquement parce que le banc de mesure vidéo de `sky-partage`
-    /// envoie encore ses morceaux par ce canal. Le canal ne porte plus que du
-    /// contrôle : le récepteur ignore tout ce qui n'est pas un `MessageControle`.
-    #[deprecated(note = "disparaît à la tâche 8 : son remplacement, `ecrire_image`, \
-                         existe depuis la tâche 6 ; ce sont les appelants de \
-                         `sky-partage::hote` qui restent à migrer. Le canal de \
-                         données ne porte plus que des messages de contrôle, \
-                         utiliser `envoyer_controle`")]
-    pub fn envoyer_octets_bruts(&mut self, data: &[u8]) -> Result<(), ErreurEnvoi> {
-        self.ecrire(data)
     }
 
     /// Écrit une unité d'accès HEVC sur la piste média.
