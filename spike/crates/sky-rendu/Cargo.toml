@@ -7,6 +7,23 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+# Même version et mêmes fonctionnalités que `sky-decode` : les deux crates
+# manipulent les mêmes poignées CUDA, et deux versions de `cudarc` donneraient
+# deux jeux de types incompatibles.
+cudarc = { version = "0.16", default-features = false, features = ["driver", "dynamic-loading"] }
+# `cuGraphicsD3D11RegisterResource` est déclarée dans `cudaD3D11.h`, hors de
+# `cuda.h` : `cudarc` ne la lie pas. On la résout à la main dans `nvcuda.dll`.
+libloading = "0.8"
+sky-decode = { path = "../sky-decode" }
+
+[dev-dependencies]
+# Deux usages : ses souches de lien `NvEncodeAPI*`, exigées dès qu'un test
+# d'intégration tire `sky-decode` hors de `cfg(test)` (voir l'en-tête de
+# `tests/couleur.rs`), et l'encodeur lui-même, dont `tests/image_reelle.rs` se
+# sert pour fabriquer un flux à une taille que Windows accorde à une fenêtre.
+sky-encode = { path = "../sky-encode" }
+# Pour `CapturedFrame`, le type d'entrée de `NvencEncoder::encode`.
+sky-capture = { path = "../sky-capture" }
 
 [dependencies.windows]
 version = "0.62"
@@ -16,6 +33,7 @@ features = [
     "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_DirectWrite",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",

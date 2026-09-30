@@ -22,12 +22,13 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_RENDER_TARGET_USAGE_NONE,
 };
 use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
+    D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN,
+    D3D_FEATURE_LEVEL_11_0,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
     D3D11_BIND_RENDER_TARGET, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -37,8 +38,8 @@ use windows::Win32::Graphics::DirectWrite::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIFactory2,
-    IDXGISurface, IDXGISwapChain1, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
-    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGISurface, IDXGISwapChain1, DXGI_ERROR_NOT_FOUND, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_F11;
@@ -52,6 +53,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::etat::{dessiner, EtatVisionnage};
+use crate::interop::{ImageAAfficher, Pont};
+use crate::nuanceur::{rectangle_centre, Programme};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvenementFenetre {
@@ -70,10 +73,12 @@ struct Boite {
     taille: Option<(u32, u32)>,
 }
 
-/// La texture où l'on dessine, et le moyen d'y dessiner.
+/// La texture où l'on dessine, et les deux moyens d'y dessiner : Direct2D pour
+/// les états sans image, Direct3D pour l'image elle-même.
 struct Cible {
     texture: ID3D11Texture2D,
     rendu: ID2D1RenderTarget,
+    vue_rendu: ID3D11RenderTargetView,
 }
 
 pub struct Fenetre {
@@ -87,9 +92,17 @@ pub struct Fenetre {
     fabrique_d2d: ID2D1Factory,
     format_texte: IDWriteTextFormat,
     cible: Cible,
+    /// Nuanceurs et échantillonneur, compilés une fois à l'ouverture.
+    programme: Programme,
+    /// Les textures de plans enregistrées auprès de CUDA. Créées à la première
+    /// image et refaites quand sa taille change : l'enregistrement coûte, le
+    /// téléversement non.
+    pont: Option<Pont>,
     largeur: u32,
     hauteur: u32,
-    /// Pour repeindre après un redimensionnement.
+    /// Pour repeindre après un redimensionnement. `None` dès qu'une image a été
+    /// affichée : il n'y a alors plus d'état à repeindre, la prochaine image
+    /// remplira la nouvelle taille.
     dernier_etat: Option<EtatVisionnage>,
 }
 
@@ -112,6 +125,13 @@ impl Fenetre {
         &self.appareil
     }
 
+    /// La taille de la zone cliente, en pixels. Ce n'est pas toujours celle
+    /// demandée à l'ouverture : Windows impose une largeur minimale de fenêtre,
+    /// que la barre de titre et ses boutons commandent.
+    pub fn taille(&self) -> (u32, u32) {
+        (self.largeur, self.hauteur)
+    }
+
     /// Peint un des états sans image, puis présente.
     pub fn afficher_etat(&mut self, etat: EtatVisionnage) -> anyhow::Result<()> {
         self.dernier_etat = Some(etat);
@@ -123,6 +143,90 @@ impl Fenetre {
             self.hauteur,
         )?;
         self.presenter()
+    }
+
+    /// Affiche une image décodée, puis présente.
+    ///
+    /// Le chemin est intégralement GPU : la surface CUDA est copiée de
+    /// périphérique à périphérique dans trois textures (voir `interop.rs`), que le
+    /// nuanceur recombine et convertit en RVB. Aucun octet de pixel ne passe par
+    /// la mémoire centrale — `ImageDecodee::copier_vers_memoire_centrale` n'est
+    /// jamais appelée d'ici (décision D5).
+    ///
+    /// À appeler dès qu'une image est reçue : `cuvidDecodePicture` peut bloquer le
+    /// fil appelant quand les quatre surfaces de sortie de NVDEC sont épuisées
+    /// (`cuviddec.h:1036`), et une `ImageDecodee` vivante en immobilise une.
+    pub fn afficher(&mut self, image: &dyn ImageAAfficher) -> anyhow::Result<()> {
+        let taille = (image.largeur(), image.hauteur());
+        let a_jour = self
+            .pont
+            .as_ref()
+            .is_some_and(|pont| (pont.largeur(), pont.hauteur()) == taille);
+        if !a_jour {
+            // Relâcher l'ancien avant d'allouer le nouveau : chacun immobilise
+            // trois textures et autant d'enregistrements CUDA.
+            self.pont = None;
+            self.pont = Some(Pont::nouveau(&self.appareil, taille.0, taille.1)?);
+        }
+        let pont = self
+            .pont
+            .as_mut()
+            .ok_or_else(|| anyhow!("pont d'interopérabilité absent"))?;
+        pont.televerser(image)?;
+        let vues = pont.vues();
+
+        let (x, y, largeur, hauteur) = rectangle_centre(taille, (self.largeur, self.hauteur));
+        unsafe {
+            let cibles = [Some(self.cible.vue_rendu.clone())];
+            self.contexte.OMSetRenderTargets(Some(&cibles), None);
+            // Le noir des bandes : il couvre toute la cible, puis le viewport
+            // restreint le dessin au rectangle qui préserve le rapport d'image.
+            self.contexte
+                .ClearRenderTargetView(&self.cible.vue_rendu, &[0.0, 0.0, 0.0, 1.0]);
+            self.contexte.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: x,
+                TopLeftY: y,
+                Width: largeur,
+                Height: hauteur,
+                MinDepth: 0.0,
+                MaxDepth: 1.0,
+            }]));
+            // Aucun tampon de sommets : les quatre coins sortent de `SV_VertexID`.
+            self.contexte.IASetInputLayout(None);
+            self.contexte
+                .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            self.contexte.VSSetShader(&self.programme.sommets, None);
+            self.contexte.PSSetShader(&self.programme.pixels, None);
+            self.contexte.PSSetShaderResources(0, Some(&vues));
+            self.contexte
+                .PSSetSamplers(0, Some(&[Some(self.programme.echantillonneur.clone())]));
+            self.contexte.Draw(4, 0);
+            // Détacher les vues : la prochaine image réécrit ces textures par
+            // CUDA, et Direct3D refuse de prêter une ressource encore liée en
+            // lecture au nuanceur.
+            self.contexte
+                .PSSetShaderResources(0, Some(&[None, None, None]));
+            self.contexte.OMSetRenderTargets(None, None);
+        }
+        // Une image remplace l'état : il n'y a plus rien à repeindre après un
+        // redimensionnement, la prochaine image s'en chargera à la bonne taille.
+        self.dernier_etat = None;
+        self.presenter()
+    }
+
+    /// RÉSERVÉ AUX TESTS ET AUX MESURES : le pixel au centre de la cible, en RVB.
+    ///
+    /// Publique et non `pub(crate)` : le test de couleur vit dans `tests/`, donc
+    /// hors du crate, et n'atteindrait pas un membre restreint au crate.
+    pub fn pixel_central(&self) -> anyhow::Result<[u8; 3]> {
+        let pixels = self.pixels_de_la_cible()?;
+        let largeur = self.largeur as usize;
+        let indice = ((self.hauteur as usize / 2) * largeur + largeur / 2) * 4;
+        let pixel = pixels
+            .get(indice..indice + 4)
+            .ok_or_else(|| anyhow!("pixel central hors du tampon"))?;
+        // La cible est en BGRA : on rend R, V, B dans cet ordre.
+        Ok([pixel[2], pixel[1], pixel[0]])
     }
 
     /// Traite les messages en attente sans bloquer et rend les événements utiles.
@@ -249,6 +353,10 @@ impl Fenetre {
             format
         };
         let cible = creer_cible(&appareil, &fabrique_d2d, largeur, hauteur)?;
+        // Compilé une fois à l'ouverture, et non à la première image : une erreur
+        // de nuanceur doit se voir tout de suite, pas au moment où quelqu'un
+        // regarde un écran noir.
+        let programme = Programme::compiler(&appareil)?;
 
         Ok(Self {
             hwnd,
@@ -259,6 +367,8 @@ impl Fenetre {
             fabrique_d2d,
             format_texte,
             cible,
+            programme,
+            pont: None,
             largeur,
             hauteur,
             dernier_etat: None,
@@ -318,9 +428,13 @@ impl Fenetre {
             }))
     }
 
-    /// Les pixels de la cible (BGRA, lignes contiguës), lus côté processeur.
-    #[cfg(test)]
-    pub(crate) fn pixels_de_la_cible(&self) -> anyhow::Result<Vec<u8>> {
+    /// RÉSERVÉ AUX TESTS ET AUX MESURES : les pixels de la cible (BGRA, lignes
+    /// contiguës), lus côté processeur.
+    ///
+    /// Publique pour la même raison que [`Fenetre::pixel_central`] : le test de
+    /// couleur vit hors du crate. Ce n'est pas une brèche dans la décision D5 —
+    /// elle porte sur le chemin normal d'affichage, qui n'appelle jamais ceci.
+    pub fn pixels_de_la_cible(&self) -> anyhow::Result<Vec<u8>> {
         use windows::Win32::Graphics::Direct3D11::{
             D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_USAGE_STAGING,
         };
@@ -371,10 +485,17 @@ const FABRICANT_NVIDIA: u32 = 0x10DE;
 /// Le premier adaptateur DXGI de NVIDIA, s'il y en a un.
 fn adaptateur_nvidia() -> anyhow::Result<Option<IDXGIAdapter1>> {
     let fabrique: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.context("fabrique DXGI")?;
-    // `EnumAdapters1` échoue (DXGI_ERROR_NOT_FOUND) une fois la liste épuisée.
+    // `EnumAdapters1` échoue avec DXGI_ERROR_NOT_FOUND une fois la liste épuisée.
+    // On ne traite QUE ce code comme une fin de liste : n'importe quelle autre
+    // erreur doit remonter. Sans ce filtre, une énumération réellement cassée
+    // rendrait `None`, ferait replier l'appareil sur l'adaptateur par défaut —
+    // possiblement l'Intel intégré — et l'interopérabilité CUDA casserait sans que
+    // rien ne le dise.
     for indice in 0.. {
-        let Ok(adaptateur) = (unsafe { fabrique.EnumAdapters1(indice) }) else {
-            break;
+        let adaptateur = match unsafe { fabrique.EnumAdapters1(indice) } {
+            Ok(adaptateur) => adaptateur,
+            Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(e) => return Err(anyhow::Error::new(e).context("énumération des adaptateurs DXGI")),
         };
         let desc = unsafe { adaptateur.GetDesc1() }.context("description de l'adaptateur")?;
         if desc.VendorId == FABRICANT_NVIDIA {
@@ -400,6 +521,28 @@ fn creer_appareil() -> anyhow::Result<(ID3D11Device, ID3D11DeviceContext)> {
         Some(a) => (Some(a.cast()?), D3D_DRIVER_TYPE_UNKNOWN),
         None => (None, D3D_DRIVER_TYPE_HARDWARE),
     };
+    //
+    // `ID3D10Multithread::SetMultithreadProtected` : DÉLIBÉRÉMENT PAS ACTIVÉ.
+    // Ce réglage sérialise les appels au contexte immédiat entre plusieurs fils.
+    // Il n'y a ici qu'un fil, et ce n'est pas une convention mais une propriété
+    // des types, vérifiée en demandant `Send` au compilateur, qui l'a refusé sur
+    // quatre motifs distincts : `Fenetre` porte un `HWND` (`*mut c_void`), un
+    // `*mut RefCell<Boite>` et, via `Pont`, un `*mut CUgraphicsResource_st` ;
+    // `ImageDecodee` porte un `Rc<SessionNvdec>`. Ni l'image ni la fenêtre ne
+    // peuvent donc atteindre un second fil, et la pompe de messages doit de toute
+    // façon tourner sur le fil qui a créé la fenêtre. Le verrou protégerait d'un
+    // accès concurrent que rien ne peut produire, au prix d'une prise de verrou
+    // par appel de contexte.
+    //
+    // Et il n'y a pas de contrepartie de sûreté à aller chercher : ce réglage ne
+    // sérialise que les appels à Direct3D. Le vrai risque de l'interopérabilité
+    // est ailleurs — le contexte CUDA doit être courant sur le fil appelant, ce
+    // qu'aucun verrou Direct3D ne fournit (c'est `bind_to_thread` qui s'en charge,
+    // voir `Pont::televerser`).
+    //
+    // Si un jour le décodage part sur son propre fil, ce sont ces types qui
+    // casseront d'abord, à la compilation : c'est à ce moment-là qu'on revient
+    // l'activer, pas avant.
     let mut appareil = None;
     let mut contexte = None;
     unsafe {
@@ -462,7 +605,15 @@ fn creer_cible(
     };
     let rendu = unsafe { fabrique_d2d.CreateDxgiSurfaceRenderTarget(&surface, &proprietes) }
         .context("cible Direct2D sur la texture")?;
-    Ok(Cible { texture, rendu })
+    let mut vue_rendu = None;
+    unsafe { appareil.CreateRenderTargetView(&texture, None, Some(&mut vue_rendu)) }
+        .context("vue de rendu Direct3D sur la texture")?;
+    let vue_rendu = vue_rendu.ok_or_else(|| anyhow!("vue de rendu nulle"))?;
+    Ok(Cible {
+        texture,
+        rendu,
+        vue_rendu,
+    })
 }
 
 fn creer_hwnd(
@@ -671,7 +822,20 @@ mod tests {
     /// qui rend possible l'interopérabilité CUDA de la tâche suivante.
     #[test]
     fn l_appareil_vit_sur_la_carte_nvidia_quand_il_y_en_a_une() {
-        if adaptateur_nvidia().expect("énumération DXGI").is_none() {
+        let nvidia = adaptateur_nvidia().expect("énumération DXGI");
+        // Recoupement par une source indépendante de DXGI : le pilote CUDA. Sans
+        // lui, un `None` venu d'une énumération cassée ferait sortir ce test en
+        // silence — c'est-à-dire exactement dans le cas qu'il doit attraper. Les
+        // deux sources doivent s'accorder.
+        let cartes_cuda = crate::cartes_cuda_disponibles();
+        assert_eq!(
+            nvidia.is_some(),
+            cartes_cuda > 0,
+            "DXGI et le pilote CUDA ne s'accordent pas sur la présence d'une carte NVIDIA \
+             (DXGI : {:?}, cartes CUDA : {cartes_cuda})",
+            nvidia.is_some()
+        );
+        if nvidia.is_none() {
             println!("pas de carte NVIDIA sur cette machine : repli légitime, rien à prouver");
             return;
         }
