@@ -16,15 +16,6 @@ use crate::evenement::{Bilan, BilanReception, ErreurPartage, Evenement, Fin, Mes
 use crate::reception::Reception;
 use crate::rendez_vous::{interroger, reponse_a_l_offre, session_de, ATTENTE_SPECTATEUR, CADENCE};
 
-/// Période d'émission du retour vers l'émetteur.
-///
-/// OBSOLÈTE depuis la tâche 5 du jalon 2 : ce retour portait l'horodatage du
-/// dernier paquet vidéo reçu, pour que l'émetteur calcule un aller-retour (RTT)
-/// réel. La vidéo ne passe plus par le canal de données, donc `reception` ne
-/// reçoit plus rien et ce retour n'est plus émis ; il disparaît avec le banc, à
-/// la tâche 6.
-const PERIODE_RETOUR: Duration = Duration::from_millis(200);
-
 /// Où écrire le flux reçu, si quelqu'un le veut.
 pub type Puits = Box<dyn Write>;
 
@@ -140,8 +131,6 @@ pub fn regarder(
 /// La boucle de réception de `cmd_view` (C2), l'écriture du fichier devenue
 /// optionnelle. Les en-têtes de séquence n'étant émis qu'une fois (GOP
 /// infini), le puits reçoit tout depuis le tout premier paquet.
-// `envoyer_octets_bruts` est obsolète (retrait à la tâche 6).
-#[allow(deprecated)]
 fn recevoir(
     link: &mut PeerLink,
     mut puits: Option<Puits>,
@@ -152,7 +141,6 @@ fn recevoir(
     let mut reception = Reception::default();
     let t0 = Instant::now();
     let mut dernier_affichage = Instant::now();
-    let mut dernier_retour = Instant::now();
     let mut octets_precedent = 0u64;
     let mut images_precedent = 0u64;
 
@@ -166,17 +154,11 @@ fn recevoir(
         }
         // TRANSITOIRE (jalon 2, tâche 5) : la vidéo ne passe plus par le canal
         // de données, donc plus rien n'alimente `reception` ni le puits jusqu'à
-        // la piste média de la tâche 6.
+        // la piste média de la tâche 6. Le retour d'horodatage vers l'émetteur
+        // (RTT) a été retiré pour la même raison : il n'avait plus rien à dire.
         if let LinkEvent::Failed(raison) = link.poll()? {
             vider(&mut puits);
             return Ok(Fin::LienTombe(raison));
-        }
-
-        if dernier_retour.elapsed() >= PERIODE_RETOUR {
-            if let Some(h) = reception.dernier_horodatage_emission() {
-                let _ = link.envoyer_octets_bruts(&h.to_le_bytes());
-            }
-            dernier_retour = Instant::now();
         }
 
         if dernier_affichage.elapsed() >= Duration::from_secs(1) {

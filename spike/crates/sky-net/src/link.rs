@@ -192,22 +192,28 @@ impl PeerLink {
         let (socket, locale) = Self::socket_et_candidats(&mut rtc)?;
 
         let mut change = rtc.sdp_api();
-        // Canal ordonne ET fiable (reglage par defaut de str0m) : il ne porte
-        // plus que des messages de controle, rares et minuscules.
+        // Canal ordonne ET fiable (reglage par defaut de str0m), choisi pour
+        // l'usage FUTUR du canal : des messages de controle, rares et minuscules.
         //
         // Ce n'etait pas le reglage du jalon 0. La, le canal portait la video,
         // et un canal fiable etait le pire choix (RTT de 800 a 1600 ms, debit
         // effondre a 1 Mbps pour une cible de 10, tampon d'emission sature) :
         // on l'avait rendu non ordonne avec une duree de vie de 150 ms, ce qui
-        // avait fait passer le debit a 12,4 Mbps. La video a quitte ce canal
-        // (piste media) : cette saturation ne peut plus s'y reproduire, puisqu'il
-        // ne porte plus d'images.
+        // avait fait passer le debit a 12,4 Mbps.
+        //
+        // ATTENTION, jusqu'a la tache 6 : ce canal porte ENCORE la video du banc
+        // de sky-partage, par `envoyer_octets_bruts` (API deprecee). Dans cet
+        // intervalle, le pire cas du jalon 0 est donc reproduit sur ce banc.
+        // Il disparait quand la video passera sur une piste media ; ce reglage
+        // n'est justifie que par le controle seul.
         //
         // Garder l'ancien reglage ferait perdre definitivement un message
         // arrive trop tard — un `PartageArrete` jamais reemis laisserait le
         // spectateur devant un flux fige sans explication. On retransmet donc.
-        // Le cout, non mesure, est la latence d'une retransmission : acceptable
-        // pour des messages emis au plus une fois par seconde.
+        // Le cout, non mesure, est la latence d'une retransmission. On compte
+        // qu'elle restera acceptable parce que la spec veut des messages rares
+        // (au plus un par seconde) ; cette limitation n'est pas encore
+        // implementee, elle viendra avec les taches 8 et 9.
         change.add_channel_with_config(str0m::channel::ChannelConfig {
             label: CANAL.to_string(),
             reliability: str0m::channel::Reliability::Reliable,
