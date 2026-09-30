@@ -55,12 +55,18 @@ pub enum ErreurEnvoi {
     /// La file de paquetisation de la piste média est pleine : plus de cent
     /// images attendent d'être découpées en paquets RTP.
     ///
-    /// **Récupérable, et c'est tout l'intérêt de la distinguer.** `str0m` vide
-    /// cette file dans `poll_output` : l'appelant doit appeler `poll` puis
-    /// réécrire la même image, pas l'abandonner. C'est le seul refus que la
-    /// sonde du 27/09/2026 ait jamais vu sur ce chemin — et elle ne l'a vu qu'en
-    /// écrivant sans poller ; 0 refus sur 2593 écritures à 12 Mbps et 0 sur
-    /// 21552 à 100 Mbps quand la boucle sert le réseau entre deux images.
+    /// **Récupérable, et c'est tout l'intérêt de la distinguer.** L'appelant
+    /// appelle `poll`, puis réécrit la même image ; il ne l'abandonne pas.
+    ///
+    /// Un `poll` libère **une** place, pas la file : `str0m` ne dépile qu'une
+    /// image par tour (`Media::do_payload`, un `pop_front`). Un appelant très en
+    /// retard peut donc être refusé plusieurs fois de suite, et ce n'est pas un
+    /// signe d'échec — c'est le rythme d'une seule image par `poll` qui reprend.
+    ///
+    /// C'est le seul refus que la sonde du 27/09/2026 ait jamais vu sur ce
+    /// chemin, et elle ne l'a vu qu'en écrivant sans poller : 0 refus sur 2593
+    /// écritures à 12 Mbps et 0 sur 21552 à 100 Mbps quand la boucle sert le
+    /// réseau entre deux images.
     ///
     /// Le pendant du canal de données est `TamponPlein`, que `hote.rs` pilote
     /// déjà de cette façon.
@@ -794,9 +800,11 @@ impl PeerLink {
     /// `str0m` refuse l'écriture au-delà de cent images en attente de
     /// paquetisation (`RtcError::WriteWithoutPoll`). Ce refus rend
     /// **`TropDImagesEnAttente`, et lui seul** : il est récupérable, l'appelant
-    /// doit appeler `poll` — qui vide la file — puis **réécrire la même image**,
-    /// pas l'abandonner. Toute autre erreur rend `EcritureRefusee` et n'a pas de
-    /// relance connue.
+    /// appelle `poll` puis **réécrit la même image**, il ne l'abandonne pas.
+    /// Attention à ce qu'un `poll` fait au juste — il libère **une** place et non
+    /// la file, `str0m` ne dépilant qu'une image par tour : plusieurs refus
+    /// d'affilée sont normaux quand on a beaucoup de retard. Toute autre erreur
+    /// rend `EcritureRefusee` et n'a pas de relance connue.
     ///
     /// Une boucle qui sert le réseau après chaque image ne rencontre jamais ce
     /// refus ; c'est déjà ce que fait `hote.rs` pour le canal de données, et pour
@@ -1663,8 +1671,9 @@ mod tests {
         );
 
         // Et la relance marche : c'est ce qui fait de ce refus un « réessayer »
-        // et non un « abandonner ». Un seul `poll` de l'hôte vide de quoi
-        // reprendre.
+        // et non un « abandonner ». Un seul `poll` suffit ici, et c'est tout ce
+        // que ce test affirme : il libère UNE place, pas la file. Avec deux
+        // images de retard il aurait fallu deux tours.
         let _ = hote.poll();
         let _ = spectateur.poll();
         hote.ecrire_image(&unite, images_acceptees)
@@ -1672,12 +1681,19 @@ mod tests {
     }
 
     #[test]
-    fn un_profil_inconciliable_ferme_la_piste_au_lieu_de_la_laisser_sans_codec() {
-        // L'expérience qui tranche entre les deux refus de `ecrire_image`, au
-        // lieu de supposer lequel se produit. L'offre voyage EN CLAIR : on la
-        // décomprime, on y fausse le palier annoncé pour H265 — `tier-flag=1`
-        // interdit la concordance (RFC 7798 §7.2.2 veut une symétrie exacte)
-        // sans casser la syntaxe —, on recomprime, et on répond à cette offre.
+    fn un_tier_flag_divergent_retire_h265_de_la_reponse() {
+        // Le nom dit la propriété réelle, et elle est étroite : la piste ne « se
+        // ferme » pas, elle n'est JAMAIS ouverte — ce qui est mesuré, c'est que la
+        // réponse de l'hôte ne décrit plus H265.
+        //
+        // L'intérêt est ailleurs : cela répond à la question laissée ouverte par
+        // `ErreurEnvoi::CodecNonNegocie`, en mesurant ce que `str0m` fait d'un
+        // profil inconciliable au lieu de le supposer.
+        //
+        // L'offre voyage EN CLAIR : on la décomprime, on y fausse le palier
+        // annoncé pour H265 — `tier-flag=1` interdit la concordance (RFC 7798
+        // §7.2.2 veut une symétrie exacte) sans casser la syntaxe —, on
+        // recomprime, et on répond à cette offre.
         // L'identité du spectateur est dédoublée par ses octets : `offrant` la
         // consomme, et il faut pouvoir desceller la réponse de l'hôte.
         let secret = Identity::generate().en_octets();
@@ -1721,11 +1737,19 @@ mod tests {
         let sdp_reponse =
             crate::handshake::decomprimer(&spectateur_id.open(&blob_reponse.sealed_sdp).unwrap())
                 .unwrap();
+        // C'EST CETTE ASSERTION, ET ELLE SEULE, QUI PORTE LA PREUVE. Elle rougit
+        // si la réponse garde H265 — vérifié en faussant `level-id`, qui se
+        // négocie par un minimum au lieu d'exiger la symétrie : la ligne survit
+        // alors et le test rouge.
         assert!(
             !sdp_reponse.contains("H265"),
             "la réponse décrit encore H265 : str0m aurait gardé la ligne de média \
              sans codec commun, et `CodecNonNegocie` serait alors atteignable"
         );
+        // Les deux suivantes sont des constats, pas des preuves : elles passeraient
+        // aussi bien sans aucune négociation, puisque l'hôte n'a de piste qu'à
+        // `Event::MediaAdded`. Elles disent l'effet observable du constat
+        // ci-dessus ; les garder sans celle du haut ne prouverait plus rien.
         assert!(!hote.piste_ouverte());
         assert_eq!(
             hote.ecrire_image(b"rien a negocier", 0),
