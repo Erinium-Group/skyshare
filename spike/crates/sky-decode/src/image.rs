@@ -22,13 +22,20 @@ use crate::decodeur::SessionNvdec;
 /// - U à `pointeur + pas × hauteur_surface`,
 /// - V à `pointeur + 2 × pas × hauteur_surface`.
 ///
-/// L'espacement des plans est `hauteur_surface`, la hauteur **codée**, et non la
-/// hauteur affichée de l'image : les deux coïncident en 1440, mais pas en 1080,
-/// dont la hauteur codée vaut 1088. Confondre les deux ne provoque ni erreur ni
-/// dépassement de tampon — seulement un décalage de chrominance silencieux, à
-/// certaines résolutions seulement. `cuviddec.h` ne documente pas cette
-/// disposition ; la seule source est l'échantillon `NvDecoder` de NVIDIA, qui
-/// calcule l'offset de chrominance depuis `coded_height`.
+/// L'espacement des plans est `hauteur_surface`, qui est la hauteur de la
+/// **surface de sortie** — celle que la session a demandée dans `ulTargetHeight`
+/// — et **non** la hauteur codée du flux. Les deux diffèrent : mesuré le
+/// 30/09/2026 en 1920×1080, où la hauteur codée vaut 1088 alors que la surface
+/// mappée en fait 1080.
+///
+/// Ce n'est pas un détail, et ce n'est pas ce que suggère l'échantillon
+/// `NvDecoder` de NVIDIA, qui calcule son offset de chrominance depuis
+/// `coded_height` — mais lui met aussi `ulTargetHeight` à la taille codée. Ici la
+/// cible est la taille d'affichage, et `cuvidMapVideoFrame64` rend la surface de
+/// sortie, donc c'est la cible qui commande. Le vérifier a coûté une mesure :
+/// avec 1088, `cuMemcpy2D` échoue sur le troisième plan (débordement) ; avec
+/// 1080, l'aller-retour 1080 est exact au pixel. Voir
+/// `tests/aller_retour.rs`, qui tient cette preuve.
 ///
 /// Aucun octet de pixel ne traverse cette frontière : seul le GPU sait lire ce
 /// pointeur.
@@ -38,8 +45,9 @@ pub struct SurfaceCuda {
     pub pointeur: u64,
     /// Pas de ligne en octets, commun aux trois plans.
     pub pas: u32,
-    /// Nombre de lignes séparant le début d'un plan du début du suivant, soit la
-    /// hauteur codée de la surface. Supérieure ou égale à la hauteur de l'image.
+    /// Nombre de lignes séparant le début d'un plan du début du suivant : la
+    /// hauteur de la surface de sortie mappée. Voir la note ci-dessus — ce n'est
+    /// pas la hauteur codée du flux.
     pub hauteur_surface: u32,
 }
 

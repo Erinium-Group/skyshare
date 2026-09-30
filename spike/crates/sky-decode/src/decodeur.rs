@@ -95,10 +95,13 @@ struct EtatPartage {
     /// Taille de la zone affichée, connue seulement au rappel de séquence.
     largeur_affichee: u32,
     hauteur_affichee: u32,
-    /// Hauteur de la SURFACE, c'est-à-dire `coded_height` : le nombre de lignes
-    /// qui séparent le début d'un plan du début du suivant. Distincte de la
-    /// hauteur affichée dès que la résolution n'est pas alignée — en 1080, la
-    /// hauteur codée vaut 1088.
+    /// Hauteur de la surface de sortie, c'est-à-dire `ulTargetHeight` : le
+    /// nombre de lignes qui séparent le début d'un plan du début du suivant.
+    ///
+    /// Renseignée depuis la MÊME variable que `ulTargetHeight` au rappel de
+    /// séquence, et c'est délibéré : les deux doivent rester égales, sans quoi
+    /// la lecture des plans de chrominance se décale. Ce n'est pas `coded_height`
+    /// — mesuré, voir la note de [`SurfaceCuda`].
     hauteur_surface: u32,
     /// Nombre de surfaces de décodage retenu, redonné à chaque rappel de
     /// séquence : NVDEC interprète cette valeur de retour comme la taille de
@@ -289,7 +292,11 @@ unsafe extern "C" fn rappel_sequence(donnees: *mut c_void, format: *mut CUVIDEOF
     let hauteur = (format.display_area.bottom - format.display_area.top).max(0) as u32;
     etat.largeur_affichee = largeur;
     etat.hauteur_affichee = hauteur;
-    etat.hauteur_surface = format.coded_height;
+    // La cible de sortie, seule et unique source des deux valeurs qui doivent
+    // rester égales : `ulTargetHeight` ci-dessous et l'espacement des plans que
+    // lit `SurfaceCuda`. Changer l'une sans l'autre décale la chrominance.
+    let hauteur_cible = hauteur;
+    etat.hauteur_surface = hauteur_cible;
     etat.surfaces_de_decodage = u32::from(format.min_num_decode_surfaces).max(1);
 
     let mut creation: CUVIDDECODECREATEINFO = std::mem::zeroed();
@@ -312,7 +319,7 @@ unsafe extern "C" fn rappel_sequence(donnees: *mut c_void, format: *mut CUVIDEOF
     creation.OutputFormat = cudaVideoSurfaceFormat::cudaVideoSurfaceFormat_YUV444;
     creation.DeinterlaceMode = cudaVideoDeinterlaceMode::cudaVideoDeinterlaceMode_Weave;
     creation.ulTargetWidth = largeur as c_ulong;
-    creation.ulTargetHeight = hauteur as c_ulong;
+    creation.ulTargetHeight = hauteur_cible as c_ulong;
     creation.ulNumOutputSurfaces = SURFACES_DE_SORTIE as c_ulong;
     // `vidLock` nul : un seul fil pilote cette session.
     creation.vidLock = std::ptr::null_mut();

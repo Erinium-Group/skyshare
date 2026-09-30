@@ -4025,6 +4025,7 @@ dependencies = [
  "libloading 0.8.9",
  "nvidia-video-codec-sdk",
  "png 0.17.16",
+ "sky-capture",
  "sky-encode",
  "thiserror 2.0.20",
  "windows 0.62.2",

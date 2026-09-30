@@ -18,7 +18,20 @@ windows = { version = "0.62", features = ["Win32_Graphics_Direct3D11"] }
 
 [dev-dependencies]
 png = "0.17"
-# Uniquement pour ses souches de lien `NvEncodeAPI*` : voir l'en-tête de
-# `tests/reference.rs`. Un test d'intégration compile la bibliothèque sans
-# `cfg(test)`, donc sans les souches internes de `nvcuvid_sys`.
+# Deux usages : ses souches de lien `NvEncodeAPI*` (voir l'en-tête de
+# `tests/reference.rs` — un test d'intégration compile la bibliothèque sans
+# `cfg(test)`, donc sans les souches internes de `nvcuvid_sys`), et l'encodeur
+# lui-même, dont `tests/aller_retour.rs` se sert pour fabriquer un flux d'une
+# hauteur que le flux du jalon 0 ne couvre pas.
 sky-encode = { path = "../sky-encode" }
+# Pour `CapturedFrame`, le type d'entrée de `NvencEncoder::encode`.
+sky-capture = { path = "../sky-capture" }
+# Les tests créent leur propre périphérique Direct3D 11 : pas de capture
+# d'écran, donc aucune fenêtre. Les fonctionnalités s'unissent avec celles de
+# la dépendance normale ci-dessus.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+] }
