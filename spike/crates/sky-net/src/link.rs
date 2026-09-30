@@ -50,6 +50,8 @@ pub enum ErreurEnvoi {
     TamponPlein,
     /// `str0m` a refusé l'écriture.
     EcritureRefusee,
+    /// Le message n'a pas pu être sérialisé.
+    Serialisation,
 }
 
 impl std::fmt::Display for ErreurEnvoi {
@@ -58,6 +60,7 @@ impl std::fmt::Display for ErreurEnvoi {
             Self::CanalFerme => "canal de données pas ouvert",
             Self::TamponPlein => "tampon d'émission plein",
             Self::EcritureRefusee => "écriture impossible sur le canal",
+            Self::Serialisation => "message impossible à sérialiser",
         })
     }
 }
@@ -189,20 +192,25 @@ impl PeerLink {
         let (socket, locale) = Self::socket_et_candidats(&mut rtc)?;
 
         let mut change = rtc.sdp_api();
-        // Le canal par defaut est ordonne ET fiable : chaque paquet perdu est
-        // retransmis, et tout ce qui suit attend son arrivee. Pour de la video
-        // en direct, c'est le pire choix — mesure sur reseau reel : le temps
-        // d'aller-retour montait de 800 ms a 1600 ms pendant que le debit
-        // s'effondrait a 1 Mbps pour une cible de 10, jusqu'a saturation du
-        // tampon d'emission.
+        // Canal ordonne ET fiable (reglage par defaut de str0m) : il ne porte
+        // plus que des messages de controle, rares et minuscules.
         //
-        // Une image perdue vaut mieux qu'un flux qui prend une seconde de
-        // retard : on retire l'ordre, et on borne la duree de vie d'un paquet a
-        // 150 ms. Au-dela, il n'a plus d'interet — l'image suivante est deja la.
+        // Ce n'etait pas le reglage du jalon 0. La, le canal portait la video,
+        // et un canal fiable etait le pire choix (RTT de 800 a 1600 ms, debit
+        // effondre a 1 Mbps pour une cible de 10, tampon d'emission sature) :
+        // on l'avait rendu non ordonne avec une duree de vie de 150 ms, ce qui
+        // avait fait passer le debit a 12,4 Mbps. La video a quitte ce canal
+        // (piste media) : cette saturation ne peut plus s'y reproduire, puisqu'il
+        // ne porte plus d'images.
+        //
+        // Garder l'ancien reglage ferait perdre definitivement un message
+        // arrive trop tard — un `PartageArrete` jamais reemis laisserait le
+        // spectateur devant un flux fige sans explication. On retransmet donc.
+        // Le cout, non mesure, est la latence d'une retransmission : acceptable
+        // pour des messages emis au plus une fois par seconde.
         change.add_channel_with_config(str0m::channel::ChannelConfig {
             label: CANAL.to_string(),
-            ordered: false,
-            reliability: str0m::channel::Reliability::MaxPacketLifetime { lifetime: 150 },
+            reliability: str0m::channel::Reliability::Reliable,
             ..Default::default()
         });
         let (offer, pending) = change
@@ -609,18 +617,25 @@ impl PeerLink {
     /// est plein — l'appelant décide alors de réessayer ou de laisser tomber le
     /// message.
     pub fn envoyer_controle(&mut self, message: &MessageControle) -> Result<(), ErreurEnvoi> {
-        // Sérialiser une énumération sans donnée ne peut pas échouer.
-        let octets = serde_json::to_vec(message).map_err(|_| ErreurEnvoi::EcritureRefusee)?;
-        self.envoyer_octets_bruts(&octets)
+        // Ne peut pas échouer pour l'énumération actuelle (variantes sans
+        // donnée) ; le cas est nommé pour ce qu'il est si elle évolue.
+        let octets = serde_json::to_vec(message).map_err(|_| ErreurEnvoi::Serialisation)?;
+        self.ecrire(&octets)
     }
 
     /// Écrit des octets tels quels sur le canal de données.
     ///
-    /// TRANSITOIRE : seul le banc de mesure vidéo de `sky-partage` s'en sert
-    /// encore, et il disparaît avec le passage à la piste média (tâche 6). Le
-    /// canal ne porte plus que du contrôle : ne pas y écrire autre chose, le
-    /// récepteur ignorerait tout ce qui n'est pas un `MessageControle`.
+    /// Existe uniquement parce que le banc de mesure vidéo de `sky-partage`
+    /// envoie encore ses morceaux par ce canal. Le canal ne porte plus que du
+    /// contrôle : le récepteur ignore tout ce qui n'est pas un `MessageControle`.
+    #[deprecated(note = "disparaît à la tâche 6 (piste média) : le canal de données \
+                         ne porte plus que des messages de contrôle, utiliser \
+                         `envoyer_controle`")]
     pub fn envoyer_octets_bruts(&mut self, data: &[u8]) -> Result<(), ErreurEnvoi> {
+        self.ecrire(data)
+    }
+
+    fn ecrire(&mut self, data: &[u8]) -> Result<(), ErreurEnvoi> {
         let id = self.canal.ok_or(ErreurEnvoi::CanalFerme)?;
         let mut canal = self.rtc.channel(id).ok_or(ErreurEnvoi::CanalFerme)?;
         let accepte = canal
@@ -1085,6 +1100,7 @@ mod tests {
             if spectateur.canal_ouvert() && hote.canal_ouvert() {
                 return (hote, spectateur);
             }
+            std::thread::sleep(Duration::from_millis(1));
         }
         panic!("le canal ne s'est pas ouvert dans les 10 s");
     }
@@ -1112,6 +1128,33 @@ mod tests {
                     }
                 }
             }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        vus
+    }
+
+    /// Comme `pomper_jusqu_a`, mais attend que `receveur` ait écarté `attendu`
+    /// messages illisibles (ou qu'un `Failed` survienne, ou que `duree` expire).
+    fn pomper_jusqu_a_illisibles(
+        receveur: &mut PeerLink,
+        autre: &mut PeerLink,
+        attendu: u64,
+        duree: Duration,
+    ) -> Vec<LinkEvent> {
+        let limite = Instant::now() + duree;
+        let mut vus = Vec::new();
+        while receveur.messages_illisibles() < attendu && Instant::now() < limite {
+            let _ = autre.poll();
+            if let Ok(e) = receveur.poll() {
+                if !matches!(e, LinkEvent::Idle) {
+                    let echec = matches!(e, LinkEvent::Failed(_));
+                    vus.push(e);
+                    if echec {
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1));
         }
         vus
     }
@@ -1119,25 +1162,12 @@ mod tests {
     #[test]
     fn un_message_illisible_n_interrompt_pas_le_lien() {
         let (mut hote, mut spectateur) = paire_connectee();
-        hote.envoyer_octets_bruts(b"ceci n'est pas du JSON")
-            .expect("envoi");
+        hote.ecrire(b"ceci n'est pas du JSON").expect("envoi");
 
         // Attendre que le message soit réellement arrivé et compté : sans cela,
         // les assertions suivantes passeraient aussi bien s'il s'était perdu.
-        let limite = Instant::now() + Duration::from_secs(5);
-        let mut evenements = Vec::new();
-        while spectateur.messages_illisibles() == 0 && Instant::now() < limite {
-            let _ = hote.poll();
-            if let Ok(e) = spectateur.poll() {
-                if !matches!(e, LinkEvent::Idle) {
-                    let echec = matches!(e, LinkEvent::Failed(_));
-                    evenements.push(e);
-                    if echec {
-                        break;
-                    }
-                }
-            }
-        }
+        let evenements =
+            pomper_jusqu_a_illisibles(&mut spectateur, &mut hote, 1, Duration::from_secs(5));
         assert!(
             !evenements.iter().any(|e| matches!(e, LinkEvent::Failed(_))),
             "un message illisible a fait tomber le lien"
@@ -1156,6 +1186,40 @@ mod tests {
         assert!(suite
             .iter()
             .any(|e| matches!(e, LinkEvent::Controle(MessageControle::DemandeImageCle))));
+    }
+
+    /// Le cas visé par la conception : un JSON PARFAITEMENT VALIDE dont la
+    /// variante est inconnue, tel qu'une version plus récente de l'application
+    /// en enverra. `serde` le refuse (voir `controle.rs`) ; ce test prouve que
+    /// le LIEN, lui, survit à ce refus et continue de livrer.
+    #[test]
+    fn une_variante_inconnue_en_json_valide_n_interrompt_pas_le_lien() {
+        let (mut hote, mut spectateur) = paire_connectee();
+        hote.ecrire(br#""RoucouleDuPigeon""#).expect("envoi");
+
+        let evenements =
+            pomper_jusqu_a_illisibles(&mut spectateur, &mut hote, 1, Duration::from_secs(5));
+        assert!(
+            !evenements.iter().any(|e| matches!(e, LinkEvent::Failed(_))),
+            "une variante inconnue a fait tomber le lien"
+        );
+        assert_eq!(
+            spectateur.messages_illisibles(),
+            1,
+            "la variante inconnue n'est pas arrivée, ou n'a pas été comptée"
+        );
+
+        // Et un message valide passe ENSUITE.
+        hote.envoyer_controle(&MessageControle::PartageArrete)
+            .expect("envoi");
+        let suite = pomper_jusqu_a(&mut spectateur, &mut hote, Duration::from_secs(5));
+        assert!(
+            suite
+                .iter()
+                .any(|e| matches!(e, LinkEvent::Controle(MessageControle::PartageArrete))),
+            "le lien n'a pas livré le message valide envoyé après la variante inconnue"
+        );
+        assert_eq!(spectateur.messages_illisibles(), 1);
     }
 
     #[test]

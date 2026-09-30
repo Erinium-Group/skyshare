@@ -3,7 +3,7 @@
 //! chaque `println!` y est devenu un `Evenement`, chaque `return Ok(())` une
 //! `Fin`, chaque `?` est resté un `?`.
 //!
-//! `WgcCapture::next_frame()` → `NvencEncoder::encode()` → `link.send()`,
+//! `WgcCapture::next_frame()` → `NvencEncoder::encode()` → `link.envoyer_octets_bruts()`,
 //! avec le débit réellement piloté par `Pacer::target_bps()`.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -447,7 +447,9 @@ enum ResultatEnvoi {
 /// de ce banc de test : ffprobe rapportait des « ref POC introuvable » en
 /// cascade dès le premier échec d'envoi ignoré. D'où la relance, et l'arrêt
 /// propre plutôt qu'une mesure sur un flux qu'on sait corrompu.
-#[allow(clippy::too_many_arguments)]
+// `envoyer_octets_bruts` est obsolète (retrait à la tâche 6) : le banc vidéo
+// s'en sert encore tant que la piste média n'existe pas.
+#[allow(clippy::too_many_arguments, deprecated)]
 fn envoyer_ou_abandonner(
     link: &mut PeerLink,
     charge: &[u8],
@@ -472,7 +474,7 @@ fn envoyer_ou_abandonner(
                     *fenetre_echecs += 1;
                 }
                 *fenetre_tentatives += 1;
-                // `link.send` ne fait que déposer le morceau dans le tampon
+                // `envoyer_octets_bruts` ne fait que déposer le morceau dans le tampon
                 // interne de `str0m` : les octets ne partent réellement sur
                 // le socket que pendant `poll()`. Découverte de banc de test :
                 // sans ce drainage après CHAQUE morceau, une rafale de

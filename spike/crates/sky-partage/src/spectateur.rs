@@ -18,10 +18,11 @@ use crate::rendez_vous::{interroger, reponse_a_l_offre, session_de, ATTENTE_SPEC
 
 /// Période d'émission du retour vers l'émetteur.
 ///
-/// Le retour ne prouve plus seulement que le canal fonctionne dans les deux
-/// sens (Tâche 7) : il porte désormais l'horodatage du dernier paquet vidéo
-/// reçu, ce qui permet à l'émetteur de calculer un aller-retour (RTT) réel —
-/// c'est ce dont le `Pacer` de la Tâche 8 se nourrit.
+/// OBSOLÈTE depuis la tâche 5 du jalon 2 : ce retour portait l'horodatage du
+/// dernier paquet vidéo reçu, pour que l'émetteur calcule un aller-retour (RTT)
+/// réel. La vidéo ne passe plus par le canal de données, donc `reception` ne
+/// reçoit plus rien et ce retour n'est plus émis ; il disparaît avec le banc, à
+/// la tâche 6.
 const PERIODE_RETOUR: Duration = Duration::from_millis(200);
 
 /// Où écrire le flux reçu, si quelqu'un le veut.
@@ -139,6 +140,8 @@ pub fn regarder(
 /// La boucle de réception de `cmd_view` (C2), l'écriture du fichier devenue
 /// optionnelle. Les en-têtes de séquence n'étant émis qu'une fois (GOP
 /// infini), le puits reçoit tout depuis le tout premier paquet.
+// `envoyer_octets_bruts` est obsolète (retrait à la tâche 6).
+#[allow(deprecated)]
 fn recevoir(
     link: &mut PeerLink,
     mut puits: Option<Puits>,
