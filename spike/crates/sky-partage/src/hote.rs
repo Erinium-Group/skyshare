@@ -447,8 +447,9 @@ enum ResultatEnvoi {
 /// de ce banc de test : ffprobe rapportait des « ref POC introuvable » en
 /// cascade dès le premier échec d'envoi ignoré. D'où la relance, et l'arrêt
 /// propre plutôt qu'une mesure sur un flux qu'on sait corrompu.
-// `envoyer_octets_bruts` est obsolète (retrait à la tâche 6) : le banc vidéo
-// s'en sert encore tant que la piste média n'existe pas.
+// `envoyer_octets_bruts` est obsolète (retrait à la tâche 8) : la piste média et
+// `PeerLink::ecrire_image` existent depuis la tâche 6, c'est ce banc vidéo qui
+// reste à y migrer.
 #[allow(clippy::too_many_arguments, deprecated)]
 fn envoyer_ou_abandonner(
     link: &mut PeerLink,

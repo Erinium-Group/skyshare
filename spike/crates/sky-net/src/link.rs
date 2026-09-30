@@ -52,6 +52,19 @@ pub enum ErreurEnvoi {
     TamponPlein,
     /// `str0m` a refusé l'écriture.
     EcritureRefusee,
+    /// La file de paquetisation de la piste média est pleine : plus de cent
+    /// images attendent d'être découpées en paquets RTP.
+    ///
+    /// **Récupérable, et c'est tout l'intérêt de la distinguer.** `str0m` vide
+    /// cette file dans `poll_output` : l'appelant doit appeler `poll` puis
+    /// réécrire la même image, pas l'abandonner. C'est le seul refus que la
+    /// sonde du 27/09/2026 ait jamais vu sur ce chemin — et elle ne l'a vu qu'en
+    /// écrivant sans poller ; 0 refus sur 2593 écritures à 12 Mbps et 0 sur
+    /// 21552 à 100 Mbps quand la boucle sert le réseau entre deux images.
+    ///
+    /// Le pendant du canal de données est `TamponPlein`, que `hote.rs` pilote
+    /// déjà de cette façon.
+    TropDImagesEnAttente,
     /// Le message n'a pas pu être sérialisé.
     Serialisation,
     /// La piste média n'est pas encore négociée, ou ne l'est plus.
@@ -74,6 +87,7 @@ impl std::fmt::Display for ErreurEnvoi {
             Self::CanalFerme => "canal de données pas ouvert",
             Self::TamponPlein => "tampon d'émission plein",
             Self::EcritureRefusee => "écriture impossible sur le canal",
+            Self::TropDImagesEnAttente => "trop d'images en attente de paquetisation",
             Self::Serialisation => "message impossible à sérialiser",
             Self::PisteFermee => "piste vidéo pas encore négociée",
             Self::CodecNonNegocie => "aucun codec vidéo commun avec le correspondant",
@@ -131,6 +145,19 @@ pub enum LinkEvent {
         horodatage_ms: u64,
         /// Image clé, au sens du dépaquetiseur HEVC.
         cle: bool,
+        /// Faux dès qu'un paquet RTP a manqué entre l'image précédente et
+        /// celle-ci : le flux a un trou, et cette image ne se décode
+        /// peut-être pas.
+        ///
+        /// **Sans appelant tant que la tâche 9 ne l'a pas branché, et à
+        /// conserver quand même.** Sous GOP infini — un seul IDR pour 901
+        /// images, mesuré au jalon 0 — c'est le SEUL moyen d'apprendre qu'un
+        /// morceau manque et qu'il faut demander une image clé
+        /// (`MessageControle::DemandeImageCle`). Sans lui, le spectateur ne
+        /// découvrirait la perte qu'en échouant à décoder : plus tard, et par la
+        /// cascade de « ref POC introuvable » que `sky-partage/src/hote.rs`
+        /// décrit. Qui le supprimerait comme inutilisé rouvrirait ce trou.
+        sans_perte: bool,
     },
     /// Un message de contrôle est arrivé sur le canal de données.
     Controle(MessageControle),
@@ -260,7 +287,7 @@ impl PeerLink {
 
         let mut change = rtc.sdp_api();
         // Canal ordonne ET fiable (reglage par defaut de str0m), choisi pour
-        // l'usage FUTUR du canal : des messages de controle, rares et minuscules.
+        // l'usage du canal : des messages de controle, rares et minuscules.
         //
         // Ce n'etait pas le reglage du jalon 0. La, le canal portait la video,
         // et un canal fiable etait le pire choix (RTT de 800 a 1600 ms, debit
@@ -268,10 +295,11 @@ impl PeerLink {
         // on l'avait rendu non ordonne avec une duree de vie de 150 ms, ce qui
         // avait fait passer le debit a 12,4 Mbps.
         //
-        // ATTENTION, jusqu'a la tache 6 : ce canal porte ENCORE la video du banc
-        // de sky-partage, par `envoyer_octets_bruts` (API deprecee). Dans cet
-        // intervalle, le pire cas du jalon 0 est donc reproduit sur ce banc.
-        // Il disparait quand la video passera sur une piste media ; ce reglage
+        // ATTENTION, jusqu'a la tache 8 : ce canal porte ENCORE la video du banc
+        // de sky-partage, par `envoyer_octets_bruts` (API deprecee). La piste
+        // media existe depuis la tache 6 et `ecrire_image` est la ; ce sont les
+        // appelants de `hote.rs` qui restent a migrer. Dans cet intervalle, le
+        // pire cas du jalon 0 est donc reproduit sur ce banc. Ce reglage, lui,
         // n'est justifie que par le controle seul.
         //
         // Garder l'ancien reglage ferait perdre definitivement un message
@@ -655,6 +683,7 @@ impl PeerLink {
                             donnees: donnees.data.to_vec(),
                             horodatage_ms: en_millisecondes(donnees.time),
                             cle,
+                            sans_perte: donnees.contiguous,
                         });
                     }
                     _ => {}
@@ -736,9 +765,11 @@ impl PeerLink {
     /// Existe uniquement parce que le banc de mesure vidéo de `sky-partage`
     /// envoie encore ses morceaux par ce canal. Le canal ne porte plus que du
     /// contrôle : le récepteur ignore tout ce qui n'est pas un `MessageControle`.
-    #[deprecated(note = "disparaît à la tâche 6 (piste média) : le canal de données \
-                         ne porte plus que des messages de contrôle, utiliser \
-                         `envoyer_controle`")]
+    #[deprecated(note = "disparaît à la tâche 8 : son remplacement, `ecrire_image`, \
+                         existe depuis la tâche 6 ; ce sont les appelants de \
+                         `sky-partage::hote` qui restent à migrer. Le canal de \
+                         données ne porte plus que des messages de contrôle, \
+                         utiliser `envoyer_controle`")]
     pub fn envoyer_octets_bruts(&mut self, data: &[u8]) -> Result<(), ErreurEnvoi> {
         self.ecrire(data)
     }
@@ -758,12 +789,18 @@ impl PeerLink {
     /// **aucun refus** — 0 sur 2593 écritures à 12 Mbps, 0 sur 21552 à
     /// 100 Mbps.
     ///
-    /// # Le seul refus possible, et comment l'éviter
+    /// # Le seul refus possible, et le geste attendu de l'appelant
     ///
-    /// `str0m` refuse l'écriture au-delà d'une centaine d'images en attente de
-    /// paquetisation (`RtcError::WriteWithoutPoll`). **Appeler `poll` entre deux
-    /// écritures suffit** : c'est lui qui vide la file. Une boucle qui écrit
-    /// sans jamais interroger le lien finirait par se faire refuser.
+    /// `str0m` refuse l'écriture au-delà de cent images en attente de
+    /// paquetisation (`RtcError::WriteWithoutPoll`). Ce refus rend
+    /// **`TropDImagesEnAttente`, et lui seul** : il est récupérable, l'appelant
+    /// doit appeler `poll` — qui vide la file — puis **réécrire la même image**,
+    /// pas l'abandonner. Toute autre erreur rend `EcritureRefusee` et n'a pas de
+    /// relance connue.
+    ///
+    /// Une boucle qui sert le réseau après chaque image ne rencontre jamais ce
+    /// refus ; c'est déjà ce que fait `hote.rs` pour le canal de données, et pour
+    /// une raison mesurée.
     pub fn ecrire_image(&mut self, unite: &[u8], horodatage_ms: u64) -> Result<(), ErreurEnvoi> {
         let mid = self.piste.ok_or(ErreurEnvoi::PisteFermee)?;
         // Avant `writer`, qui emprunte `self.rtc` : `maintenant` emprunte `self`.
@@ -786,7 +823,12 @@ impl PeerLink {
                 MediaTime::from_90khz(horodatage_ms * HORLOGE_RTP / 1000),
                 unite,
             )
-            .map_err(|_| ErreurEnvoi::EcritureRefusee)
+            // La variante est lue, pas le message : celui de `RtcError` peut
+            // porter du SDP, donc des adresses.
+            .map_err(|e| match e {
+                str0m::RtcError::WriteWithoutPoll => ErreurEnvoi::TropDImagesEnAttente,
+                _ => ErreurEnvoi::EcritureRefusee,
+            })
     }
 
     /// Vrai dès que la piste média vidéo est connue du lien.
@@ -936,14 +978,13 @@ impl PeerLink {
 
 /// Horodatage RTP ramené en millisecondes.
 ///
-/// La fréquence est lue sur la valeur reçue plutôt que supposée à 90 kHz : c'est
-/// `str0m` qui la porte, et une erreur de dénominateur passerait inaperçue.
+/// Le changement de base est délégué à `str0m` plutôt que refait à la main : la
+/// fréquence est portée par la valeur reçue au lieu d'être supposée à 90 kHz, et
+/// `rebase` calcule en `i128`, donc sans débordement sur le produit
+/// intermédiaire. Une division écrite ici aurait aussi demandé de se garder d'un
+/// dénominateur nul — garde inutile, `Frequency` étant un `NonZeroU32`.
 fn en_millisecondes(temps: MediaTime) -> u64 {
-    let denominateur = temps.denom() as u64;
-    if denominateur == 0 {
-        return 0;
-    }
-    temps.numer() * 1000 / denominateur
+    temps.rebase(str0m::media::Frequency::MILLIS).numer()
 }
 
 /// Crée l'instance `str0m` et rend l'origine de son temps.
@@ -1464,93 +1505,63 @@ mod tests {
         );
     }
 
-    /// Flux HEVC 4:4:4 mesuré au jalon 0, en Annex-B tel que NVENC l'a produit.
-    /// Chemin relatif à la racine du paquet, où Cargo place le répertoire courant
-    /// d'un test.
-    const FLUX_JALON_0: &str = "../../cmp-hevc-444.h265";
-
-    /// Le code de départ Annex-B suivant : `(son index, l'index du NAL)`.
+    /// La première unité d'accès du flux HEVC 4:4:4 mesuré au jalon 0, en
+    /// Annex-B tel que NVENC l'a produite : jeux de paramètres (VPS, SPS, PPS)
+    /// puis la tranche IDR de la première image. 63 003 octets, une cinquantaine
+    /// de paquets RTP.
     ///
-    /// Les deux longueurs de code sont reconnues : `00 00 01` et `00 00 00 01`.
-    /// Sans quoi l'unité rendue traînerait un octet nul de la précédente.
-    fn prochain_nal(flux: &[u8], depuis: usize) -> Option<(usize, usize)> {
-        let mut i = depuis;
-        while i + 3 <= flux.len() {
-            if flux[i] == 0 && flux[i + 1] == 0 && flux[i + 2] == 1 {
-                let debut_code = if i > 0 && flux[i - 1] == 0 { i - 1 } else { i };
-                return Some((debut_code, i + 3));
-            }
-            i += 1;
-        }
-        None
-    }
-
-    /// La première unité d'accès d'un flux HEVC en Annex-B.
+    /// **Versionnée exprès, et c'est le point.** Le flux complet
+    /// (`spike/cmp-hevc-444.h265`, 17,5 Mo) est exclu par `spike/.gitignore` : un
+    /// test qui en dépendait ne pouvait tourner que sur la machine du
+    /// propriétaire, alors que celui-ci est purement logiciel — il n'a besoin
+    /// d'aucune carte NVIDIA et doit tourner partout, puisqu'il porte la
+    /// démonstration que le transport ne voit pas un profil menteur.
     ///
-    /// Une unité d'accès porte tout ce qui décrit UNE image : ici les jeux de
-    /// paramètres (VPS, SPS, PPS) puis la ou les tranches de la première image.
-    /// Elle s'arrête juste avant la tranche qui ouvre l'image SUIVANTE,
-    /// reconnaissable à son `first_slice_segment_in_pic_flag` — le premier bit
-    /// de la charge utile, l'en-tête de NAL faisant deux octets
-    /// (ITU-T H.265 §7.3.1.2 et §7.3.6.1).
-    fn premiere_unite_acces(flux: &[u8]) -> Vec<u8> {
-        let mut image_ouverte = false;
-        let mut position = 0;
-        while let Some((debut_code, debut_nal)) = prochain_nal(flux, position) {
-            let type_nal = (flux[debut_nal] >> 1) & 0x3F;
-            // Les types 0 à 31 sont les NAL de couche vidéo (les tranches) ;
-            // au-delà, ce sont les jeux de paramètres et les délimiteurs.
-            let est_tranche = type_nal < 32;
-            let ouvre_une_image =
-                est_tranche && flux.get(debut_nal + 2).is_some_and(|o| o & 0x80 != 0);
-            if ouvre_une_image {
-                if image_ouverte {
-                    return flux[..debut_code].to_vec();
-                }
-                image_ouverte = true;
-            }
-            position = debut_nal + 1;
-        }
-        flux.to_vec()
-    }
+    /// Régénérable par `head -c 63003 spike/cmp-hevc-444.h265`, la limite étant
+    /// la tranche qui ouvre l'image suivante (`first_slice_segment_in_pic_flag`,
+    /// ITU-T H.265 §7.3.6.1). SHA-256 :
+    /// `899166c8de5e1508e7721561702eeeab62abdbdf464031bfb49ab95968ca19ef`.
+    ///
+    /// Chemin relatif à la racine du paquet, où Cargo place le répertoire
+    /// courant d'un test.
+    const UNITE_JALON_0: &str = "tests/donnees/premiere-unite-hevc-444.h265";
 
     /// CE QUE CE TEST NE PROUVE PAS — mesuré, pas supposé. Le dépaquetiseur
-    /// RFC 7798 **normalise les codes de départ** : l'unité écrite amputée de son
-    /// premier octet ressort identique à l'originale, parce que `00 00 01` et
-    /// `00 00 00 01` délimitent la même chose et que la sortie porte toujours la
-    /// forme longue. L'égalité vaut donc au niveau des NAL, pas octet pour octet
-    /// sur les délimiteurs. Ce qui la fait rougir, c'est une altération du
+    /// RFC 7798 **normalise les codes de départ** : il reconnaît `00 00 01`
+    /// comme `00 00 00 01` et ré-émet toujours la forme longue. L'unité écrite
+    /// amputée de son premier octet ressort donc identique à l'originale.
+    /// L'égalité ne vaut qu'au niveau des NAL, et elle ne tient octet pour octet
+    /// que parce que cette unité emploie la forme longue partout : si NVENC
+    /// émettait un jour des codes de trois octets, ce test rougirait pour une
+    /// raison bénigne. Ce qui le fait rougir utilement, c'est une altération du
     /// CONTENU d'un NAL — vérifié en retirant le dernier octet.
     #[test]
     fn une_unite_d_acces_traverse_la_piste_intacte() {
-        let (mut hote, mut spectateur) = paire_connectee();
-        let flux = std::fs::read(FLUX_JALON_0).expect("flux du jalon 0");
-        let premiere = premiere_unite_acces(&flux);
+        let (mut hote, mut spectateur) = paire_avec_piste();
+        let premiere = std::fs::read(UNITE_JALON_0).expect("unité d'accès du jalon 0");
         println!("premiere unite d'acces : {} octets", premiere.len());
 
-        // La piste de l'hôte n'existe qu'à `Event::MediaAdded` : `paire_connectee`
-        // n'attend que le canal de données, et une écriture prématurée serait
-        // refusée pour une raison qui n'a rien à voir avec ce qu'on teste.
-        // Délai côté client ici aussi.
-        let limite = Instant::now() + Duration::from_secs(5);
-        while !hote.piste_ouverte() && Instant::now() < limite {
-            let _ = hote.poll();
-            let _ = spectateur.poll();
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert!(
-            hote.piste_ouverte(),
-            "la piste média n'a pas été négociée dans les 5 s"
-        );
+        // Un horodatage NON NUL, et une valeur ronde : c'est ce qui rend
+        // l'assertion discriminante. Avec 0, toute conversion fautive qui rend 0
+        // pour 0 passerait — dénominateur erroné, facteur 90 oublié, numérateur
+        // et dénominateur inversés. N'importe quel nombre entier de
+        // millisecondes est exactement représentable à 90 kHz.
+        const HORODATAGE_ECRIT: u64 = 1234;
 
-        hote.ecrire_image(&premiere, 0).expect("écriture");
+        hote.ecrire_image(&premiere, HORODATAGE_ECRIT)
+            .expect("écriture");
         // Délai côté client : sans lui, une neutralisation figerait la suite au
         // lieu de la faire rougir (leçon du 16/09/2026).
         let recues = pomper_jusqu_a(&mut spectateur, &mut hote, Duration::from_secs(5));
-        let (donnees, cle) = recues
+        let (donnees, horodatage_ms, cle, sans_perte) = recues
             .iter()
             .find_map(|e| match e {
-                LinkEvent::Image { donnees, cle, .. } => Some((donnees, *cle)),
+                LinkEvent::Image {
+                    donnees,
+                    horodatage_ms,
+                    cle,
+                    sans_perte,
+                } => Some((donnees, *horodatage_ms, *cle, *sans_perte)),
                 _ => None,
             })
             .expect("une image doit arriver");
@@ -1559,10 +1570,21 @@ mod tests {
             &donnees[..],
             "l'unité d'accès doit ressortir intacte"
         );
+        assert_eq!(
+            horodatage_ms, HORODATAGE_ECRIT,
+            "l'horodatage doit traverser sans décalage : `str0m` écrit le temps \
+             RTP brut, sans base aléatoire"
+        );
         assert!(
             cle,
             "la première unité d'accès est une image clé : le dépaquetiseur HEVC \
              doit le dire, sinon le drapeau ne vient pas de `CodecExtra::H265`"
+        );
+        assert!(
+            sans_perte,
+            "une seule image écrite en boucle locale : rien n'a pu manquer, donc \
+             `sans_perte` doit être vrai. Faux ici signifierait que le drapeau ne \
+             vient pas de `MediaData::contiguous`"
         );
     }
 
@@ -1585,6 +1607,128 @@ mod tests {
         );
         assert_eq!(
             spectateur.ecrire_image(b"pas encore", 0),
+            Err(ErreurEnvoi::PisteFermee)
+        );
+    }
+
+    /// Amène la paire au point où l'hôte peut écrire : canal ouvert **et** piste
+    /// négociée. `paire_connectee` n'attend que le canal, et la piste n'arrive
+    /// qu'à `Event::MediaAdded`. Délai côté client.
+    fn paire_avec_piste() -> (PeerLink, PeerLink) {
+        let (mut hote, mut spectateur) = paire_connectee();
+        let limite = Instant::now() + Duration::from_secs(5);
+        while !hote.piste_ouverte() && Instant::now() < limite {
+            let _ = hote.poll();
+            let _ = spectateur.poll();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            hote.piste_ouverte(),
+            "la piste média n'a pas été négociée dans les 5 s"
+        );
+        (hote, spectateur)
+    }
+
+    #[test]
+    fn la_file_de_paquetisation_pleine_est_un_refus_recuperable() {
+        // La propriété dont la tâche 8 dépendra : ce refus-là se relance, il ne
+        // s'abandonne pas. Le confondre avec `EcritureRefusee` obligerait
+        // l'appelant à deviner — et sous GOP infini, abandonner une image casse
+        // la chaîne de références pour tout le reste du flux.
+        let (mut hote, mut spectateur) = paire_avec_piste();
+
+        // Une unité d'accès minuscule suffit : ce qu'on remplit est une file
+        // d'images en attente, comptée en images et non en octets. `str0m` refuse
+        // au-delà de cent.
+        let unite = [0x00, 0x00, 0x00, 0x01, 0x26, 0x01, 0xAF, 0x00, 0x00, 0x01];
+        let mut refus = None;
+        for image in 0..200u64 {
+            match hote.ecrire_image(&unite, image) {
+                Ok(()) => {}
+                Err(e) => {
+                    refus = Some((image, e));
+                    break;
+                }
+            }
+        }
+        let (images_acceptees, erreur) = refus.expect(
+            "écrire 200 images sans jamais poller doit finir par être refusé : \
+             sinon la file de str0m ne se remplit pas et ce test ne mesure rien",
+        );
+        println!("refus apres {images_acceptees} images acceptees");
+        assert_eq!(
+            erreur,
+            ErreurEnvoi::TropDImagesEnAttente,
+            "la file pleine doit se distinguer d'un refus fatal"
+        );
+
+        // Et la relance marche : c'est ce qui fait de ce refus un « réessayer »
+        // et non un « abandonner ». Un seul `poll` de l'hôte vide de quoi
+        // reprendre.
+        let _ = hote.poll();
+        let _ = spectateur.poll();
+        hote.ecrire_image(&unite, images_acceptees)
+            .expect("après un poll, la même image doit repartir");
+    }
+
+    #[test]
+    fn un_profil_inconciliable_ferme_la_piste_au_lieu_de_la_laisser_sans_codec() {
+        // L'expérience qui tranche entre les deux refus de `ecrire_image`, au
+        // lieu de supposer lequel se produit. L'offre voyage EN CLAIR : on la
+        // décomprime, on y fausse le palier annoncé pour H265 — `tier-flag=1`
+        // interdit la concordance (RFC 7798 §7.2.2 veut une symétrie exacte)
+        // sans casser la syntaxe —, on recomprime, et on répond à cette offre.
+        // L'identité du spectateur est dédoublée par ses octets : `offrant` la
+        // consomme, et il faut pouvoir desceller la réponse de l'hôte.
+        let secret = Identity::generate().en_octets();
+        let (_spectateur, offre) = PeerLink::offrant(Identity::depuis_octets(&secret)).unwrap();
+        let blob = Blob::from_text(&offre).unwrap();
+        let sdp = crate::handshake::decomprimer(&blob.sealed_sdp).unwrap();
+        let truque = sdp.replace("tier-flag=0", "tier-flag=1");
+        assert_ne!(truque, sdp, "l'offre n'annonçait aucun palier à fausser");
+        let offre_truquee = Blob {
+            session: blob.session,
+            public_key: blob.public_key,
+            sealed_sdp: crate::handshake::comprimer(&truque),
+        }
+        .to_text();
+
+        let (mut hote, reponse) =
+            PeerLink::repondant(Identity::generate(), &offre_truquee).unwrap();
+
+        // L'observation porte sur la RÉPONSE, et non sur un `ecrire_image` après
+        // pompage. Une première version de ce test faisait pomper la paire :
+        // impossible, et pour une raison instructive — l'offrant n'a pas envoyé
+        // l'offre truquée, donc il REFUSE la réponse qui y répond
+        // (`accepter_reponse` rend « elle ne correspond pas à l'offre envoyée »).
+        // Aucune négociation ne peut aboutir ici, et un `PisteFermee` mesuré sans
+        // négociation ne dirait rien de plus que « pas encore » : le test aurait
+        // été vert pour la mauvaise raison.
+        //
+        // La réponse, elle, est ce que l'hôte RETIENT, et elle se lit tout de
+        // suite. MESURÉ : elle ne décrit plus H265 du tout — `str0m` écarte la
+        // ligne de média entière quand aucun profil ne concorde, plutôt que de la
+        // garder sans codec. `Event::MediaAdded` ne peut donc jamais partir
+        // (`change/sdp.rs`, `need_open_event = is_offer && !is_rejected`) et le
+        // refus d'`ecrire_image` reste `PisteFermee`.
+        //
+        // Conclusion sur `CodecNonNegocie` : une divergence de profil ne l'atteint
+        // pas — c'est désormais mesuré, plus supposé. Il faudrait un pair qui
+        // conserve la ligne en n'y laissant qu'un type de charge que nous ne
+        // portons pas. La variante reste sans test, et son commentaire le dit.
+        let spectateur_id = Identity::depuis_octets(&secret);
+        let blob_reponse = Blob::from_text(&reponse).unwrap();
+        let sdp_reponse =
+            crate::handshake::decomprimer(&spectateur_id.open(&blob_reponse.sealed_sdp).unwrap())
+                .unwrap();
+        assert!(
+            !sdp_reponse.contains("H265"),
+            "la réponse décrit encore H265 : str0m aurait gardé la ligne de média \
+             sans codec commun, et `CodecNonNegocie` serait alors atteignable"
+        );
+        assert!(!hote.piste_ouverte());
+        assert_eq!(
+            hote.ecrire_image(b"rien a negocier", 0),
             Err(ErreurEnvoi::PisteFermee)
         );
     }

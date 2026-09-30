@@ -8,3 +8,9 @@ cmp-reference.bgra
 test.h265
 psnr_*.log
 ssim_*.log
+
+# Exception : les donnees de test versionnees. Ce ne sont pas des flux produits
+# par sky-probe mais des extraits minuscules, indispensables pour qu'un clone
+# neuf puisse lancer les tests. Voir crates/sky-net/tests/donnees/.
+!crates/*/tests/donnees/*.h265
+!crates/*/tests/donnees/*.h264

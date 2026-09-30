@@ -1,0 +1,6 @@
+# Ce dépôt a `core.autocrlf=true`, et il n'a pas de `.gitattributes` global.
+# L'heuristique de git reconnaîtrait sans doute ces flux comme binaires grâce à
+# leurs octets nuls, mais le dépôt a déjà été mordu cinq fois par les fins de
+# ligne : on ne laisse pas la reconnaissance décider d'un fichier dont le test
+# compare les octets un par un.
+*.h265 -text
