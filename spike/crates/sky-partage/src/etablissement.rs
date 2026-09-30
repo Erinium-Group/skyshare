@@ -32,7 +32,14 @@ pub fn etablir(link: &mut PeerLink, arret: &Arret) -> anyhow::Result<Etablisseme
         }
         match link.poll()? {
             LinkEvent::Failed(raison) => return Ok(Etablissement::Rompu(raison)),
-            LinkEvent::Connected | LinkEvent::Controle(_) | LinkEvent::Idle => {}
+            // Une image arrivée pendant l'établissement est jetée : rien ne
+            // l'affiche encore, et surtout le correspondant ne peut pas en avoir
+            // envoyé une utile avant que le canal soit ouvert. La liste reste
+            // exhaustive, sans joker : une variante de plus doit casser ici.
+            LinkEvent::Connected
+            | LinkEvent::Controle(_)
+            | LinkEvent::Image { .. }
+            | LinkEvent::Idle => {}
         }
         // Le canal de données, pas seulement ICE : c'est lui qui transporte.
         if link.canal_ouvert() {
