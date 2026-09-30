@@ -13,7 +13,6 @@ use sky_net::{LinkEvent, PeerLink};
 use crate::arret::{synchroniser_sauf_arret, Arret, ErreurAttente, HorlogeArretable};
 use crate::etablissement::{etablir, Etablissement};
 use crate::evenement::{Bilan, BilanReception, ErreurPartage, Evenement, Fin, Mesures};
-use crate::hote::epoch_us;
 use crate::reception::Reception;
 use crate::rendez_vous::{interroger, reponse_a_l_offre, session_de, ATTENTE_SPECTATEUR, CADENCE};
 
@@ -162,24 +161,17 @@ fn recevoir(
         if duree_max.is_some_and(|d| t0.elapsed() >= d) {
             break;
         }
-        match link.poll()? {
-            LinkEvent::Data(d) => {
-                if let Some(charge) = reception.absorber(&d, epoch_us()) {
-                    if let Some(p) = puits.as_mut() {
-                        p.write_all(charge).map_err(anyhow::Error::from)?;
-                    }
-                }
-            }
-            LinkEvent::Failed(raison) => {
-                vider(&mut puits);
-                return Ok(Fin::LienTombe(raison));
-            }
-            _ => {}
+        // TRANSITOIRE (jalon 2, tâche 5) : la vidéo ne passe plus par le canal
+        // de données, donc plus rien n'alimente `reception` ni le puits jusqu'à
+        // la piste média de la tâche 6.
+        if let LinkEvent::Failed(raison) = link.poll()? {
+            vider(&mut puits);
+            return Ok(Fin::LienTombe(raison));
         }
 
         if dernier_retour.elapsed() >= PERIODE_RETOUR {
             if let Some(h) = reception.dernier_horodatage_emission() {
-                let _ = link.send(&h.to_le_bytes());
+                let _ = link.envoyer_octets_bruts(&h.to_le_bytes());
             }
             dernier_retour = Instant::now();
         }

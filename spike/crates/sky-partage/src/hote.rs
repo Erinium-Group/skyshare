@@ -406,26 +406,18 @@ fn diffuser(
 /// pour pourquoi la fréquence d'appel compte ici.
 ///
 /// Rend `Some(raison)` si le lien est tombé ; l'appelant doit alors arrêter.
+///
+/// TRANSITOIRE (jalon 2, tâche 5) : le canal de données ne porte plus que des
+/// messages de contrôle, donc l'écho d'horodatage qui alimentait le RTT n'arrive
+/// plus. Les trois compteurs ne bougent plus jusqu'à la tâche 6, qui remplace ce
+/// banc par la piste média.
 fn servir_reseau(
     link: &mut PeerLink,
-    retours: &mut u64,
-    dernier_rtt_ms: &mut f64,
-    echantillons_rtt: &mut Vec<f64>,
+    _retours: &mut u64,
+    _dernier_rtt_ms: &mut f64,
+    _echantillons_rtt: &mut Vec<f64>,
 ) -> anyhow::Result<Option<String>> {
     match link.poll()? {
-        LinkEvent::Data(d) => {
-            *retours += 1;
-            if let Ok(brut) = <[u8; 8]>::try_from(d.as_slice()) {
-                let echo = u64::from_le_bytes(brut);
-                let maintenant_us = epoch_us();
-                if maintenant_us >= echo {
-                    let rtt_ms = (maintenant_us - echo) as f64 / 1000.0;
-                    *dernier_rtt_ms = rtt_ms;
-                    echantillons_rtt.push(rtt_ms);
-                }
-            }
-            Ok(None)
-        }
         LinkEvent::Failed(raison) => Ok(Some(raison)),
         _ => Ok(None),
     }
@@ -470,7 +462,7 @@ fn envoyer_ou_abandonner(
     let debut = Instant::now();
     let mut retente = false;
     loop {
-        match link.send(charge) {
+        match link.envoyer_octets_bruts(charge) {
             Ok(()) => {
                 *envoyes_octets += charge.len() as u64;
                 if retente {

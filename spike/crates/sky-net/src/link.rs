@@ -37,8 +37,32 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 
 use sky_crypto::Identity;
 
+use crate::controle::MessageControle;
 use crate::handshake::Blob;
 use crate::stun;
+
+/// Pourquoi un message n'a pas pu partir. Messages fixes : aucune adresse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErreurEnvoi {
+    /// Le canal de données n'est pas (ou plus) ouvert.
+    CanalFerme,
+    /// Le tampon d'émission est plein : l'appelant réessaie ou renonce.
+    TamponPlein,
+    /// `str0m` a refusé l'écriture.
+    EcritureRefusee,
+}
+
+impl std::fmt::Display for ErreurEnvoi {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::CanalFerme => "canal de données pas ouvert",
+            Self::TamponPlein => "tampon d'émission plein",
+            Self::EcritureRefusee => "écriture impossible sur le canal",
+        })
+    }
+}
+
+impl std::error::Error for ErreurEnvoi {}
 
 /// Étiquette du canal de données. Une seule pour tout le spike.
 const CANAL: &str = "sky";
@@ -50,8 +74,8 @@ const TAILLE_DATAGRAMME: usize = 2000;
 pub enum LinkEvent {
     /// ICE a trouvé un chemin et DTLS est établi.
     Connected,
-    /// Des octets sont arrivés sur le canal de données.
-    Data(Vec<u8>),
+    /// Un message de contrôle est arrivé sur le canal de données.
+    Controle(MessageControle),
     /// Rien de neuf ; rappeler `poll` sous peu.
     Idle,
     /// Le lien est perdu ou n'a jamais pu s'établir. Message déjà rédigé pour
@@ -119,6 +143,11 @@ pub struct PeerLink {
     /// Verrouille par `le_repondant_connait_les_cibles_des_sa_construction`.
     cibles_pair: Vec<SocketAddr>,
     paquets_recus: u64,
+    /// Messages arrivés sur le canal de données sans être un message de
+    /// contrôle connu. Ignorés, jamais propagés : une version plus récente de
+    /// l'application en enverra que celle-ci ne comprend pas, et couper le lien
+    /// pour cela serait un défaut.
+    messages_illisibles: u64,
     /// Origine du temps tel que `str0m` le voit.
     horloge: Instant,
     /// Instant réel du premier `poll`. Voir `maintenant`.
@@ -209,6 +238,7 @@ impl PeerLink {
                 en_attente: Vec::new(),
                 cibles_pair: Vec::new(),
                 paquets_recus: 0,
+                messages_illisibles: 0,
                 horloge,
                 depart: None,
             },
@@ -270,6 +300,7 @@ impl PeerLink {
                 en_attente: Vec::new(),
                 cibles_pair,
                 paquets_recus: 0,
+                messages_illisibles: 0,
                 horloge,
                 depart: None,
             },
@@ -503,7 +534,12 @@ impl PeerLink {
                         }
                     }
                     Event::ChannelOpen(id, _) => self.canal = Some(id),
-                    Event::ChannelData(d) => return Ok(LinkEvent::Data(d.data)),
+                    Event::ChannelData(d) => match serde_json::from_slice(&d.data) {
+                        Ok(message) => return Ok(LinkEvent::Controle(message)),
+                        // Illisible : on compte, on ne décrit pas (le contenu
+                        // vient du pair) et on poursuit le vidage des sorties.
+                        Err(_) => self.messages_illisibles += 1,
+                    },
                     Event::ChannelClose(_) => self.canal = None,
                     _ => {}
                 },
@@ -567,26 +603,39 @@ impl PeerLink {
         Ok(LinkEvent::Idle)
     }
 
-    /// Écrit sur le canal de données.
+    /// Envoie un message de contrôle sur le canal de données.
     ///
     /// Échoue tant que le canal n'est pas ouvert, et quand le tampon d'émission
-    /// est plein — l'appelant décide alors de réessayer ou de laisser tomber la
-    /// donnée.
-    pub fn send(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        let id = self
-            .canal
-            .ok_or_else(|| anyhow!("canal de données pas encore ouvert"))?;
-        let mut canal = self
-            .rtc
-            .channel(id)
-            .ok_or_else(|| anyhow!("canal de données fermé"))?;
+    /// est plein — l'appelant décide alors de réessayer ou de laisser tomber le
+    /// message.
+    pub fn envoyer_controle(&mut self, message: &MessageControle) -> Result<(), ErreurEnvoi> {
+        // Sérialiser une énumération sans donnée ne peut pas échouer.
+        let octets = serde_json::to_vec(message).map_err(|_| ErreurEnvoi::EcritureRefusee)?;
+        self.envoyer_octets_bruts(&octets)
+    }
+
+    /// Écrit des octets tels quels sur le canal de données.
+    ///
+    /// TRANSITOIRE : seul le banc de mesure vidéo de `sky-partage` s'en sert
+    /// encore, et il disparaît avec le passage à la piste média (tâche 6). Le
+    /// canal ne porte plus que du contrôle : ne pas y écrire autre chose, le
+    /// récepteur ignorerait tout ce qui n'est pas un `MessageControle`.
+    pub fn envoyer_octets_bruts(&mut self, data: &[u8]) -> Result<(), ErreurEnvoi> {
+        let id = self.canal.ok_or(ErreurEnvoi::CanalFerme)?;
+        let mut canal = self.rtc.channel(id).ok_or(ErreurEnvoi::CanalFerme)?;
         let accepte = canal
             .write(true, data)
-            .map_err(|_| anyhow!("écriture impossible sur le canal"))?;
+            .map_err(|_| ErreurEnvoi::EcritureRefusee)?;
         if !accepte {
-            return Err(anyhow!("tampon d'émission plein"));
+            return Err(ErreurEnvoi::TamponPlein);
         }
         Ok(())
+    }
+
+    /// Nombre de messages reçus sur le canal de données et ignorés faute d'être
+    /// un message de contrôle connu.
+    pub fn messages_illisibles(&self) -> u64 {
+        self.messages_illisibles
     }
 
     /// Vrai dès qu'ICE a trouvé un chemin — c'est-à-dire dès que le perçage de
@@ -1017,6 +1066,118 @@ mod tests {
             offre.len() < BORNE_BLOC_REEL,
             "offre de {} caracteres pour une borne de {BORNE_BLOC_REEL} : le SDP n'est-il plus comprime ?",
             offre.len()
+        );
+    }
+
+    use std::time::Duration;
+
+    /// Deux liens en boucle locale, canal ouvert des deux côtés : `(hôte,
+    /// spectateur)`. Même montage que `le_spectateur_offre_et_l_hote_repond`.
+    fn paire_connectee() -> (PeerLink, PeerLink) {
+        let (mut spectateur, offre) = PeerLink::offrant(Identity::generate()).unwrap();
+        let (mut hote, reponse) = PeerLink::repondant(Identity::generate(), &offre).unwrap();
+        spectateur.accepter_reponse(&reponse).unwrap();
+
+        let limite = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < limite {
+            let _ = spectateur.poll();
+            let _ = hote.poll();
+            if spectateur.canal_ouvert() && hote.canal_ouvert() {
+                return (hote, spectateur);
+            }
+        }
+        panic!("le canal ne s'est pas ouvert dans les 10 s");
+    }
+
+    /// Fait tourner les deux liens jusqu'au premier message de contrôle reçu par
+    /// `receveur`, ou jusqu'à l'expiration de `duree`, et rend ce que `receveur` a
+    /// vu (hors `Idle`). Le délai est côté client : sans lui, un correspondant qui
+    /// ne répond plus ferait figer la suite au lieu de la faire rougir.
+    fn pomper_jusqu_a(
+        receveur: &mut PeerLink,
+        autre: &mut PeerLink,
+        duree: Duration,
+    ) -> Vec<LinkEvent> {
+        let limite = Instant::now() + duree;
+        let mut vus = Vec::new();
+        while Instant::now() < limite {
+            let _ = autre.poll();
+            match receveur.poll() {
+                Ok(LinkEvent::Idle) | Err(_) => {}
+                Ok(evenement) => {
+                    let fini = matches!(evenement, LinkEvent::Controle(_) | LinkEvent::Failed(_));
+                    vus.push(evenement);
+                    if fini {
+                        break;
+                    }
+                }
+            }
+        }
+        vus
+    }
+
+    #[test]
+    fn un_message_illisible_n_interrompt_pas_le_lien() {
+        let (mut hote, mut spectateur) = paire_connectee();
+        hote.envoyer_octets_bruts(b"ceci n'est pas du JSON")
+            .expect("envoi");
+
+        // Attendre que le message soit réellement arrivé et compté : sans cela,
+        // les assertions suivantes passeraient aussi bien s'il s'était perdu.
+        let limite = Instant::now() + Duration::from_secs(5);
+        let mut evenements = Vec::new();
+        while spectateur.messages_illisibles() == 0 && Instant::now() < limite {
+            let _ = hote.poll();
+            if let Ok(e) = spectateur.poll() {
+                if !matches!(e, LinkEvent::Idle) {
+                    let echec = matches!(e, LinkEvent::Failed(_));
+                    evenements.push(e);
+                    if echec {
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            !evenements.iter().any(|e| matches!(e, LinkEvent::Failed(_))),
+            "un message illisible a fait tomber le lien"
+        );
+        assert_eq!(
+            spectateur.messages_illisibles(),
+            1,
+            "le message illisible n'est pas arrivé"
+        );
+
+        // Et le lien accepte encore un message valide ensuite.
+        hote.envoyer_controle(&MessageControle::DemandeImageCle)
+            .expect("envoi");
+        let suite = pomper_jusqu_a(&mut spectateur, &mut hote, Duration::from_secs(5));
+        assert!(!suite.iter().any(|e| matches!(e, LinkEvent::Failed(_))));
+        assert!(suite
+            .iter()
+            .any(|e| matches!(e, LinkEvent::Controle(MessageControle::DemandeImageCle))));
+    }
+
+    #[test]
+    fn un_message_de_controle_traverse_le_lien_dans_le_sens_spectateur_vers_hote() {
+        // C'est le sens réel de la demande d'image clé : le spectateur la formule.
+        let (mut hote, mut spectateur) = paire_connectee();
+        spectateur
+            .envoyer_controle(&MessageControle::DemandeImageCle)
+            .expect("envoi");
+        let vus = pomper_jusqu_a(&mut hote, &mut spectateur, Duration::from_secs(5));
+        assert!(vus
+            .iter()
+            .any(|e| matches!(e, LinkEvent::Controle(MessageControle::DemandeImageCle))));
+        assert_eq!(hote.messages_illisibles(), 0);
+    }
+
+    #[test]
+    fn envoyer_avant_l_ouverture_du_canal_est_refuse() {
+        let (mut offrant, _) = PeerLink::offrant(Identity::generate()).unwrap();
+        assert_eq!(
+            offrant.envoyer_controle(&MessageControle::PartageArrete),
+            Err(ErreurEnvoi::CanalFerme)
         );
     }
 

@@ -32,7 +32,7 @@ pub fn etablir(link: &mut PeerLink, arret: &Arret) -> anyhow::Result<Etablisseme
         }
         match link.poll()? {
             LinkEvent::Failed(raison) => return Ok(Etablissement::Rompu(raison)),
-            LinkEvent::Connected | LinkEvent::Data(_) | LinkEvent::Idle => {}
+            LinkEvent::Connected | LinkEvent::Controle(_) | LinkEvent::Idle => {}
         }
         // Le canal de données, pas seulement ICE : c'est lui qui transporte.
         if link.canal_ouvert() {
