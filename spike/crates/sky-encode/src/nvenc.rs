@@ -37,11 +37,11 @@ use nvidia_video_codec_sdk::sys::nvEncodeAPI::{
     NV_ENC_HEVC_PROFILE_FREXT_GUID, NV_ENC_INITIALIZE_PARAMS, NV_ENC_INITIALIZE_PARAMS_VER,
     NV_ENC_INPUT_RESOURCE_TYPE, NV_ENC_LOCK_BITSTREAM, NV_ENC_LOCK_BITSTREAM_VER,
     NV_ENC_MAP_INPUT_RESOURCE, NV_ENC_MAP_INPUT_RESOURCE_VER, NV_ENC_MULTI_PASS,
-    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS,
-    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER, NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_FLAGS,
-    NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT, NV_ENC_PIC_TYPE,
-    NV_ENC_PRESET_CONFIG, NV_ENC_PRESET_CONFIG_VER, NV_ENC_PRESET_P4_GUID,
-    NV_ENC_REGISTER_RESOURCE, NV_ENC_REGISTER_RESOURCE_VER, NV_ENC_TUNING_INFO,
+    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS, NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
+    NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_VER,
+    NV_ENC_PIC_STRUCT, NV_ENC_PIC_TYPE, NV_ENC_PRESET_CONFIG, NV_ENC_PRESET_CONFIG_VER,
+    NV_ENC_PRESET_P4_GUID, NV_ENC_REGISTER_RESOURCE, NV_ENC_REGISTER_RESOURCE_VER,
+    NV_ENC_SEQUENCE_PARAM_PAYLOAD, NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER, NV_ENC_TUNING_INFO,
     NV_ENC_VUI_COLOR_PRIMARIES, NV_ENC_VUI_MATRIX_COEFFS, NV_ENC_VUI_TRANSFER_CHARACTERISTIC,
     NV_ENC_VUI_VIDEO_FORMAT,
 };
@@ -86,6 +86,9 @@ pub struct NvencEncoder {
     width: u32,
     height: u32,
     frame_index: u64,
+    /// Levé par [`NvencEncoder::forcer_image_cle`], rabaissé par l'encodage
+    /// qui le consomme : la demande vaut pour la prochaine image seulement.
+    cle_demandee: bool,
 }
 
 impl NvencEncoder {
@@ -131,6 +134,7 @@ impl NvencEncoder {
             width,
             height,
             frame_index: 0,
+            cle_demandee: false,
         };
         enc.initialiser(fps, bitrate_bps)?;
         Ok(enc)
@@ -339,6 +343,52 @@ impl NvencEncoder {
         }))
     }
 
+    /// Les en-têtes de séquence (VPS, SPS et PPS en HEVC), en Annex-B.
+    ///
+    /// À placer **en tête du flux d'un spectateur, avant la première image qu'on
+    /// lui envoie** : sous GOP infini l'encodeur n'émet ces en-têtes qu'avec le
+    /// tout premier IDR, que le spectateur n'a jamais reçu s'il arrive après. Sans
+    /// eux le décodeur refuse le flux entier et l'écran reste noir.
+    ///
+    /// Ne dépend d'aucune image : peut être appelé dès la création de l'encodeur,
+    /// et autant de fois qu'il y a de spectateurs.
+    pub fn entetes_de_sequence(&self) -> anyhow::Result<Vec<u8>> {
+        // Trois en-têtes HEVC tiennent en quelques dizaines d'octets ; 1024
+        // laisse de la marge, et NVENC échoue plutôt que de déborder.
+        const TAILLE_TAMPON: usize = 1024;
+
+        let get_params = nvenc_fn!(self.api, nvEncGetSequenceParams);
+        let mut tampon = vec![0u8; TAILLE_TAMPON];
+        let mut ecrits: u32 = 0;
+        let mut charge = NV_ENC_SEQUENCE_PARAM_PAYLOAD {
+            version: NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER,
+            inBufferSize: TAILLE_TAMPON as u32,
+            spsppsBuffer: tampon.as_mut_ptr().cast(),
+            outSPSPPSPayloadSize: &mut ecrits,
+            ..Default::default()
+        };
+        nvenc_sys::check(unsafe { get_params(self.encoder, &mut charge) })
+            .with_context(|| format!("nvEncGetSequenceParams : {}", self.derniere_erreur()))?;
+
+        anyhow::ensure!(
+            ecrits > 0 && ecrits as usize <= TAILLE_TAMPON,
+            "nvEncGetSequenceParams a rendu {ecrits} octets pour un tampon de {TAILLE_TAMPON}"
+        );
+        tampon.truncate(ecrits as usize);
+        Ok(tampon)
+    }
+
+    /// Fait de la **prochaine** image encodée un IDR, précédé de ses en-têtes.
+    ///
+    /// À appeler quand un spectateur demande un point de reprise par le canal
+    /// de contrôle, puis à continuer la boucle d'envoi normalement : l'image
+    /// suivante sort en `is_keyframe`, et le drapeau retombe ensuite de lui-même.
+    /// Plusieurs appels avant l'encodage suivant n'en font qu'un : c'est voulu,
+    /// dix spectateurs qui arrivent ensemble ne coûtent qu'un IDR.
+    pub fn forcer_image_cle(&mut self) {
+        self.cle_demandee = true;
+    }
+
     /// Enregistre la texture auprès de NVENC. Aucune copie : NVENC prend une
     /// référence sur la surface Direct3D telle qu'elle est en mémoire vidéo.
     fn enregistrer(&self, texture: &ID3D11Texture2D) -> anyhow::Result<*mut c_void> {
@@ -392,8 +442,17 @@ impl NvencEncoder {
     /// libération des ressources.
     fn encoder_mappee(&mut self, mappee: *mut c_void) -> anyhow::Result<(Vec<u8>, bool)> {
         let encode_picture = nvenc_fn!(self.api, nvEncEncodePicture);
+        // Une image clé demandée devient un IDR accompagné de ses en-têtes :
+        // un point de reprise n'en est un que si le décodeur peut l'ouvrir.
+        let drapeaux = if std::mem::take(&mut self.cle_demandee) {
+            NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_FORCEIDR as u32
+                | NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_OUTPUT_SPSPPS as u32
+        } else {
+            0
+        };
         let mut pic = NV_ENC_PIC_PARAMS {
             version: NV_ENC_PIC_PARAMS_VER,
+            encodePicFlags: drapeaux,
             inputWidth: self.width,
             inputHeight: self.height,
             inputPitch: self.width,
@@ -543,5 +602,176 @@ fn parametres_codec(codec: Codec) -> (GUID, GUID, u32) {
         Codec::H264_444 => (NV_ENC_CODEC_H264_GUID, NV_ENC_H264_PROFILE_HIGH_444_GUID, 3),
         Codec::Hevc444 => (NV_ENC_CODEC_HEVC_GUID, NV_ENC_HEVC_PROFILE_FREXT_GUID, 3),
         Codec::Av1_420 => (NV_ENC_CODEC_AV1_GUID, NV_ENC_AV1_PROFILE_MAIN_GUID, 1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11CreateDevice, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
+        D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_DEFAULT,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+    const LARGEUR: u32 = 1280;
+    const HAUTEUR: u32 = 720;
+
+    /// Un encodeur HEVC 4:4:4 et l'image à lui donner, ou l'erreur qui empêche
+    /// de les fabriquer (pas de carte NVIDIA, pas de périphérique matériel).
+    /// Les tests en sortent alors sans rien prouver, comme ceux de `sky-decode`
+    /// sur une machine sans décodeur : c'est la seule issue honnête sans GPU.
+    ///
+    /// Sans fenêtre ni capture : le périphérique et la texture sont fabriqués
+    /// ici, et l'image est tenue avec l'encodeur parce qu'elle doit venir du
+    /// même périphérique que lui.
+    fn encodeur_de_test() -> anyhow::Result<(NvencEncoder, CapturedFrame)> {
+        let mut peripherique: Option<ID3D11Device> = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                windows::Win32::Foundation::HMODULE::default(),
+                D3D11_CREATE_DEVICE_FLAG(0),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut peripherique),
+                None,
+                None,
+            )
+        }
+        .context("D3D11CreateDevice")?;
+        let peripherique = peripherique.ok_or_else(|| anyhow!("aucun périphérique rendu"))?;
+
+        let encodeur = NvencEncoder::new(
+            &peripherique,
+            Codec::Hevc444,
+            LARGEUR,
+            HAUTEUR,
+            60,
+            20_000_000,
+        )?;
+        let image = image_de_test(&peripherique)?;
+        Ok((encodeur, image))
+    }
+
+    /// Un dégradé : assez de matière pour que l'encodeur ait quelque chose à
+    /// coder, sans quoi les images suivantes se réduiraient à presque rien.
+    fn image_de_test(peripherique: &ID3D11Device) -> anyhow::Result<CapturedFrame> {
+        let mut pixels = vec![0u8; (LARGEUR * HAUTEUR * 4) as usize];
+        for y in 0..HAUTEUR {
+            for x in 0..LARGEUR {
+                let i = ((y * LARGEUR + x) * 4) as usize;
+                pixels[i] = (x % 256) as u8; // B
+                pixels[i + 1] = (y % 256) as u8; // G
+                pixels[i + 2] = ((x + y) % 256) as u8; // R
+                pixels[i + 3] = 255; // A
+            }
+        }
+        let description = D3D11_TEXTURE2D_DESC {
+            Width: LARGEUR,
+            Height: HAUTEUR,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let donnees = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr().cast(),
+            SysMemPitch: LARGEUR * 4,
+            SysMemSlicePitch: 0,
+        };
+        let mut texture: Option<ID3D11Texture2D> = None;
+        unsafe { peripherique.CreateTexture2D(&description, Some(&donnees), Some(&mut texture)) }
+            .context("CreateTexture2D")?;
+        Ok(CapturedFrame {
+            texture: texture.ok_or_else(|| anyhow!("aucune texture rendue"))?,
+            width: LARGEUR,
+            height: HAUTEUR,
+            captured_at: Instant::now(),
+        })
+    }
+
+    /// Types de NAL HEVC de tous les codes de départ `00 00 01` du flux (un code
+    /// de départ sur quatre octets `00 00 00 01` en contient un sur trois).
+    /// VPS = 32, SPS = 33, PPS = 34. Le type occupe les six bits de poids fort
+    /// de l'octet qui suit le code, le bit de poids fort étant toujours nul.
+    fn types_de_nal(flux: &[u8]) -> Vec<u8> {
+        let mut types = Vec::new();
+        let mut i = 0;
+        while i + 3 < flux.len() {
+            if flux[i] == 0 && flux[i + 1] == 0 && flux[i + 2] == 1 {
+                types.push((flux[i + 3] >> 1) & 0x3f);
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        types
+    }
+
+    /// Un IDR en HEVC porte le type de NAL 19 (IDR_W_RADL) ou 20 (IDR_N_LP).
+    fn contient_idr(flux: &[u8]) -> bool {
+        types_de_nal(flux).iter().any(|t| *t == 19 || *t == 20)
+    }
+
+    #[test]
+    fn les_entetes_de_sequence_contiennent_vps_sps_et_pps() {
+        let Ok((encodeur, _)) = encodeur_de_test() else {
+            return;
+        };
+        let entetes = encodeur.entetes_de_sequence().expect("en-têtes");
+        let types = types_de_nal(&entetes);
+        assert!(types.contains(&32), "VPS absent : {types:?}");
+        assert!(types.contains(&33), "SPS absent : {types:?}");
+        assert!(types.contains(&34), "PPS absent : {types:?}");
+    }
+
+    #[test]
+    fn forcer_une_image_cle_produit_un_idr_a_l_image_suivante() {
+        let Ok((mut encodeur, image)) = encodeur_de_test() else {
+            return;
+        };
+        // Une première image, qui est déjà un IDR.
+        let _ = encodeur.encode(&image).expect("première image");
+        // Une deuxième, qui ne doit PAS l'être — c'est ce qui rend le test
+        // discriminant : sans cette assertion, `forcer_image_cle` pourrait ne rien
+        // faire et le test passerait quand même.
+        let ordinaire = encodeur
+            .encode(&image)
+            .expect("deuxième image")
+            .expect("un paquet");
+        assert!(
+            !contient_idr(&ordinaire.data),
+            "la deuxième image ne devrait pas être un IDR"
+        );
+
+        encodeur.forcer_image_cle();
+        let forcee = encodeur
+            .encode(&image)
+            .expect("troisième image")
+            .expect("un paquet");
+        assert!(
+            contient_idr(&forcee.data),
+            "l'image forcée doit être un IDR"
+        );
+        // Le drapeau est rabaissé : l'image d'après redevient ordinaire.
+        let suivante = encodeur
+            .encode(&image)
+            .expect("quatrième image")
+            .expect("un paquet");
+        assert!(
+            !contient_idr(&suivante.data),
+            "le drapeau doit être rabaissé après une image"
+        );
     }
 }

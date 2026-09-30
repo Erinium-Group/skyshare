@@ -69,20 +69,9 @@ pub enum EncodeError {
     Cuda(#[from] cudarc::driver::DriverError),
 
     #[error(
-        "cette machine n'a pas d'encodeur NVIDIA.
-         
-         La bibliotheque nvEncodeAPI64.dll est installee avec le pilote NVIDIA :
-         son absence signifie qu'il n'y a pas de carte NVIDIA, ou que le pilote
-         n'est pas installe.
-         
-         La connexion reseau, elle, fonctionne : c'est l'encodage video qui ne
-         peut pas demarrer ici. Utilise l'autre machine comme emetteur et
-         celle-ci comme spectateur.
-         
-         (Le spike n'implemente que NVENC. Le repli logiciel x264 prevu par le
-          document d'architecture arrive au jalon 2.)
-         
-         Detail technique : {0}"
+        "Cette machine n'a pas de carte graphique NVIDIA. SkyShare ne peut ni \
+         partager son écran ni en recevoir un sur cette machine.\n\n\
+         Détail technique : {0}"
     )]
     Dll(#[from] libloading::Error),
 
@@ -110,7 +99,36 @@ use crate::nvenc_sys::{self, NvencApi};
 /// brute des GUID/formats) vit dans [`crate::nvenc_sys`] — partagée avec la
 /// future session d'encodage D3D11. Ici, on ne fait qu'ouvrir une session sur
 /// le device CUDA et traduire les GUID + formats bruts en [`Codec`].
+///
+/// Sans pilote NVIDIA, rend [`EncodeError::Dll`] au lieu de paniquer.
 pub fn probe_hardware() -> Result<EncoderCaps, EncodeError> {
+    probe_hardware_avec(PILOTE_CUDA_DLL)
+}
+
+/// Bibliothèque du pilote CUDA, installée avec le pilote NVIDIA.
+const PILOTE_CUDA_DLL: &str = "nvcuda.dll";
+
+/// Vérifie qu'une bibliothèque se charge, recherchée dans `System32` seulement
+/// (contre le « DLL planting »). Le nom est un paramètre pour que le cas
+/// d'absence soit testable sur une machine NVIDIA.
+fn verifier_bibliotheque(nom: &str) -> Result<(), EncodeError> {
+    use libloading::os::windows::{Library, LOAD_LIBRARY_SEARCH_SYSTEM32};
+    unsafe { Library::load_with_flags(nom, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+        .map(drop)
+        .map_err(EncodeError::Dll)
+}
+
+/// Corps de [`probe_hardware`], avec le nom de la bibliothèque du pilote en
+/// paramètre : c'est ce qui permet de prouver, sur n'importe quelle machine,
+/// que la vérification est bien branchée avant l'appel à `cudarc`.
+fn probe_hardware_avec(pilote_cuda: &str) -> Result<EncoderCaps, EncodeError> {
+    // `CudaContext::new` appelle `cuInit`, qui PANIQUE (au lieu de rendre une
+    // erreur) quand `nvcuda.dll` est absente, en `dynamic-loading` : le `?` de
+    // la ligne suivante ne verrait jamais ce cas. On vérifie donc le pilote
+    // avant, pour que l'absence de carte soit une erreur ordinaire. Pas de
+    // `catch_unwind` : il masquerait aussi les paniques qui n'ont rien à voir.
+    verifier_bibliotheque(pilote_cuda)?;
+
     let cuda = cudarc::driver::CudaContext::new(0)?;
     let gpu_name = cuda.name().unwrap_or_else(|_| "GPU NVIDIA".into());
 
@@ -210,6 +228,38 @@ mod tests {
             codecs: vec![Codec::H264_420],
         };
         assert_eq!(pick_best(&caps, true), Some(Codec::H264_420));
+    }
+
+    #[test]
+    fn une_bibliotheque_absente_donne_l_erreur_dll() {
+        let refus = verifier_bibliotheque("cette_bibliotheque_n_existe_pas.dll")
+            .expect_err("doit être refusée");
+        assert!(matches!(refus, EncodeError::Dll(_)));
+    }
+
+    #[test]
+    fn sans_pilote_la_detection_rend_une_erreur_et_ne_panique_pas() {
+        // Prouve le branchement : si `probe_hardware_avec` n'appelait plus la
+        // vérification, `CudaContext::new` serait atteint et, sans pilote,
+        // paniquerait ; avec un pilote présent, la détection réussirait. Dans
+        // les deux cas ce test rougit, sur n'importe quelle machine.
+        let refus = probe_hardware_avec("absente.dll").expect_err("doit être refusée");
+        assert!(matches!(refus, EncodeError::Dll(_)));
+    }
+
+    #[test]
+    fn le_message_d_absence_de_carte_est_celui_de_la_spec() {
+        let erreur = verifier_bibliotheque("absente.dll").expect_err("doit être refusée");
+        let message = erreur.to_string();
+        assert!(
+            message.contains(
+                "Cette machine n'a pas de carte graphique NVIDIA. SkyShare ne peut ni \
+                 partager son écran ni en recevoir un sur cette machine."
+            ),
+            "{message}"
+        );
+        assert!(message.contains("Détail technique :"), "{message}");
+        assert!(!message.contains("x264"), "{message}");
     }
 
     #[test]
