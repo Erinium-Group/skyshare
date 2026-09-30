@@ -21,7 +21,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
     D2D1_RENDER_TARGET_USAGE_NONE,
 };
-use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
+use windows::Win32::Graphics::Direct3D::{
+    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
+};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
     D3D11_BIND_RENDER_TARGET, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
@@ -34,8 +36,9 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
-    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIFactory2,
+    IDXGISurface, IDXGISwapChain1, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_F11;
@@ -300,6 +303,11 @@ impl Fenetre {
 
     /// Somme de contrôle (FNV-1a 64 bits) des pixels de la cible. Sert aux
     /// tests, qui comparent des rendus sans les afficher.
+    ///
+    /// Ce que ça prouve : ce que Direct2D a réellement dessiné (fond et texte).
+    /// Ce que ça ne prouve pas : la recopie vers le tampon arrière ni la
+    /// présentation. La cible est la texture intermédiaire, pas le tampon
+    /// présenté, dont le contenu est indéfini après `Present` en modèle flip.
     #[cfg(test)]
     pub(crate) fn empreinte_du_tampon(&self) -> anyhow::Result<u64> {
         Ok(self
@@ -357,13 +365,47 @@ impl Drop for Fenetre {
     }
 }
 
+/// Identifiant de fabricant PCI de NVIDIA.
+const FABRICANT_NVIDIA: u32 = 0x10DE;
+
+/// Le premier adaptateur DXGI de NVIDIA, s'il y en a un.
+fn adaptateur_nvidia() -> anyhow::Result<Option<IDXGIAdapter1>> {
+    let fabrique: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.context("fabrique DXGI")?;
+    // `EnumAdapters1` échoue (DXGI_ERROR_NOT_FOUND) une fois la liste épuisée.
+    for indice in 0.. {
+        let Ok(adaptateur) = (unsafe { fabrique.EnumAdapters1(indice) }) else {
+            break;
+        };
+        let desc = unsafe { adaptateur.GetDesc1() }.context("description de l'adaptateur")?;
+        if desc.VendorId == FABRICANT_NVIDIA {
+            return Ok(Some(adaptateur));
+        }
+    }
+    Ok(None)
+}
+
 fn creer_appareil() -> anyhow::Result<(ID3D11Device, ID3D11DeviceContext)> {
+    // Pourquoi on choisit l'adaptateur au lieu de passer `None` : sur un portable
+    // à deux cartes graphiques, l'adaptateur par défaut peut être l'Intel
+    // intégré. Or l'interopérabilité CUDA exige que la texture Direct3D et la
+    // surface NVDEC vivent sur LA MÊME carte, celle de NVIDIA : sur l'Intel, la
+    // copie de périphérique à périphérique échouerait. Ne pas simplifier en `None`.
+    //
+    // Repli sur l'adaptateur par défaut quand aucune carte NVIDIA n'existe : la
+    // spec assume qu'une telle machine ne peut pas recevoir. Ce repli ne sert
+    // qu'à laisser la fenêtre s'ouvrir pour afficher un état, pas à décoder.
+    let nvidia = adaptateur_nvidia()?;
+    let (adaptateur, pilote): (Option<IDXGIAdapter>, _) = match &nvidia {
+        // Avec un adaptateur explicite, Direct3D exige le type de pilote UNKNOWN.
+        Some(a) => (Some(a.cast()?), D3D_DRIVER_TYPE_UNKNOWN),
+        None => (None, D3D_DRIVER_TYPE_HARDWARE),
+    };
     let mut appareil = None;
     let mut contexte = None;
     unsafe {
         D3D11CreateDevice(
-            None,
-            windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+            adaptateur.as_ref(),
+            pilote,
             HMODULE::default(),
             // BGRA : exigé pour que Direct2D dessine sur nos textures. Pas de
             // couche de débogage.
@@ -527,5 +569,119 @@ unsafe extern "system" fn procedure(
             }
         }
         DefWindowProcW(hwnd, message, wparam, lparam)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsWindowVisible, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+    };
+
+    /// Ces tests échouent bruyamment quand la fenêtre ne s'ouvre pas : le projet
+    /// est Windows seulement, et un test de fenêtrage qui se tairait ne prouverait
+    /// rien (il laisserait passer une vraie régression).
+    fn ouvrir_pour_test(largeur: u32, hauteur: u32) -> Fenetre {
+        Fenetre::ouvrir_masquee("test", largeur, hauteur)
+            .expect("la fenêtre masquée doit s'ouvrir (Direct3D 11 requis)")
+    }
+
+    /// Demande à Windows une zone cliente de cette taille, comme le ferait
+    /// l'utilisateur en tirant un bord : la fenêtre reçoit un vrai `WM_SIZE`.
+    fn redimensionner_le_client(fenetre: &Fenetre, largeur: i32, hauteur: i32) {
+        let mut cadre = RECT {
+            left: 0,
+            top: 0,
+            right: largeur,
+            bottom: hauteur,
+        };
+        unsafe {
+            AdjustWindowRectEx(&mut cadre, WS_OVERLAPPEDWINDOW, false, WINDOW_EX_STYLE(0))
+                .expect("cadre");
+            SetWindowPos(
+                fenetre.hwnd,
+                None,
+                0,
+                0,
+                cadre.right - cadre.left,
+                cadre.bottom - cadre.top,
+                SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .expect("SetWindowPos");
+        }
+    }
+
+    #[test]
+    fn la_fenetre_masquee_n_est_pas_visible() {
+        let fenetre = ouvrir_pour_test(320, 200);
+        assert!(!unsafe { IsWindowVisible(fenetre.hwnd) }.as_bool());
+    }
+
+    /// Le redimensionnement recrée la chaîne et la cible : c'est le chemin qui
+    /// casserait le plus discrètement quand l'image décodée y sera déposée.
+    #[test]
+    fn le_redimensionnement_recree_la_chaine_et_repeint_l_etat() {
+        let mut fenetre = ouvrir_pour_test(320, 200);
+        fenetre
+            .afficher_etat(EtatVisionnage::EnAttente)
+            .expect("rendu initial");
+        let avant = fenetre.pixels_de_la_cible().expect("lecture avant");
+
+        redimensionner_le_client(&fenetre, 480, 300);
+        let evenements = fenetre.pompe_messages();
+        assert!(evenements.is_empty(), "aucun événement attendu");
+
+        assert_eq!(
+            (fenetre.largeur, fenetre.hauteur),
+            (480, 300),
+            "WM_SIZE n'a pas été appliqué"
+        );
+        let desc = unsafe { fenetre.chaine.GetDesc1() }.expect("description de la chaîne");
+        assert_eq!(
+            (desc.Width, desc.Height),
+            (480, 300),
+            "chaîne non redimensionnée"
+        );
+        let apres = fenetre.pixels_de_la_cible().expect("lecture après");
+        assert_eq!(
+            apres.len(),
+            480 * 300 * 4,
+            "la cible n'a pas la nouvelle taille"
+        );
+        assert_eq!(
+            apres[..4],
+            avant[..4],
+            "l'état courant n'a pas été repeint à la nouvelle taille"
+        );
+
+        // Et un rendu suivant, d'un autre état, réussit à la nouvelle taille.
+        fenetre
+            .afficher_etat(EtatVisionnage::ConnexionPerdue)
+            .expect("rendu après redimensionnement");
+        let dernier = fenetre.pixels_de_la_cible().expect("lecture finale");
+        assert_eq!(dernier.len(), 480 * 300 * 4);
+        // Le tampon entier, pas un pixel de fond : ce test vérifie le rendu après
+        // redimensionnement, la distinction des fonds a son propre test.
+        assert_ne!(dernier, apres, "le nouvel état n'a pas été peint");
+    }
+
+    /// L'appareil doit vivre sur la carte NVIDIA quand il y en a une : c'est ce
+    /// qui rend possible l'interopérabilité CUDA de la tâche suivante.
+    #[test]
+    fn l_appareil_vit_sur_la_carte_nvidia_quand_il_y_en_a_une() {
+        if adaptateur_nvidia().expect("énumération DXGI").is_none() {
+            println!("pas de carte NVIDIA sur cette machine : repli légitime, rien à prouver");
+            return;
+        }
+        let fenetre = ouvrir_pour_test(320, 200);
+        let dxgi: IDXGIDevice = fenetre.appareil().cast().expect("IDXGIDevice");
+        let adaptateur: IDXGIAdapter = unsafe { dxgi.GetAdapter() }.expect("adaptateur");
+        let desc = unsafe { adaptateur.GetDesc() }.expect("description");
+        assert_eq!(
+            desc.VendorId, FABRICANT_NVIDIA,
+            "l'appareil n'est pas sur la carte NVIDIA"
+        );
     }
 }
