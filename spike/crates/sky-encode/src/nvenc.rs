@@ -444,6 +444,11 @@ impl NvencEncoder {
         let encode_picture = nvenc_fn!(self.api, nvEncEncodePicture);
         // Une image clé demandée devient un IDR accompagné de ses en-têtes :
         // un point de reprise n'en est un que si le décodeur peut l'ouvrir.
+        // Mesuré : `repeatSPSPPS` (posé à la configuration) et `OUTPUT_SPSPPS`
+        // produisent chacun seuls ces en-têtes sur un IDR forcé ; retirer l'un des
+        // deux ne fait rougir aucun test, retirer les deux fait rougir celui de
+        // `forcer_une_image_cle`. Le drapeau est gardé : il rend le point de
+        // reprise indépendant de la configuration.
         let drapeaux = if std::mem::take(&mut self.cle_demandee) {
             NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_FORCEIDR as u32
                 | NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_OUTPUT_SPSPPS as u32
@@ -619,15 +624,35 @@ mod tests {
     const LARGEUR: u32 = 1280;
     const HAUTEUR: u32 = 720;
 
-    /// Un encodeur HEVC 4:4:4 et l'image à lui donner, ou l'erreur qui empêche
-    /// de les fabriquer (pas de carte NVIDIA, pas de périphérique matériel).
-    /// Les tests en sortent alors sans rien prouver, comme ceux de `sky-decode`
-    /// sur une machine sans décodeur : c'est la seule issue honnête sans GPU.
+    /// Un encodeur HEVC 4:4:4 et l'image à lui donner, ou `None` quand cette
+    /// machine n'a pas d'encodeur NVIDIA HEVC 4:4:4 : les tests en sortent alors
+    /// sans rien prouver, et le disent sur la sortie d'erreur.
+    ///
+    /// **Toute autre erreur de création fait échouer le test.** Sans cette
+    /// distinction, un encodeur que notre code viendrait de casser serait pris
+    /// pour une machine sans GPU, et tous les tests passeraient en silence. Le
+    /// verdict « pas de matériel » vient de `probe_hardware`, pas de l'échec de
+    /// la création qu'on cherche à juger.
     ///
     /// Sans fenêtre ni capture : le périphérique et la texture sont fabriqués
     /// ici, et l'image est tenue avec l'encodeur parce qu'elle doit venir du
     /// même périphérique que lui.
-    fn encodeur_de_test() -> anyhow::Result<(NvencEncoder, CapturedFrame)> {
+    fn encodeur_de_test() -> Option<(NvencEncoder, CapturedFrame)> {
+        match crate::probe_hardware() {
+            Ok(caps) if caps.codecs.contains(&Codec::Hevc444) => {}
+            Ok(_) => {
+                eprintln!("test ignoré : pas d'encodage HEVC 4:4:4 sur cette machine");
+                return None;
+            }
+            Err(e) => {
+                eprintln!("test ignoré : pas de carte NVIDIA utilisable ({e})");
+                return None;
+            }
+        }
+        Some(construire_encodeur_de_test().expect("création de l'encodeur de test"))
+    }
+
+    fn construire_encodeur_de_test() -> anyhow::Result<(NvencEncoder, CapturedFrame)> {
         let mut peripherique: Option<ID3D11Device> = None;
         unsafe {
             D3D11CreateDevice(
@@ -726,7 +751,7 @@ mod tests {
 
     #[test]
     fn les_entetes_de_sequence_contiennent_vps_sps_et_pps() {
-        let Ok((encodeur, _)) = encodeur_de_test() else {
+        let Some((encodeur, _)) = encodeur_de_test() else {
             return;
         };
         let entetes = encodeur.entetes_de_sequence().expect("en-têtes");
@@ -738,14 +763,16 @@ mod tests {
 
     #[test]
     fn forcer_une_image_cle_produit_un_idr_a_l_image_suivante() {
-        let Ok((mut encodeur, image)) = encodeur_de_test() else {
+        let Some((mut encodeur, image)) = encodeur_de_test() else {
             return;
         };
         // Une première image, qui est déjà un IDR.
         let _ = encodeur.encode(&image).expect("première image");
-        // Une deuxième, qui ne doit PAS l'être — c'est ce qui rend le test
-        // discriminant : sans cette assertion, `forcer_image_cle` pourrait ne rien
-        // faire et le test passerait quand même.
+        // Une deuxième, qui ne doit PAS l'être. Elle est encodée avant tout appel
+        // à `forcer_image_cle` : son assertion ne dit donc rien sur cette
+        // fonction. Elle écarte un encodeur qui sortirait un IDR à chaque image,
+        // auquel cas « la troisième est un IDR » ne prouverait rien non plus. Ce
+        // qui éprouve `forcer_image_cle`, c'est la troisième assertion.
         let ordinaire = encodeur
             .encode(&image)
             .expect("deuxième image")
@@ -764,6 +791,15 @@ mod tests {
             contient_idr(&forcee.data),
             "l'image forcée doit être un IDR"
         );
+        // Et un IDR sans ses en-têtes ne sert à rien à un spectateur qui n'a
+        // jamais reçu ceux de la séquence : c'est l'autre moitié du geste.
+        let types = types_de_nal(&forcee.data);
+        for (type_nal, nom) in [(32, "VPS"), (33, "SPS"), (34, "PPS")] {
+            assert!(
+                types.contains(&type_nal),
+                "l'image forcée doit porter son {nom} : {types:?}"
+            );
+        }
         // Le drapeau est rabaissé : l'image d'après redevient ordinaire.
         let suivante = encodeur
             .encode(&image)

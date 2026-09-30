@@ -120,13 +120,16 @@ fn verifier_bibliotheque(nom: &str) -> Result<(), EncodeError> {
 
 /// Corps de [`probe_hardware`], avec le nom de la bibliothèque du pilote en
 /// paramètre : c'est ce qui permet de prouver, sur n'importe quelle machine,
-/// que la vérification est bien branchée avant l'appel à `cudarc`.
+/// que la vérification est bien branchée.
 fn probe_hardware_avec(pilote_cuda: &str) -> Result<EncoderCaps, EncodeError> {
     // `CudaContext::new` appelle `cuInit`, qui PANIQUE (au lieu de rendre une
     // erreur) quand `nvcuda.dll` est absente, en `dynamic-loading` : le `?` de
-    // la ligne suivante ne verrait jamais ce cas. On vérifie donc le pilote
-    // avant, pour que l'absence de carte soit une erreur ordinaire. Pas de
-    // `catch_unwind` : il masquerait aussi les paniques qui n'ont rien à voir.
+    // la ligne suivante ne verrait jamais ce cas. On vérifie donc le pilote en
+    // première ligne, pour que l'absence de carte soit une erreur ordinaire. Pas
+    // de `catch_unwind` : il masquerait aussi les paniques qui n'ont rien à voir.
+    // Le test prouve que la vérification est BRANCHÉE, pas qu'elle précède
+    // `cudarc` : sur une machine équipée, une vérification placée après passerait
+    // aussi. L'ordre tient à la lecture, pas au test.
     verifier_bibliotheque(pilote_cuda)?;
 
     let cuda = cudarc::driver::CudaContext::new(0)?;

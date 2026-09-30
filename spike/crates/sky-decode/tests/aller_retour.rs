@@ -139,6 +139,135 @@ fn un_flux_1080_traverse_l_aller_retour_sans_decalage_de_chrominance() {
     );
 }
 
+/// Les trois morceaux d'un flux qu'un spectateur arrivé en retard recevrait.
+struct FluxDeReprise {
+    /// Ce que rend `entetes_de_sequence` : VPS, SPS, PPS.
+    entetes: Vec<u8>,
+    /// Une image ordinaire, prédite de celles qu'un spectateur en retard n'a pas.
+    image_p: Vec<u8>,
+    /// L'image qui suit un `forcer_image_cle`.
+    image_cle_forcee: Vec<u8>,
+    /// Les images ordinaires qui suivent l'image clé forcée. Le décodeur garde une
+    /// image d'avance : sans elles, même un flux sain ne rend rien au paquet où
+    /// l'IDR arrive (mesuré : aucune image après « en-têtes, IDR » seuls).
+    suite: Vec<Vec<u8>>,
+}
+
+fn flux_de_reprise() -> FluxDeReprise {
+    let peripherique = peripherique_direct3d11()
+        .unwrap_or_else(|| panic!("ce test exige un périphérique Direct3D 11 matériel"));
+    let mut encodeur = NvencEncoder::new(
+        &peripherique,
+        Codec::Hevc444,
+        LARGEUR,
+        HAUTEUR,
+        60,
+        DEBIT_BPS,
+    )
+    .unwrap_or_else(|e| panic!("ce test exige un encodeur NVENC HEVC 4:4:4 : {e:#}"));
+    let texture = texture_a_bandes(&peripherique).expect("texture source");
+    let image = || CapturedFrame {
+        texture: texture.clone(),
+        width: LARGEUR,
+        height: HAUTEUR,
+        captured_at: std::time::Instant::now(),
+    };
+
+    // L'IDR initial, que le spectateur en retard n'a jamais reçu : écarté.
+    encodeur.encode(&image()).expect("première image");
+    let image_p = encodeur
+        .encode(&image())
+        .expect("image P")
+        .expect("un paquet")
+        .data;
+    encodeur.forcer_image_cle();
+    let image_cle_forcee = encodeur
+        .encode(&image())
+        .expect("image clé forcée")
+        .expect("un paquet")
+        .data;
+    let suite = (0..IMAGES)
+        .map(|_| {
+            encodeur
+                .encode(&image())
+                .expect("image de la suite")
+                .expect("un paquet")
+                .data
+        })
+        .collect();
+    FluxDeReprise {
+        entetes: encodeur.entetes_de_sequence().expect("en-têtes"),
+        image_p,
+        image_cle_forcee,
+        suite,
+    }
+}
+
+/// Pousse les paquets à un décodeur neuf et compte les images rendues. Une
+/// erreur du décodeur compte pour zéro image : ce qu'on demande ici est « le
+/// spectateur voit-il quelque chose ? », pas la forme de son refus.
+fn images_rendues(paquets: &[&[u8]]) -> usize {
+    let mut decodeur = Decodeur::nouveau(LARGEUR, HAUTEUR)
+        .unwrap_or_else(|e| panic!("ce test exige un décodeur NVIDIA HEVC 4:4:4 : {e}"));
+    let mut rendues = 0;
+    for (rang, paquet) in paquets.iter().enumerate() {
+        if let Ok(Some(_)) = decodeur.decoder(paquet, rang as u64) {
+            rendues += 1;
+        }
+    }
+    rendues
+}
+
+#[test]
+fn des_entetes_puis_une_image_cle_forcee_s_affichent() {
+    let flux = flux_de_reprise();
+    let mut paquets: Vec<&[u8]> = vec![&flux.entetes, &flux.image_cle_forcee];
+    paquets.extend(flux.suite.iter().map(Vec::as_slice));
+    let rendues = images_rendues(&paquets);
+    assert!(
+        rendues >= 1,
+        "un spectateur qui reçoit les en-têtes puis l'image clé forcée doit voir une image"
+    );
+}
+
+/// Ce que rend `entetes_de_sequence` suffit, à lui seul, à ouvrir le décodeur :
+/// l'image clé forcée portant ses propres en-têtes, le test précédent ne le
+/// prouve pas. Ici les en-têtes sont les seuls de tout le flux. Il s'oppose au
+/// test suivant, dont les images sont les mêmes.
+#[test]
+fn les_entetes_de_sequence_seuls_suffisent_a_ouvrir_le_decodeur() {
+    let flux = flux_de_reprise();
+    let mut paquets: Vec<&[u8]> = vec![&flux.entetes, &flux.image_p];
+    paquets.extend(flux.suite.iter().map(Vec::as_slice));
+    let rendues = images_rendues(&paquets);
+    assert!(
+        rendues >= 1,
+        "les en-têtes de `entetes_de_sequence` doivent suffire à ouvrir le décodeur"
+    );
+}
+
+/// Le contraste qui donne son sens au test précédent, et il porte sur les
+/// en-têtes : les mêmes images ordinaires, SANS eux, ne donnent rien — c'est la
+/// fenêtre noire définitive de l'écart 3. Sans ce test, l'image affichée plus
+/// haut pourrait venir d'un flux que le décodeur aurait accepté de toute façon.
+///
+/// Le contraste « en-têtes puis image P au lieu d'un IDR » a été tenté et ne
+/// tient pas : mesuré, NVDEC rend alors des images quand même (le flux est en
+/// rafraîchissement intra, il n'attend pas de point d'accès). Ce n'est donc pas
+/// l'IDR qui rend le flux lisible, ce sont les en-têtes ; l'IDR sert à repartir
+/// d'une image exacte, ce que ce test ne mesure pas.
+#[test]
+fn des_images_sans_entetes_ne_donnent_rien() {
+    let flux = flux_de_reprise();
+    let mut paquets: Vec<&[u8]> = vec![&flux.image_p];
+    paquets.extend(flux.suite.iter().map(Vec::as_slice));
+    let rendues = images_rendues(&paquets);
+    assert_eq!(
+        rendues, 0,
+        "sans en-têtes de séquence, le décodeur ne peut rien ouvrir"
+    );
+}
+
 /// Couleur attendue d'une ligne : `true` pour rouge, `false` pour bleu.
 fn ligne_rouge(y: u32) -> bool {
     (y / BANDE).is_multiple_of(2)
