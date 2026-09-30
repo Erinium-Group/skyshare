@@ -60,6 +60,7 @@ pub struct ImageDecodee {
     pub hauteur: u32,
     pub horodatage_ms: u64,
     surface: SurfaceCuda,
+    hauteur_codee: u32,
     /// La session qui a produit la surface, gardée en vie pour que le
     /// démappage ait lieu même si l'image survit au [`crate::Decodeur`].
     session: Rc<SessionNvdec>,
@@ -70,6 +71,7 @@ impl ImageDecodee {
         session: Rc<SessionNvdec>,
         largeur: u32,
         hauteur: u32,
+        hauteur_codee: u32,
         horodatage_ms: u64,
         surface: SurfaceCuda,
     ) -> Self {
@@ -78,8 +80,21 @@ impl ImageDecodee {
             hauteur,
             horodatage_ms,
             surface,
+            hauteur_codee,
             session,
         }
+    }
+
+    /// La hauteur **codée** du flux, telle que NVDEC l'a annoncée.
+    ///
+    /// Rien du décodage ni du rendu n'en dépend : elle est exposée pour être
+    /// observable. C'est la seule valeur qui vienne vraiment du flux et non de
+    /// nos propres choix, donc la seule par laquelle un test peut prouver que la
+    /// géométrie qu'il examine distingue réellement la hauteur codée de la
+    /// hauteur d'affichage — et non comparer deux valeurs que ce crate a posées
+    /// lui-même. Voir `tests/aller_retour.rs`.
+    pub fn hauteur_codee(&self) -> u32 {
+        self.hauteur_codee
     }
 
     /// La surface GPU de cette image.

@@ -91,9 +91,11 @@ fn un_flux_1080_traverse_l_aller_retour_sans_decalage_de_chrominance() {
 
     let mut derniere = None;
     let mut hauteur_surface = 0;
+    let mut hauteur_codee = 0;
     for (rang, paquet) in paquets.iter().enumerate() {
         if let Some(image) = decodeur.decoder(paquet, rang as u64).expect("décodage") {
             hauteur_surface = image.surface().hauteur_surface;
+            hauteur_codee = image.hauteur_codee();
             derniere = Some(image.copier_vers_memoire_centrale().expect("copie de test"));
         }
     }
@@ -101,14 +103,23 @@ fn un_flux_1080_traverse_l_aller_retour_sans_decalage_de_chrominance() {
 
     println!(
         "aller-retour {LARGEUR}×{HAUTEUR} : hauteur affichée {HAUTEUR}, \
-         hauteur de surface {hauteur_surface}"
+         hauteur de surface {hauteur_surface}, hauteur codée du flux {hauteur_codee}"
     );
-    // Ce test ne vaut que si la géométrie choisie distingue réellement les deux
-    // candidats. Si un jour NVENC codait 1080 en 1080, il redeviendrait muet sur
-    // la question, et il faut alors le savoir plutôt que de le croire probant.
-    assert_eq!(
-        hauteur_surface, HAUTEUR,
-        "la surface de sortie doit suivre la hauteur d'affichage"
+
+    // GARDE DE PERTINENCE, et elle porte sur la seule valeur qui ne vienne pas de
+    // nous : `hauteur_codee` est ce que NVENC a écrit dans le flux et que NVDEC
+    // nous rapporte. Tant qu'elle diffère de la hauteur d'affichage, ce test
+    // distingue vraiment les deux candidats pour l'espacement des plans. Si un
+    // jour NVENC codait 1080 en 1080, il ne prouverait plus rien — et il doit
+    // alors le DIRE, pas passer en silence.
+    //
+    // Comparer `hauteur_surface` à `HAUTEUR` ne vaudrait rien : les deux sont
+    // posées par notre propre code, depuis la même variable.
+    assert_ne!(
+        hauteur_codee, HAUTEUR,
+        "ce test ne prouve plus rien : NVENC code désormais cette hauteur sans \
+         alignement ({hauteur_codee}), donc la hauteur codée et la hauteur \
+         d'affichage ne se distinguent plus. Choisir une autre géométrie."
     );
 
     let mal_classes = compter_bandes_mal_classees(&rgb);

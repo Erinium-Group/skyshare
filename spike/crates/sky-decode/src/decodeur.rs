@@ -68,10 +68,16 @@ impl SessionNvdec {
     /// autre code du même fil peut remplacer par un `cuCtxSetCurrent`. C'est
     /// pourquoi on le repose ici plutôt que de s'appuyer sur `!Send`.
     /// `bind_to_thread` ne fait rien quand le contexte est déjà courant.
+    ///
+    /// Sa propre variante d'erreur, et non `SessionRefusee` : ce dernier annonce
+    /// une session refusée par le pilote, avec un code de retour de NVDEC. Ici
+    /// aucune session n'est en cause et le code vient de CUDA. Deux causes
+    /// peuvent mener au même message pour l'utilisateur ; l'inverse — un seul
+    /// message pour deux causes qu'il décrit mal — est un faux diagnostic.
     pub(crate) fn rendre_contexte_courant(&self) -> Result<(), ErreurDecodeur> {
         self.contexte
             .bind_to_thread()
-            .map_err(|e| ErreurDecodeur::SessionRefusee(e.0 as i32))
+            .map_err(|e| ErreurDecodeur::ContexteCuda(e.to_string()))
     }
 }
 
@@ -103,6 +109,14 @@ struct EtatPartage {
     /// la lecture des plans de chrominance se décale. Ce n'est pas `coded_height`
     /// — mesuré, voir la note de [`SurfaceCuda`].
     hauteur_surface: u32,
+    /// `coded_height` du flux, telle que le rappel de séquence l'annonce.
+    ///
+    /// Le décodage ne s'en sert pas : elle est là pour être **observable**. Sans
+    /// elle, un test ne peut pas vérifier que la géométrie qu'il a choisie
+    /// distingue réellement la hauteur codée de la hauteur d'affichage, et se
+    /// croirait probant en comparant deux valeurs que notre propre code a
+    /// posées.
+    hauteur_codee: u32,
     /// Nombre de surfaces de décodage retenu, redonné à chaque rappel de
     /// séquence : NVDEC interprète cette valeur de retour comme la taille de
     /// son pool, et un 0 signifierait « échec ».
@@ -169,6 +183,7 @@ impl Decodeur {
             largeur_affichee: 0,
             hauteur_affichee: 0,
             hauteur_surface: 0,
+            hauteur_codee: 0,
             surfaces_de_decodage: 1,
             file: VecDeque::new(),
             erreur: None,
@@ -297,6 +312,7 @@ unsafe extern "C" fn rappel_sequence(donnees: *mut c_void, format: *mut CUVIDEOF
     // lit `SurfaceCuda`. Changer l'une sans l'autre décale la chrominance.
     let hauteur_cible = hauteur;
     etat.hauteur_surface = hauteur_cible;
+    etat.hauteur_codee = format.coded_height;
     etat.surfaces_de_decodage = u32::from(format.min_num_decode_surfaces).max(1);
 
     let mut creation: CUVIDDECODECREATEINFO = std::mem::zeroed();
@@ -381,6 +397,7 @@ unsafe extern "C" fn rappel_affichage(
         Rc::clone(&etat.session),
         etat.largeur_affichee,
         etat.hauteur_affichee,
+        etat.hauteur_codee,
         info.timestamp as u64,
         SurfaceCuda {
             pointeur,

@@ -46,6 +46,12 @@ pub enum ErreurDecodeur {
 
     #[error("le décodeur NVIDIA a refusé d'ouvrir une session (code {0})")]
     SessionRefusee(i32),
+
+    #[error(
+        "le contexte CUDA du décodeur n'a pas pu être rendu courant sur ce fil.\n\n\
+         Détail technique : {0}"
+    )]
+    ContexteCuda(String),
 }
 
 impl Capacites {
