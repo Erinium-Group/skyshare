@@ -103,21 +103,30 @@ export function PanneauPartage({ instantane }: { instantane: Instantane }) {
           <h2 className="font-titre text-2xl">
             Connecté en {decimale(partage.connecteEnS)} s · connexion directe, sans relais
           </h2>
-          {/* Spec D2, « le panneau le dit en toutes lettres » : sans cette
-              phrase, l'absence d'image passe pour une panne, et l'utilisateur
-              cherche un défaut qui n'existe pas. La seconde moitié est une
-              promesse de vie privée, au même titre que « aucune adresse
-              journalisée » : le flux reçu est mesuré puis JETÉ. */}
+          {/* Jalon 2, décision D4 : l'image s'affiche dans une FENÊTRE SÉPARÉE,
+              pas ici — aucun pont vers la vue web ne tient le débit d'une image
+              décodée. Sans le dire, l'utilisateur chercherait l'image dans ce
+              panneau. La seconde phrase est une promesse de vie privée, au même
+              titre que « aucune adresse journalisée » : la vidéo est affichée,
+              jamais enregistrée.
+
+              L'ancien texte (« L'image n'est pas encore affichée : elle arrive
+              au jalon 2 ») est devenu FAUX à la tâche 9, quand le spectateur a
+              commencé à décoder et afficher. */}
           <p className="text-texte-2">
-            L'image n'est pas encore affichée : elle arrive au jalon 2. SkyShare mesure la connexion,
-            puis jette la vidéo reçue — rien n'est écrit sur le disque.
+            L'image s'affiche dans la fenêtre « SkyShare — écran de {partage.ami} ». F11 la passe
+            en plein écran ; la fermer arrête le visionnage. Rien n'est écrit sur le disque.
           </p>
           <dl className="flex gap-8">
             <Mesure libelle="Débit reçu" valeur={`${decimale(partage.debitMbps)} Mbps`} />
-            {/* `imagesParS` est un entier côté cœur (`images_par_s: u32`) : pas
+            {/* `imagesParS` est un entier côté cœur (`images_par_s: u64`) : pas
                 de décimale à séparer. */}
             <Mesure libelle="Cadence" valeur={`${partage.imagesParS} images/s`} />
             <Mesure libelle="Gigue" valeur={`${decimale(partage.gigueMs)} ms`} />
+            {/* Spec du jalon 2, §8 : la latence de décodage et les images
+                abandonnées remontent jusqu'ici. */}
+            <Mesure libelle="Décodage" valeur={`${decimale(partage.latenceDecodageMs)} ms`} />
+            <Mesure libelle="Images écartées" valeur={`${partage.imagesAbandonnees}`} />
             <Mesure libelle="Durée" valeur={duree(maintenant - partage.depuisMs)} />
           </dl>
           {arreter}

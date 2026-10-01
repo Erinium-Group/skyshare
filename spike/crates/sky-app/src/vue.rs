@@ -71,6 +71,28 @@ pub enum FinVue {
     /// `FENETRE_HOTE` aurait rendu ce message faux en silence. Comme
     /// `Disponible { fenetre_s }`, la durée vient du cœur, jamais d'une copie.
     AucuneDemande { fenetre_s: u64 },
+    /// Spectateur : l'hôte a annoncé l'arrêt de son partage. Une fin normale.
+    PartageArrete,
+    // --- Les causes du décodage (spec §7), une par message honnête. ---------
+    //
+    // L'interface se branche sur ces ÉTIQUETTES, jamais sur un texte d'erreur :
+    // celui d'`AucuneCarteNvidia` vient de `libloading` et peut être LOCALISÉ
+    // selon la langue de Windows.
+    /// Aucune carte NVIDIA : ni NVENC ni NVDEC, donc ni diffusion ni réception.
+    SansCarteNvidia,
+    /// Carte antérieure à Turing : elle encode, mais ne décode pas le 4:4:4.
+    #[serde(rename = "sans_decodage_444")]
+    SansDecodage444,
+    /// Session de décodage refusée, ou contexte CUDA impossible à rendre
+    /// courant : deux causes, un même message honnête.
+    DecodeurRefuse,
+    /// Le décodeur de cette carte s'arrête en deçà de ce que le spectateur
+    /// annonce (`LARGEUR_ANNONCEE` × `HAUTEUR_ANNONCEE` dans `sky-partage`).
+    /// Levée À L'OUVERTURE, avant toute connexion : ce n'est PAS l'écran de
+    /// l'hôte qui est en cause, et le message ne doit pas le dire.
+    ResolutionTropGrande { largeur: u32, hauteur: u32, largeur_max: u32, hauteur_max: u32 },
+    /// Aucune image clé malgré les demandes : le flux ne se répare pas.
+    ImageIrreconstituable,
     Autre { message: String },
 }
 
@@ -84,13 +106,19 @@ pub enum PartageVue {
     Diffuse { spectateur: Option<String>, depuis_ms: u64, debit_mbps: f64, rtt_ms: f64, ecran: usize },
     /// Spectateur : demande envoyée, réponse attendue.
     Demande { ami: String, debut_ms: u64 },
-    /// Spectateur : connecté, flux mesuré puis jeté (spec D2).
+    /// Spectateur : connecté, l'image s'affiche dans la fenêtre de visionnage
+    /// (jalon 2) ; rien n'est écrit sur le disque (spec D2).
     Regarde {
         ami: String,
         connecte_en_s: f64,
         debit_mbps: f64,
         images_par_s: u64,
         gigue_ms: f64,
+        /// Latence moyenne de décodage sur la dernière seconde (spec §8).
+        latence_decodage_ms: f64,
+        /// Cumulées depuis la connexion : images jetées faute d'être dignes
+        /// de confiance, ou refusées par le décodeur (spec §8).
+        images_abandonnees: u32,
         depuis_ms: u64,
     },
     Termine { fin: FinVue },
@@ -146,13 +174,22 @@ mod tests {
             debit_mbps: 12.0,
             images_par_s: 60,
             gigue_ms: 5.0,
+            latence_decodage_ms: 1.5,
+            images_abandonnees: 3,
             depuis_ms: 1,
         })
         .unwrap();
         assert_eq!(
             v,
             json!({"etat": "regarde", "ami": "bob", "connecteEnS": 0.5, "debitMbps": 12.0,
-                   "imagesParS": 60, "gigueMs": 5.0, "depuisMs": 1})
+                   "imagesParS": 60, "gigueMs": 5.0, "latenceDecodageMs": 1.5,
+                   "imagesAbandonnees": 3, "depuisMs": 1})
+        );
+        // L'étiquette à chiffres est écrite à la main (`serde(rename)`) :
+        // `rename_all` en aurait fait « sans_decodage444 ».
+        assert_eq!(
+            serde_json::to_value(FinVue::SansDecodage444).unwrap(),
+            json!({"cause": "sans_decodage_444"})
         );
         let fin =
             serde_json::to_value(PartageVue::Termine { fin: FinVue::PasEnPartage { ami: "bob".into() } })
@@ -252,6 +289,8 @@ mod contrat_typescript {
                 debit_mbps: 12.0,
                 images_par_s: 60,
                 gigue_ms: 5.0,
+                latence_decodage_ms: 1.5,
+                images_abandonnees: 0,
                 depuis_ms: 1,
             },
             PartageVue::Termine { fin: FinVue::Arrete },
@@ -263,8 +302,39 @@ mod contrat_typescript {
             FinVue::TropLente,
             FinVue::SessionExpiree,
             FinVue::AucuneDemande { fenetre_s: 1800 },
+            FinVue::PartageArrete,
+            FinVue::SansCarteNvidia,
+            FinVue::SansDecodage444,
+            FinVue::DecodeurRefuse,
+            FinVue::ResolutionTropGrande {
+                largeur: 2560,
+                hauteur: 1440,
+                largeur_max: 2048,
+                hauteur_max: 2048,
+            },
+            FinVue::ImageIrreconstituable,
             FinVue::Autre { message: "quelque chose".to_string() },
         ];
+        // Une variante ajoutée à `FinVue` sans être ajoutée au tableau
+        // ci-dessus échapperait à la comparaison. Ce `match` exhaustif ne
+        // compile plus dans ce cas : il ramène ici qui l'ajoute.
+        for fin in &fins {
+            match fin {
+                FinVue::Arrete
+                | FinVue::PasEnPartage { .. }
+                | FinVue::ReseauBloque
+                | FinVue::TropLente
+                | FinVue::SessionExpiree
+                | FinVue::AucuneDemande { .. }
+                | FinVue::PartageArrete
+                | FinVue::SansCarteNvidia
+                | FinVue::SansDecodage444
+                | FinVue::DecodeurRefuse
+                | FinVue::ResolutionTropGrande { .. }
+                | FinVue::ImageIrreconstituable
+                | FinVue::Autre { .. } => {}
+            }
+        }
         let connexions = [
             Connexion::Deconnecte,
             Connexion::EnCours,

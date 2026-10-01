@@ -384,16 +384,10 @@ fn diffuser(
                 let horodatage_ms = t0.elapsed().as_millis() as u64;
                 match envoi.envoyer_image(link, &mut enc, &pkt.data, horodatage_ms)? {
                     IssueEnvoi::Envoyee => {}
-                    IssueEnvoi::FilePleine => {
-                        // Une image est désormais une unité indivisible : « le
-                        // morceau 1 sur 1 » est la seule lecture honnête de ces
-                        // deux champs, hérités du découpage maison. Ce sont eux
-                        // qu'il faudra renommer, pas cet appel.
-                        return Ok(Fin::TamponSature { morceau: 1, morceaux: 1 });
-                    }
-                    // `Fin::LienTombe` est la seule fin existante pour un flux
-                    // qui s'interrompt ; la rebaptiser traverse `sky-app`
-                    // (tâche 10). L'annonce de l'arrêt, elle, est tentée dans
+                    IssueEnvoi::FilePleine => return Ok(Fin::FileDePaquetisationPleine),
+                    // `Fin::LienTombe` garde son nom (tâche 10) : sa
+                    // documentation dit qu'elle couvre aussi une piste refermée
+                    // sur un canal vivant. L'annonce de l'arrêt est tentée dans
                     // tous les cas par `en_annoncant_l_arret`.
                     IssueEnvoi::FluxInterrompu(raison) => return Ok(Fin::LienTombe(raison)),
                 }

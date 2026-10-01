@@ -16,8 +16,8 @@ use sky_compte::{ErreurCompte, Etat};
 use sky_encode::Codec;
 use sky_partage::rendez_vous::FENETRE_HOTE;
 use sky_partage::{
-    Arret, Designation, ErreurPartage, Evenement, Fin, Mesures, ParametresHote,
-    ParametresSpectateur, SourceImages,
+    Arret, Designation, ErreurDecodeur, ErreurPartage, ErreurVisionnage, Evenement, Fin, Mesures,
+    ParametresHote, ParametresSpectateur, SourceImages,
 };
 
 use crate::noyau::Noyau;
@@ -90,7 +90,7 @@ impl Partageur for PartageurReel {
         arret: &Arret,
         evenements: &mut dyn FnMut(Evenement),
     ) -> Result<Fin, ErreurPartage> {
-        // Aucun puits : le flux est mesuré puis JETÉ (spec D2). L'écriture dans
+        // Aucun puits : le flux est affiché, jamais ENREGISTRÉ (spec D2). L'écriture dans
         // un fichier reste une option de `sky-probe view`, pas de l'application.
         sky_partage::regarder(
             noyau.config(),
@@ -127,7 +127,8 @@ pub fn fin_vue(issue: &Result<Fin, ErreurPartage>) -> FinVue {
                       abouti."
                 .to_string(),
         },
-        Ok(Fin::TamponSature { .. }) => FinVue::TropLente,
+        Ok(Fin::FileDePaquetisationPleine) => FinVue::TropLente,
+        Ok(Fin::PartageArrete) => FinVue::PartageArrete,
         // La durée affichée vient de la constante du cœur, jamais d'un littéral
         // de l'interface (revue finale, M3) : `FENETRE_HOTE` est ce que `hote`
         // a réellement attendu avant de rendre `AucuneDemande`.
@@ -149,7 +150,40 @@ pub fn fin_vue(issue: &Result<Fin, ErreurPartage>) -> FinVue {
         }
         Err(ErreurPartage::Compte(ErreurCompte::Refuse)) => FinVue::SessionExpiree,
         Err(ErreurPartage::Compte(e)) => FinVue::Autre { message: crate::noyau::message_erreur(e) },
+        Err(ErreurPartage::Visionnage(v)) => fin_de_visionnage(v),
         Err(ErreurPartage::Autre(e)) => FinVue::Autre { message: e.to_string() },
+    }
+}
+
+/// La cause affichée d'un visionnage qui n'a pas pu décoder (spec §7).
+///
+/// Branchée sur la VARIANTE, jamais sur le texte : le détail
+/// d'`AucuneCarteNvidia` vient de `libloading`, et Windows peut le rendre dans
+/// sa langue — un branchement sur ce texte passerait ici et casserait ailleurs.
+/// Les deux `match` sont exhaustifs, sans joker : une variante ajoutée à
+/// `ErreurDecodeur` ou à `ErreurVisionnage` ne compile pas tant qu'elle n'a pas
+/// sa cause.
+fn fin_de_visionnage(erreur: &ErreurVisionnage) -> FinVue {
+    match erreur {
+        ErreurVisionnage::ImageIrreconstituable => FinVue::ImageIrreconstituable,
+        ErreurVisionnage::Decodeur(decodeur) => match decodeur {
+            ErreurDecodeur::AucuneCarteNvidia(_) => FinVue::SansCarteNvidia,
+            ErreurDecodeur::QuatreQuatreQuatreNonPris => FinVue::SansDecodage444,
+            // Deux causes, un message : ce qu'il dit est vrai des deux — le
+            // décodeur n'a pas démarré, et une autre application qui occupe la
+            // carte est la cause plausible que l'utilisateur peut lever.
+            ErreurDecodeur::SessionRefusee(_) | ErreurDecodeur::ContexteCuda(_) => {
+                FinVue::DecodeurRefuse
+            }
+            ErreurDecodeur::ResolutionTropGrande { largeur, hauteur, maximum } => {
+                FinVue::ResolutionTropGrande {
+                    largeur: *largeur,
+                    hauteur: *hauteur,
+                    largeur_max: maximum.0,
+                    hauteur_max: maximum.1,
+                }
+            }
+        },
     }
 }
 
@@ -221,18 +255,24 @@ pub fn appliquer(
                 debit_mbps: 0.0,
                 images_par_s: 0,
                 gigue_ms: 0.0,
+                latence_decodage_ms: 0.0,
+                images_abandonnees: 0,
                 depuis_ms: maintenant_ms,
             })
         }
         (
             PartageVue::Regarde { ami, connecte_en_s, depuis_ms, .. },
-            Evenement::Mesures(Mesures::Reception { debit_mbps, images_par_s, gigue_ms }),
+            Evenement::Mesures(Mesures::Reception(m)),
         ) => Some(PartageVue::Regarde {
             ami: ami.clone(),
             connecte_en_s: *connecte_en_s,
-            debit_mbps: *debit_mbps,
-            images_par_s: *images_par_s,
-            gigue_ms: *gigue_ms,
+            debit_mbps: f64::from(m.debit_kbps) / 1000.0,
+            // Un nombre d'images, pas une mesure à décimales : l'interface
+            // l'affiche en entier (`PanneauPartage`).
+            images_par_s: m.images_par_seconde.round() as u64,
+            gigue_ms: f64::from(m.gigue_ms),
+            latence_decodage_ms: f64::from(m.latence_decodage_ms),
+            images_abandonnees: m.images_abandonnees,
             depuis_ms: *depuis_ms,
         }),
         _ => None,
@@ -243,7 +283,7 @@ pub fn appliquer(
 mod tests {
     use super::*;
     use sky_compte::{Ami, AppareilDAmi};
-    use sky_partage::Diagnostic;
+    use sky_partage::{Diagnostic, MesuresVisionnage};
     use std::time::Duration;
 
     fn diagnostic(ice_connecte: bool) -> Diagnostic {
@@ -268,7 +308,7 @@ mod tests {
             FinVue::PasEnPartage { ami: "Bob".into() }
         );
         assert_eq!(fin_vue(&Ok(Fin::EtablissementEchoue(diagnostic(false)))), FinVue::ReseauBloque);
-        assert_eq!(fin_vue(&Ok(Fin::TamponSature { morceau: 3, morceaux: 9 })), FinVue::TropLente);
+        assert_eq!(fin_vue(&Ok(Fin::FileDePaquetisationPleine)), FinVue::TropLente);
         assert_eq!(
             fin_vue(&Err(ErreurPartage::Compte(ErreurCompte::Refuse))),
             FinVue::SessionExpiree
@@ -369,11 +409,16 @@ mod tests {
             depuis_le_lancement: Some(Duration::from_secs(7)),
         };
         let regarde = appliquer(&demande, &connecte, 9_000, None).unwrap();
-        let mesure = Evenement::Mesures(Mesures::Reception {
-            debit_mbps: 12.4,
-            images_par_s: 107,
+        // Neutralisation (tâche 10) : laisser `latence_decodage_ms` ou
+        // `images_abandonnees` à zéro dans `appliquer` — les mesures de la
+        // spec §8 n'atteindraient plus l'interface, et ce test rougit.
+        let mesure = Evenement::Mesures(Mesures::Reception(MesuresVisionnage {
+            images_par_seconde: 106.6,
+            debit_kbps: 12_400,
+            latence_decodage_ms: 1.5,
+            images_abandonnees: 4,
             gigue_ms: 5.0,
-        });
+        }));
         assert_eq!(
             appliquer(&regarde, &mesure, 10_000, None),
             Some(PartageVue::Regarde {
@@ -382,8 +427,91 @@ mod tests {
                 debit_mbps: 12.4,
                 images_par_s: 107,
                 gigue_ms: 5.0,
+                latence_decodage_ms: 1.5,
+                images_abandonnees: 4,
                 depuis_ms: 9_000,
             })
         );
+    }
+
+    fn erreur_de_decodage(erreur: ErreurDecodeur) -> Result<Fin, ErreurPartage> {
+        Err(ErreurPartage::Visionnage(ErreurVisionnage::Decodeur(erreur)))
+    }
+
+    // D1 (tâche 10) : chaque cause de décodage a SA fin, donc son message. Un
+    // test par cause, pour qu'une branche qui rendrait la fin d'une autre
+    // rougisse nommément. Neutralisation de chacun : faire rendre à sa branche
+    // la fin d'une autre cause.
+
+    #[test]
+    fn sans_carte_nvidia_la_fin_le_dit_quelle_que_soit_la_langue_du_detail() {
+        // Le détail vient de `libloading`, et Windows le rend dans sa langue.
+        // La fin ne doit dépendre que de la VARIANTE : deux détails de langues
+        // différentes donnent la même fin, et aucun ne la traverse.
+        for detail in [
+            "LoadLibraryExW failed: The specified module could not be found.",
+            "LoadLibraryExW a échoué : le module spécifié est introuvable.",
+        ] {
+            assert_eq!(
+                fin_vue(&erreur_de_decodage(ErreurDecodeur::AucuneCarteNvidia(detail.into()))),
+                FinVue::SansCarteNvidia
+            );
+        }
+    }
+
+    #[test]
+    fn une_carte_sans_decodage_444_a_sa_fin() {
+        assert_eq!(
+            fin_vue(&erreur_de_decodage(ErreurDecodeur::QuatreQuatreQuatreNonPris)),
+            FinVue::SansDecodage444
+        );
+    }
+
+    #[test]
+    fn une_session_refusee_et_un_contexte_cuda_perdu_partagent_un_message_honnete() {
+        assert_eq!(
+            fin_vue(&erreur_de_decodage(ErreurDecodeur::SessionRefusee(-1))),
+            FinVue::DecodeurRefuse
+        );
+        assert_eq!(
+            fin_vue(&erreur_de_decodage(ErreurDecodeur::ContexteCuda("perdu".into()))),
+            FinVue::DecodeurRefuse
+        );
+    }
+
+    #[test]
+    fn une_resolution_trop_grande_porte_ses_chiffres() {
+        // Les chiffres viennent de l'erreur, jamais d'un littéral de
+        // l'interface (même règle que `AucuneDemande { fenetre_s }`).
+        // Neutralisation : intervertir `largeur_max` et `hauteur_max`.
+        assert_eq!(
+            fin_vue(&erreur_de_decodage(ErreurDecodeur::ResolutionTropGrande {
+                largeur: 2560,
+                hauteur: 1440,
+                maximum: (2048, 1152),
+            })),
+            FinVue::ResolutionTropGrande {
+                largeur: 2560,
+                hauteur: 1440,
+                largeur_max: 2048,
+                hauteur_max: 1152
+            }
+        );
+    }
+
+    #[test]
+    fn une_image_irreconstituable_a_sa_fin() {
+        assert_eq!(
+            fin_vue(&Err(ErreurPartage::Visionnage(ErreurVisionnage::ImageIrreconstituable))),
+            FinVue::ImageIrreconstituable
+        );
+    }
+
+    #[test]
+    fn un_arret_annonce_par_l_hote_n_est_pas_une_erreur() {
+        // D3 (tâche 10). Neutralisation : faire rendre `FinVue::Arrete` à
+        // `Fin::PartageArrete` — l'utilisateur lirait « Partage arrêté. »,
+        // comme s'il l'avait arrêté lui-même.
+        assert_eq!(fin_vue(&Ok(Fin::PartageArrete)), FinVue::PartageArrete);
     }
 }

@@ -3,9 +3,11 @@ import type { FinVue } from "./types";
 /**
  * Chaque fin de partage, EN CLAIR (spec §4).
  *
- * Les quatre premiers textes sont ceux de la spec, au mot près : ce sont des
+ * Les quatre premiers textes sont ceux de la spec §4, et les quatre du
+ * décodage ceux de la spec du jalon 2 (§7), au mot près : ce sont des
  * promesses faites à l'utilisateur, pas des étiquettes d'interface. Ils ont
- * chacun leur test dans `messages.test.ts`.
+ * chacun leur test dans `messages.test.ts`. Un seul texte n'en vient pas, et le
+ * dit : `resolution_trop_grande`.
  *
  * ARBITRAGE 4 DU CONTRÔLEUR : l'interface ne FABRIQUE aucun message à partir de
  * données brutes. La seule cause qui porte du texte, `autre`, le tient du cœur,
@@ -25,7 +27,10 @@ export function messageDeFin(fin: FinVue): string {
       // réseaux bloque (spec §4).
       return "Aucune connexion directe n'a pu s'établir entre vos deux réseaux";
     case "trop_lente":
-      // Tampon d'émission saturé — l'écart 7 du projet, corrigé au jalon 2.
+      // La file de paquetisation de la piste média est restée pleine : le
+      // correspondant ne dépilait plus rien (`Fin::FileDePaquetisationPleine`).
+      // L'ancien commentaire parlait d'un « tampon d'émission saturé » — un
+      // mécanisme disparu avec le découpage maison, à la tâche 8 du jalon 2.
       return "La connexion était trop lente pour la vidéo";
     case "session_expiree":
       return "Session expirée — reconnecte-toi";
@@ -36,6 +41,31 @@ export function messageDeFin(fin: FinVue): string {
       // la variante), jamais d'un littéral recopié ici. Recopiée, elle aurait
       // menti en silence au premier changement de la constante.
       return `Personne n'a demandé à regarder pendant ${minutes(fin.fenetreS)}.`;
+    case "partage_arrete":
+      // Une fin NORMALE, à distinguer de « Partage arrêté. » : ce n'est pas
+      // l'utilisateur qui l'a arrêté, c'est son ami.
+      return "Ton ami a arrêté son partage.";
+    // --- Spec du jalon 2, §7 : les quatre textes du décodage, AU MOT PRÈS. ---
+    // L'interface se branche sur la CAUSE, jamais sur un texte d'erreur : le
+    // détail de « pas de carte NVIDIA » vient d'une bibliothèque que Windows
+    // peut traduire, et ne traverse jamais la frontière.
+    case "sans_carte_nvidia":
+      return "Cette machine n'a pas de carte graphique NVIDIA. SkyShare ne peut ni partager son écran ni en recevoir un sur cette machine.";
+    case "sans_decodage_444":
+      return "La carte graphique de cette machine peut partager un écran, mais pas en recevoir un : son décodeur ne prend pas en charge la couleur pleine résolution.";
+    case "decodeur_refuse":
+      // Session refusée ou contexte CUDA perdu : deux causes, un message vrai
+      // des deux.
+      return "Le décodeur vidéo n'a pas pu démarrer. Fermez les autres applications qui utilisent la carte graphique, puis réessayez.";
+    case "image_irreconstituable":
+      return "L'image ne peut pas être reconstituée. Demandez à la personne qui partage de relancer son partage.";
+    case "resolution_trop_grande":
+      // TEXTE NOUVEAU, ABSENT DE LA SPEC (tâche 10). La spec ne prévoyait que
+      // trois refus du décodeur ; celui-ci est le quatrième. Il est levé À
+      // L'OUVERTURE, avant toute connexion, contre la taille que le spectateur
+      // annonce — l'écran de l'ami n'est pas encore connu, et le message ne
+      // doit donc pas l'accuser.
+      return `Le décodeur vidéo de cette carte graphique s'arrête à ${fin.largeurMax}×${fin.hauteurMax} : SkyShare a besoin d'au moins ${fin.largeur}×${fin.hauteur} pour recevoir un écran sur cette machine.`;
     case "autre":
       return fin.message;
   }

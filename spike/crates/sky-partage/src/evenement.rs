@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use sky_compte::ErreurCompte;
+use sky_decode::ErreurDecodeur;
 use sky_encode::Codec;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,8 +37,25 @@ pub enum Evenement {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mesures {
     Envoi { debit_mbps: f64, cible_mbps: f64, images_sautees: u64, rtt_ms: f64 },
-    /// `images_par_s` : images arrivées depuis la mesure précédente (~1 s).
-    Reception { debit_mbps: f64, images_par_s: u64, gigue_ms: f64 },
+    /// Le relevé du spectateur, tel que `Visionnage::relever_mesures` le
+    /// produit : une seule source de vérité de la boucle jusqu'à l'interface.
+    Reception(MesuresVisionnage),
+}
+
+/// Ce que le visionnage remonte une fois par seconde. Aucun champ ne porte
+/// d'adresse, et c'est vérifié par un test : cette structure traverse
+/// `sky-app` jusqu'à l'interface, où la promesse « aucune adresse IP n'est
+/// jamais journalisée » doit encore tenir.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MesuresVisionnage {
+    /// Images ARRIVÉES depuis le relevé précédent, ramenées à la seconde.
+    pub images_par_seconde: f32,
+    pub debit_kbps: u32,
+    pub latence_decodage_ms: f32,
+    /// Cumulé depuis le début : les images décodées puis jetées faute d'être
+    /// dignes de confiance, et celles que le décodeur a refusées.
+    pub images_abandonnees: u32,
+    pub gigue_ms: f32,
 }
 
 /// Médiane et 99e centile, en millisecondes.
@@ -125,26 +143,92 @@ pub enum Fin {
     /// plus de `BUDGET_RETRY_ENVOI` — « la connexion était trop lente pour la
     /// vidéo » (écart 7). Le correspondant ne dépile plus rien.
     ///
-    /// Le nom et les deux champs datent du découpage maison, supprimé à la
-    /// tâche 8 : il n'y a plus ni tampon d'émission ni morceaux, et une image
-    /// est une unité indivisible, d'où le « 1 sur 1 » que l'hôte y met. Le
-    /// renommage (`FileDePaquetisationPleine`, sans champs) traverse `sky-app`
-    /// et appartient à la tâche 10 ; ne pas lire ces noms comme une description
-    /// du mécanisme actuel.
-    TamponSature { morceau: usize, morceaux: usize },
-    /// Le lien est tombé pendant le flux.
+    /// S'appelait `TamponSature { morceau, morceaux }` jusqu'à la tâche 10 du
+    /// jalon 2 : le découpage maison et son tampon d'émission ont disparu à la
+    /// tâche 8, une image est une unité indivisible, et il n'y a plus rien à
+    /// compter.
+    FileDePaquetisationPleine,
+    /// Le flux s'est interrompu pendant la diffusion ou le visionnage, pour une
+    /// raison déjà rédigée, sans adresse.
+    ///
+    /// LE NOM DIT MOINS QUE LA VARIANTE. Elle couvre bien un lien tombé
+    /// (`LinkEvent::Failed`), mais aussi, côté hôte, une piste média qui ne
+    /// prend plus d'image (`PisteFermee`, `CodecNonNegocie`, `EcritureRefusee`)
+    /// alors que le canal de données peut être parfaitement vivant. Ne pas en
+    /// déduire qu'il n'y a plus personne à qui parler : `hote.rs` a déjà payé
+    /// cette erreur une fois (`en_annoncant_l_arret`).
     LienTombe(String),
+    /// Spectateur : l'hôte a annoncé l'arrêt de son partage
+    /// (`MessageControle::PartageArrete`), puis le lien s'est refermé. C'est
+    /// une fin NORMALE, pas un échec : avant cette variante, elle sortait en
+    /// `LienTombe`, et `sky-probe view` imprimait « ÉCHEC » pour un arrêt
+    /// ordinaire.
+    PartageArrete,
+}
+
+/// Pourquoi le visionnage s'arrête en erreur, typé pour que l'appelant puisse
+/// donner à chaque cause son message honnête (spec §7).
+///
+/// Elle voyage dans sa propre variante, [`ErreurPartage::Visionnage`]. Jusqu'à
+/// la tâche 10 elle passait par `ErreurPartage::Autre` et se retrouvait par
+/// `downcast_ref` — un chemin qu'un changement de type à l'insertion aurait
+/// cassé en silence, la compilation passant quand même.
+#[derive(Debug)]
+pub enum ErreurVisionnage {
+    /// Le décodeur refuse : à l'ouverture (pas de carte, pas de 4:4:4,
+    /// résolution trop grande…) ou `ECHECS_DECODAGE_AVANT_ABANDON` fois de
+    /// suite pendant le flux. Les cinq variantes sont intactes.
+    Decodeur(ErreurDecodeur),
+    /// Aucune image clé en `ATTENTE_IMAGE_CLE_MAX` malgré les demandes.
+    ImageIrreconstituable,
+}
+
+impl std::fmt::Display for ErreurVisionnage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErreurVisionnage::Decodeur(erreur) => erreur.fmt(f),
+            // Le texte de la spec §7, mot pour mot : c'est ce que lit
+            // l'utilisateur de `sky-probe view`. L'application, elle, ne lit
+            // jamais ce texte — elle se branche sur la variante (`fin_vue`).
+            ErreurVisionnage::ImageIrreconstituable => f.write_str(
+                "L'image ne peut pas être reconstituée. Demandez à la personne qui partage de \
+                 relancer son partage.",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ErreurVisionnage {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            // Transparente, comme `#[error(transparent)]` : l'affichage reprend
+            // déjà celui du décodeur, la chaîne ne doit pas le répéter.
+            ErreurVisionnage::Decodeur(erreur) => erreur.source(),
+            ErreurVisionnage::ImageIrreconstituable => None,
+        }
+    }
 }
 
 /// Les fins ANORMALES : tout ce qui, dans `sky-probe`, remontait par `?`.
 #[derive(Debug)]
 pub enum ErreurPartage {
     Compte(ErreurCompte),
+    /// Le spectateur n'a pas pu décoder ou reconstituer l'image. Typée jusqu'à
+    /// l'appelant : `sky-app` donne à chaque cause son message, sans jamais lire
+    /// un texte d'erreur (celui d'`AucuneCarteNvidia` vient de `libloading` et
+    /// peut être LOCALISÉ selon la langue de Windows).
+    Visionnage(ErreurVisionnage),
     Autre(anyhow::Error),
 }
 
 impl From<anyhow::Error> for ErreurPartage {
     fn from(e: anyhow::Error) -> ErreurPartage {
         ErreurPartage::Autre(e)
+    }
+}
+
+impl From<ErreurVisionnage> for ErreurPartage {
+    fn from(e: ErreurVisionnage) -> ErreurPartage {
+        ErreurPartage::Visionnage(e)
     }
 }

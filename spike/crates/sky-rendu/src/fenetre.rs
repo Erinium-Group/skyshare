@@ -41,15 +41,20 @@ use windows::Win32::Graphics::Dxgi::{
     IDXGISurface, IDXGISwapChain1, DXGI_ERROR_NOT_FOUND, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1,
     DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_F11;
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GetClientRect, GetWindowLongPtrW, LoadCursorW, PeekMessageW, RegisterClassExW,
-    SetWindowLongPtrW, ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-    CW_USEDEFAULT, GWLP_USERDATA, IDC_ARROW, MSG, PM_REMOVE, SIZE_MINIMIZED, SW_SHOW,
-    WINDOW_EX_STYLE, WM_CLOSE, WM_KEYDOWN, WM_NCCREATE, WM_NCDESTROY, WM_SIZE, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW,
+    GetClientRect, GetWindowLongPtrW, GetWindowPlacement, IsWindowVisible, LoadCursorW,
+    PeekMessageW, RegisterClassExW, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos,
+    ShowWindow, TranslateMessage, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT,
+    GWLP_USERDATA, GWL_STYLE, HWND_TOP, IDC_ARROW, MSG, PM_REMOVE, SIZE_MINIMIZED,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+    SW_HIDE, SW_SHOW, WINDOWPLACEMENT, WINDOW_EX_STYLE, WM_CLOSE, WM_KEYDOWN, WM_NCCREATE,
+    WM_NCDESTROY, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use crate::etat::{dessiner, EtatVisionnage};
@@ -61,7 +66,8 @@ pub enum EvenementFenetre {
     /// L'utilisateur a fermé la fenêtre. Elle reste ouverte : c'est à l'appelant
     /// de la laisser tomber.
     FermetureDemandee,
-    /// F11 : à l'appelant de décider ce que « plein écran » veut dire.
+    /// F11. Consommé par le spectateur (`sky-partage`), qui appelle
+    /// [`Fenetre::basculer_plein_ecran`].
     PleinEcranBascule,
 }
 
@@ -104,6 +110,9 @@ pub struct Fenetre {
     /// affichée : il n'y a alors plus d'état à repeindre, la prochaine image
     /// remplira la nouvelle taille.
     dernier_etat: Option<EtatVisionnage>,
+    /// Le placement d'avant le plein écran, pour y revenir. `Some` : la fenêtre
+    /// est en plein écran.
+    avant_plein_ecran: Option<WINDOWPLACEMENT>,
 }
 
 impl Fenetre {
@@ -372,7 +381,100 @@ impl Fenetre {
             largeur,
             hauteur,
             dernier_etat: None,
+            avant_plein_ecran: None,
         })
+    }
+
+    /// La fenêtre occupe-t-elle tout son écran ?
+    pub fn en_plein_ecran(&self) -> bool {
+        self.avant_plein_ecran.is_some()
+    }
+
+    /// Passe en plein écran, ou en revient (F11, décision D4 de la spec : la
+    /// fenêtre séparée rend le plein écran possible sans rien arbitrer avec la
+    /// vue web).
+    ///
+    /// La méthode est la classique « fenêtre sans bordure à la taille du
+    /// moniteur » : on retire le cadre (`WS_OVERLAPPEDWINDOW`) et on étend la
+    /// fenêtre au rectangle du moniteur qui la porte. Pas de plein écran
+    /// exclusif DXGI (`SetFullscreenState`) : il change le mode d'affichage et
+    /// rend l'alt-tab brutal, pour un gain de latence que le modèle « flip »
+    /// obtient déjà en fenêtre sans bordure.
+    ///
+    /// Le changement de taille arrive par `WM_SIZE`, donc la chaîne d'échange est
+    /// redimensionnée au prochain `pompe_messages` — par le même chemin qu'un
+    /// redimensionnement à la souris.
+    ///
+    /// Elle ne MONTRE jamais une fenêtre cachée : aucun drapeau
+    /// `SWP_SHOWWINDOW`, et le placement restauré garde l'état caché. C'est ce
+    /// qui permet de l'éprouver sur une fenêtre masquée sans rien afficher.
+    pub fn basculer_plein_ecran(&mut self) -> anyhow::Result<()> {
+        unsafe {
+            match self.avant_plein_ecran.take() {
+                None => {
+                    let mut placement = WINDOWPLACEMENT {
+                        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                        ..Default::default()
+                    };
+                    GetWindowPlacement(self.hwnd, &mut placement)
+                        .context("placement de la fenêtre")?;
+                    let moniteur = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTONEAREST);
+                    let mut info = MONITORINFO {
+                        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                        ..Default::default()
+                    };
+                    if !GetMonitorInfoW(moniteur, &mut info).as_bool() {
+                        return Err(anyhow!("moniteur de la fenêtre introuvable"));
+                    }
+                    let style = GetWindowLongPtrW(self.hwnd, GWL_STYLE);
+                    SetWindowLongPtrW(
+                        self.hwnd,
+                        GWL_STYLE,
+                        style & !(WS_OVERLAPPEDWINDOW.0 as isize),
+                    );
+                    let ecran = info.rcMonitor;
+                    SetWindowPos(
+                        self.hwnd,
+                        Some(HWND_TOP),
+                        ecran.left,
+                        ecran.top,
+                        ecran.right - ecran.left,
+                        ecran.bottom - ecran.top,
+                        SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                    )
+                    .context("passage en plein écran")?;
+                    self.avant_plein_ecran = Some(placement);
+                }
+                Some(mut placement) => {
+                    let style = GetWindowLongPtrW(self.hwnd, GWL_STYLE);
+                    SetWindowLongPtrW(self.hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW.0 as isize);
+                    // Le placement relu avant le plein écran porte un état
+                    // d'affichage ; pour une fenêtre cachée, on n'en restaure
+                    // que la géométrie. `SetWindowPlacement` avec un état
+                    // « normal » la MONTRERAIT.
+                    if !IsWindowVisible(self.hwnd).as_bool() {
+                        placement.showCmd = SW_HIDE.0 as u32;
+                    }
+                    SetWindowPlacement(self.hwnd, &placement).context("retour du plein écran")?;
+                    SetWindowPos(
+                        self.hwnd,
+                        None,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE
+                            | SWP_NOSIZE
+                            | SWP_NOZORDER
+                            | SWP_NOOWNERZORDER
+                            | SWP_NOACTIVATE
+                            | SWP_FRAMECHANGED,
+                    )
+                    .context("cadre de la fenêtre")?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Recopie la cible dans le tampon arrière et présente.
@@ -816,6 +918,77 @@ mod tests {
         // Le tampon entier, pas un pixel de fond : ce test vérifie le rendu après
         // redimensionnement, la distinction des fonds a son propre test.
         assert_ne!(dernier, apres, "le nouvel état n'a pas été peint");
+    }
+
+    /// F11 aller-retour, sur une fenêtre masquée : la zone cliente prend la
+    /// taille du moniteur, la chaîne d'échange suit, puis tout revient — et
+    /// rien n'est jamais montré sur la machine de qui lance les tests.
+    ///
+    /// Neutralisations mesurées : (1) ne pas retirer `WS_OVERLAPPEDWINDOW` — la
+    /// zone cliente reste amputée du cadre (2544×1401 contre 2560×1440 sur la
+    /// machine de développement) ; (2) ne pas restaurer le placement — la
+    /// taille finale reste celle du moniteur.
+    ///
+    /// NON NEUTRALISÉ, exprès : retirer le forçage `SW_HIDE` du retour. Si la
+    /// garde compte, cette neutralisation MONTRE une fenêtre sur l'écran de qui
+    /// lance les tests — exactement ce que les assertions de visibilité
+    /// ci-dessous sont là pour empêcher. Elles restent comme filet, non prouvées.
+    #[test]
+    fn le_plein_ecran_couvre_le_moniteur_puis_rend_la_taille_d_avant() {
+        let mut fenetre = ouvrir_pour_test(320, 200);
+        fenetre
+            .afficher_etat(EtatVisionnage::EnAttente)
+            .expect("rendu initial");
+        let avant = fenetre.taille();
+
+        let moniteur = unsafe {
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            assert!(GetMonitorInfoW(
+                MonitorFromWindow(fenetre.hwnd, MONITOR_DEFAULTTONEAREST),
+                &mut info
+            )
+            .as_bool());
+            info.rcMonitor
+        };
+        let ecran = (
+            (moniteur.right - moniteur.left) as u32,
+            (moniteur.bottom - moniteur.top) as u32,
+        );
+
+        fenetre.basculer_plein_ecran().expect("plein écran");
+        assert!(fenetre.en_plein_ecran());
+        let _ = fenetre.pompe_messages();
+        assert_eq!(
+            fenetre.taille(),
+            ecran,
+            "la zone cliente ne couvre pas le moniteur"
+        );
+        let desc = unsafe { fenetre.chaine.GetDesc1() }.expect("description de la chaîne");
+        assert_eq!(
+            (desc.Width, desc.Height),
+            ecran,
+            "la chaîne d'échange n'a pas suivi"
+        );
+        assert!(
+            !unsafe { IsWindowVisible(fenetre.hwnd) }.as_bool(),
+            "le plein écran a montré une fenêtre masquée"
+        );
+
+        fenetre.basculer_plein_ecran().expect("retour");
+        assert!(!fenetre.en_plein_ecran());
+        let _ = fenetre.pompe_messages();
+        assert_eq!(
+            fenetre.taille(),
+            avant,
+            "la taille d'avant n'est pas rendue"
+        );
+        assert!(
+            !unsafe { IsWindowVisible(fenetre.hwnd) }.as_bool(),
+            "le retour du plein écran a montré une fenêtre masquée"
+        );
     }
 
     /// L'appareil doit vivre sur la carte NVIDIA quand il y en a une : c'est ce

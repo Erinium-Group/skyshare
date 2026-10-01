@@ -1,7 +1,8 @@
 //! Côté spectateur : demander le partage d'un ami, intégrer sa réponse, puis
-//! recevoir et MESURER le flux. Déplacé de `sky-probe/src/cmd_view.rs` (C2).
-//! Le flux est JETÉ par défaut (spec D2) : seul un appelant qui fournit un
-//! puits (`sky-probe view` et son fichier) en garde les octets.
+//! recevoir, décoder, AFFICHER et mesurer le flux. Déplacé de
+//! `sky-probe/src/cmd_view.rs` (C2). Le flux n'est jamais ENREGISTRÉ par défaut
+//! (spec D2) : chaque image est affichée puis lâchée, et seul un appelant qui
+//! fournit un puits (`sky-probe view` et son fichier) en garde les octets.
 
 use std::io::Write;
 use std::time::{Duration, Instant};
@@ -14,7 +15,10 @@ use sky_rendu::{EtatVisionnage, EvenementFenetre, Fenetre, ImageAAfficher};
 
 use crate::arret::{synchroniser_sauf_arret, Arret, ErreurAttente, HorlogeArretable};
 use crate::etablissement::{etablir, Etablissement};
-use crate::evenement::{Bilan, BilanReception, ErreurPartage, Evenement, Fin, Mesures};
+use crate::evenement::{
+    Bilan, BilanReception, ErreurPartage, ErreurVisionnage, Evenement, Fin, Mesures,
+    MesuresVisionnage,
+};
 use crate::reception::Reception;
 use crate::rendez_vous::{interroger, reponse_a_l_offre, session_de, ATTENTE_SPECTATEUR, CADENCE};
 
@@ -69,51 +73,6 @@ const ATTENTE_IMAGE_CLE_MAX: Duration = Duration::from_secs(10);
 /// réel à deux machines.
 const PAUSE_SUR_INACTIVITE: Duration = Duration::from_millis(1);
 
-/// Pourquoi le visionnage s'arrête en erreur, typé pour que l'appelant puisse
-/// donner à chaque cause son message honnête (spec §7).
-///
-/// Elle voyage dans `ErreurPartage::Autre` et se retrouve par
-/// `downcast_ref::<ErreurVisionnage>()`. Une variante dédiée de
-/// `ErreurPartage` serait plus directe, mais `sky-app` (`partage.rs`) et
-/// `sky-probe` (`cmd_host.rs`) font un `match` exhaustif sur `ErreurPartage` :
-/// l'ajouter casserait leur compilation, et ces fichiers appartiennent à la
-/// tâche 10. Le type est préservé jusqu'à la sortie ; seul le chemin pour
-/// l'atteindre change.
-#[derive(Debug)]
-pub enum ErreurVisionnage {
-    /// Le décodeur refuse : à l'ouverture (pas de carte, pas de 4:4:4,
-    /// résolution trop grande…) ou `ECHECS_DECODAGE_AVANT_ABANDON` fois de
-    /// suite pendant le flux. Les cinq variantes sont intactes.
-    Decodeur(ErreurDecodeur),
-    /// Aucune image clé en `ATTENTE_IMAGE_CLE_MAX` malgré les demandes.
-    ImageIrreconstituable,
-}
-
-impl std::fmt::Display for ErreurVisionnage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ErreurVisionnage::Decodeur(erreur) => erreur.fmt(f),
-            // Le texte de la spec §7, mot pour mot : `sky-app` affiche
-            // aujourd'hui `to_string()`, l'utilisateur le lit donc déjà tel quel.
-            ErreurVisionnage::ImageIrreconstituable => f.write_str(
-                "L'image ne peut pas être reconstituée. Demandez à la personne qui partage de \
-                 relancer son partage.",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for ErreurVisionnage {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            // Transparente, comme `#[error(transparent)]` : l'affichage reprend
-            // déjà celui du décodeur, la chaîne ne doit pas le répéter.
-            ErreurVisionnage::Decodeur(erreur) => erreur.source(),
-            ErreurVisionnage::ImageIrreconstituable => None,
-        }
-    }
-}
-
 /// Ce que le spectateur annonce au décodeur comme taille maximale.
 ///
 /// La vraie résolution vient du rappel de séquence de NVDEC, pas d'ici : le
@@ -135,6 +94,10 @@ const HAUTEUR_FENETRE: u32 = 720;
 pub trait LienSpectateur {
     fn envoyer_controle(&mut self, message: &MessageControle) -> Result<(), ErreurEnvoi>;
     fn poll(&mut self) -> anyhow::Result<LinkEvent>;
+    /// Paquets émis vers une adresse publique : un COMPTE, jamais une adresse.
+    /// Seul le bilan de `sky-probe view` le lit, pour dire si la mesure est
+    /// celle d'un vrai réseau.
+    fn vers_internet(&self) -> u64;
 }
 
 impl LienSpectateur for PeerLink {
@@ -144,6 +107,10 @@ impl LienSpectateur for PeerLink {
 
     fn poll(&mut self) -> anyhow::Result<LinkEvent> {
         PeerLink::poll(self)
+    }
+
+    fn vers_internet(&self) -> u64 {
+        self.destinations().1
     }
 }
 
@@ -157,10 +124,11 @@ impl LienSpectateur for PeerLink {
 pub trait Afficheur {
     fn afficher(&mut self, image: &dyn ImageAAfficher) -> anyhow::Result<()>;
     fn afficher_etat(&mut self, etat: EtatVisionnage) -> anyhow::Result<()>;
-    /// Traite les messages en attente et dit si l'utilisateur a fermé la
+    /// Traite les messages en attente et rend ce que l'utilisateur a fait de la
     /// fenêtre. À appeler à chaque tour : une fenêtre qu'on ne pompe pas est
     /// déclarée « ne répond pas » par Windows.
-    fn fermeture_demandee(&mut self) -> bool;
+    fn evenements(&mut self) -> Vec<EvenementFenetre>;
+    fn basculer_plein_ecran(&mut self) -> anyhow::Result<()>;
 }
 
 impl Afficheur for Fenetre {
@@ -172,8 +140,12 @@ impl Afficheur for Fenetre {
         Fenetre::afficher_etat(self, etat)
     }
 
-    fn fermeture_demandee(&mut self) -> bool {
-        Fenetre::pompe_messages(self).contains(&EvenementFenetre::FermetureDemandee)
+    fn evenements(&mut self) -> Vec<EvenementFenetre> {
+        Fenetre::pompe_messages(self)
+    }
+
+    fn basculer_plein_ecran(&mut self) -> anyhow::Result<()> {
+        Fenetre::basculer_plein_ecran(self)
     }
 }
 
@@ -203,26 +175,14 @@ impl Decodage for Decodeur {
     }
 }
 
-/// Ce que le visionnage remonte une fois par seconde. Aucun champ ne porte
-/// d'adresse, et c'est vérifié par un test : cette structure traverse
-/// `sky-app` jusqu'à l'interface, où la promesse « aucune adresse IP n'est
-/// jamais journalisée » doit encore tenir.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MesuresVisionnage {
-    pub images_par_seconde: f32,
-    pub debit_kbps: u32,
-    pub latence_decodage_ms: f32,
-    /// Cumulé depuis le début : les images décodées puis jetées faute d'être
-    /// dignes de confiance, et celles que le décodeur a refusées.
-    pub images_abandonnees: u32,
-    pub gigue_ms: f32,
-}
-
 /// Ce que `Visionnage::traiter` dit à la boucle de faire ensuite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Suite {
     Continuer,
     LienPerdu(String),
+    /// Le lien s'est refermé APRÈS que l'hôte a annoncé l'arrêt : une fin
+    /// normale, qui devient `Fin::PartageArrete`.
+    PartageArrete,
 }
 
 /// La décision du spectateur : quoi décoder, quoi afficher, quand redemander
@@ -309,8 +269,20 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
         self.montrer(EtatVisionnage::EnAttente)
     }
 
-    pub fn fermeture_demandee(&mut self) -> bool {
-        self.afficheur.fermeture_demandee()
+    /// Sert la fenêtre et dit si l'utilisateur a demandé sa fermeture.
+    ///
+    /// Le `match` est exhaustif : un événement de fenêtre ajouté demain sans
+    /// destinataire ne compile pas. C'est ce qui manquait à F11, produit par
+    /// `sky-rendu` depuis la tâche 3 et lu par personne jusqu'à la tâche 10.
+    pub fn servir_fenetre(&mut self) -> anyhow::Result<bool> {
+        let mut fermeture = false;
+        for evenement in self.afficheur.evenements() {
+            match evenement {
+                EvenementFenetre::FermetureDemandee => fermeture = true,
+                EvenementFenetre::PleinEcranBascule => self.afficheur.basculer_plein_ecran()?,
+            }
+        }
+        Ok(fermeture)
     }
 
     pub fn reception(&mut self) -> &mut Reception {
@@ -334,7 +306,7 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
         lien: &mut dyn LienSpectateur,
         evenement: LinkEvent,
         maintenant: Instant,
-    ) -> anyhow::Result<Suite> {
+    ) -> Result<Suite, ErreurPartage> {
         match evenement {
             LinkEvent::Image { donnees, horodatage_ms, cle, sans_perte } => {
                 self.sur_image(lien, &donnees, horodatage_ms, cle, sans_perte, maintenant)?;
@@ -347,11 +319,12 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             LinkEvent::Controle(MessageControle::DemandeImageCle) => {}
             LinkEvent::Failed(raison) => {
                 // Après un arrêt annoncé, l'hôte raccroche : ce `Failed` est la
-                // conséquence de l'arrêt, et l'utilisateur doit continuer à lire
-                // la vraie cause. `Fin::PartageArrete` reste à la tâche 10.
-                if !self.partage_arrete {
-                    self.montrer(EtatVisionnage::ConnexionPerdue)?;
+                // CONSÉQUENCE de l'arrêt, pas une panne. L'écran garde la vraie
+                // cause, et la fin est normale — pas un « ÉCHEC ».
+                if self.partage_arrete {
+                    return Ok(Suite::PartageArrete);
                 }
+                self.montrer(EtatVisionnage::ConnexionPerdue)?;
                 return Ok(Suite::LienPerdu(raison));
             }
             LinkEvent::Connected | LinkEvent::Idle => {}
@@ -364,7 +337,7 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             if !self.partage_arrete
                 && maintenant.saturating_duration_since(depuis) >= ATTENTE_IMAGE_CLE_MAX
             {
-                return Err(anyhow::Error::new(ErreurVisionnage::ImageIrreconstituable));
+                return Err(ErreurPartage::Visionnage(ErreurVisionnage::ImageIrreconstituable));
             }
         }
         Ok(Suite::Continuer)
@@ -378,7 +351,7 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
         cle: bool,
         sans_perte: bool,
         maintenant: Instant,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), ErreurPartage> {
         let arrivee_us = maintenant.saturating_duration_since(self.origine).as_micros() as u64;
         self.reception.compter_image(donnees.len(), horodatage_ms * 1_000, arrivee_us);
 
@@ -411,14 +384,14 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             Err(erreur) => {
                 self.echecs_consecutifs += 1;
                 if self.echecs_consecutifs >= ECHECS_DECODAGE_AVANT_ABANDON {
-                    // Typée jusqu'à la sortie : la tâche 10 donne un message
+                    // Typée jusqu'à la sortie : `sky-app` donne un message
                     // propre à chacune des cinq variantes du décodeur.
-                    return Err(anyhow::Error::new(ErreurVisionnage::Decodeur(erreur)));
+                    return Err(ErreurPartage::Visionnage(ErreurVisionnage::Decodeur(erreur)));
                 }
                 // Un refus isolé peut venir d'une unité tronquée ; une image clé
                 // repart de zéro et la répare.
                 self.cle_vue = false;
-                return self.abandonner(lien, maintenant);
+                return Ok(self.abandonner(lien, maintenant)?);
             }
         };
         // Le plafond compte les refus CONSÉCUTIFS : des refus épars sur une
@@ -438,7 +411,7 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             // Décodée sans erreur, et pourtant fausse : voir la note de
             // `Visionnage`. C'est ici, et nulle part ailleurs, que le spectateur
             // refuse d'afficher du faux sans le savoir.
-            return self.abandonner(lien, maintenant);
+            return Ok(self.abandonner(lien, maintenant)?);
         }
         self.afficheur.afficher(&image)?;
         self.etat_affiche = None;
@@ -590,7 +563,7 @@ pub fn regarder(
     // Le contexte CUDA tenu pendant l'attente ne coûte rien de mesurable ; il est
     // lié à ce fil, qui est aussi celui de la boucle de réception.
     let decodeur = Decodeur::nouveau(LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)
-        .map_err(|e| ErreurPartage::Autre(anyhow::Error::new(ErreurVisionnage::Decodeur(e))))?;
+        .map_err(|e| ErreurPartage::Visionnage(ErreurVisionnage::Decodeur(e)))?;
     // L'identité DURABLE : c'est pour sa clé d'annuaire que l'hôte scelle
     // l'enveloppe de sa réponse. La clé de l'offre, elle, est éphémère.
     let identite = coffre.identite().map_err(ErreurPartage::Compte)?;
@@ -656,19 +629,18 @@ pub fn regarder(
     recevoir(&mut link, decodeur, &ami.discord_name, puits, p.duree_max, arret, evenements)
 }
 
-/// La boucle de réception : décoder, afficher, mesurer.
+/// Ouvre la fenêtre, puis passe la main à `boucle`.
 ///
 /// Le décodeur (créé en tête de `regarder`) et la fenêtre sont fabriqués dans ce
 /// module plutôt que reçus de l'appelant, pour que ni `ParametresSpectateur` ni
-/// la signature de `regarder` ne changent — `sky-probe` et `sky-app` les
-/// construisent, et les deux appartiennent à d'autres tâches. Tout ce qui se
-/// décide se décide dans `Visionnage`, qui est éprouvé par doublures ; cette
-/// fonction-ci n'est plus que du câblage.
+/// la signature de `regarder` ne changent. Cette fonction n'est que du câblage
+/// vers des types réels ; tout ce qui se décide est dans `boucle` et
+/// `Visionnage`, éprouvés par doublures.
 fn recevoir(
     link: &mut PeerLink,
     decodeur: Decodeur,
     nom_de_l_hote: &str,
-    mut puits: Option<Puits>,
+    puits: Option<Puits>,
     duree_max: Option<Duration>,
     arret: &Arret,
     evenements: &mut dyn FnMut(Evenement),
@@ -678,48 +650,66 @@ fn recevoir(
         LARGEUR_FENETRE,
         HAUTEUR_FENETRE,
     )?;
+    let visionnage = Visionnage::nouveau(decodeur, fenetre, Instant::now());
+    boucle(link, visionnage, puits, duree_max, arret, evenements)
+}
 
+/// La boucle de réception : décoder, afficher, mesurer — jusqu'à une fin.
+///
+/// Elle PREND le visionnage, donc la fenêtre : quelle que soit la sortie, la
+/// fenêtre tombe avec elle. « Fermée à l'arrêt » (décision D4) ne dépend ainsi
+/// d'aucun geste à ne pas oublier.
+///
+/// UN SEUL CHEMIN D'ARRÊT. La croix de la fenêtre ne sort pas de la boucle par
+/// elle-même : elle LÈVE le même signal que le bouton « Arrêter » de
+/// l'interface (`Noyau::arreter`), et c'est la vérification de ce signal, en
+/// tête de tour, qui sort. Deux chemins de sortie distincts auraient fini par
+/// diverger — l'un des deux laissant, un jour, un fil ou une fenêtre vivants.
+fn boucle<D: Decodage, A: Afficheur>(
+    lien: &mut dyn LienSpectateur,
+    mut visionnage: Visionnage<D, A>,
+    mut puits: Option<Puits>,
+    duree_max: Option<Duration>,
+    arret: &Arret,
+    evenements: &mut dyn FnMut(Evenement),
+) -> Result<Fin, ErreurPartage> {
     let t0 = Instant::now();
-    let mut visionnage = Visionnage::nouveau(decodeur, fenetre, t0);
     visionnage.commencer()?;
     let mut dernier_releve = t0;
 
     let fin = loop {
+        // À chaque tour, et AVANT le signal d'arrêt : une fenêtre qu'on ne
+        // pompe pas est déclarée « ne répond pas » par Windows, et la croix
+        // doit être vue au tour même où elle est cliquée.
+        if visionnage.servir_fenetre()? {
+            arret.demander();
+        }
         if arret.est_demande() {
             break Fin::Arrete;
         }
         if duree_max.is_some_and(|d| t0.elapsed() >= d) {
-            break Fin::DureeEcoulee(Box::new(bilan(link, &mut visionnage, t0)));
-        }
-        // À chaque tour : une fenêtre qu'on ne pompe pas est déclarée « ne
-        // répond pas » par Windows, et la croix doit arrêter le visionnage.
-        if visionnage.fermeture_demandee() {
-            break Fin::Arrete;
+            break Fin::DureeEcoulee(Box::new(bilan(&*lien, &mut visionnage, t0)));
         }
 
-        let evenement = LienSpectateur::poll(link)?;
+        let evenement = lien.poll()?;
         let inactif = matches!(evenement, LinkEvent::Idle);
         // Le puits reçoit l'unité d'accès telle qu'elle est arrivée, avant tout
         // décodage : c'est ce que `sky-probe view` écrit dans son fichier.
         if let (LinkEvent::Image { donnees, .. }, Some(p)) = (&evenement, puits.as_mut()) {
             p.write_all(donnees).map_err(anyhow::Error::from)?;
         }
-        if let Suite::LienPerdu(raison) = visionnage.traiter(link, evenement, Instant::now())? {
-            break Fin::LienTombe(raison);
+        match visionnage.traiter(lien, evenement, Instant::now())? {
+            Suite::Continuer => {}
+            Suite::LienPerdu(raison) => break Fin::LienTombe(raison),
+            Suite::PartageArrete => break Fin::PartageArrete,
         }
 
         let maintenant = Instant::now();
         if maintenant.duration_since(dernier_releve) >= Duration::from_secs(1) {
-            let m = visionnage.relever_mesures(maintenant);
             dernier_releve = maintenant;
-            // `Mesures::Reception` est dérivée du MÊME relevé, pour qu'il n'y
-            // ait qu'une source de vérité. Son renommage vers
-            // `MesuresVisionnage` traverse `sky-app` : c'est la tâche 10.
-            evenements(Evenement::Mesures(Mesures::Reception {
-                debit_mbps: f64::from(m.debit_kbps) / 1000.0,
-                images_par_s: m.images_par_seconde.round() as u64,
-                gigue_ms: f64::from(m.gigue_ms),
-            }));
+            evenements(Evenement::Mesures(Mesures::Reception(
+                visionnage.relever_mesures(maintenant),
+            )));
         }
 
         // Sur `Idle` seulement : voir `PAUSE_SUR_INACTIVITE` (~15 ms réels sous
@@ -738,11 +728,11 @@ fn recevoir(
 }
 
 fn bilan<D: Decodage, A: Afficheur>(
-    link: &PeerLink,
+    lien: &dyn LienSpectateur,
     visionnage: &mut Visionnage<D, A>,
     t0: Instant,
 ) -> Bilan {
-    let (_, vers_internet) = link.destinations();
+    let vers_internet = lien.vers_internet();
     let reception = visionnage.reception();
     Bilan::Reception(BilanReception {
         duree_s: t0.elapsed().as_secs_f64(),
@@ -954,20 +944,24 @@ mod tests {
 
         for numero in 1..ECHECS_DECODAGE_AVANT_ABANDON {
             v.traiter(&mut lien, image(false, true), t0)
-                .unwrap_or_else(|e| panic!("le refus {numero} ne doit pas encore abandonner : {e}"));
+                .unwrap_or_else(|e| panic!("le refus {numero} ne doit pas encore abandonner : {e:?}"));
         }
         let erreur = v
             .traiter(&mut lien, image(false, true), t0)
             .expect_err("au-delà du plafond, le refus remonte");
 
-        // L'erreur TYPÉE du décodeur doit survivre jusqu'à la sortie : la tâche
-        // 10 donne à chacune de ses cinq variantes un message différent (spec
-        // §7). Neutralisation : l'envelopper dans un `anyhow!` textuel — le
-        // `downcast_ref` rend `None`.
+        // L'erreur TYPÉE du décodeur doit survivre jusqu'à la sortie, DANS SA
+        // VARIANTE d'`ErreurPartage` : `sky-app` donne à chacune des cinq
+        // variantes un message différent (spec §7), en se branchant sur le type
+        // et jamais sur un texte. Neutralisation (tâche 10) : la faire voyager
+        // dans `ErreurPartage::Autre(anyhow::Error::new(..))`, comme avant —
+        // ce test rougit.
         assert!(
             matches!(
-                erreur.downcast_ref::<ErreurVisionnage>(),
-                Some(ErreurVisionnage::Decodeur(ErreurDecodeur::QuatreQuatreQuatreNonPris))
+                erreur,
+                ErreurPartage::Visionnage(ErreurVisionnage::Decodeur(
+                    ErreurDecodeur::QuatreQuatreQuatreNonPris
+                ))
             ),
             "la variante du décodeur est préservée : {erreur:?}"
         );
@@ -1061,10 +1055,7 @@ mod tests {
             .expect_err("le délai écoulé, le visionnage renonce");
 
         assert!(
-            matches!(
-                erreur.downcast_ref::<ErreurVisionnage>(),
-                Some(ErreurVisionnage::ImageIrreconstituable)
-            ),
+            matches!(erreur, ErreurPartage::Visionnage(ErreurVisionnage::ImageIrreconstituable)),
             "la cause est typée : {erreur:?}"
         );
         assert!(demandes(&lien) >= 2, "plusieurs demandes sont parties avant de renoncer");
@@ -1097,6 +1088,9 @@ mod tests {
         // la CONSÉQUENCE de l'arrêt, pas une panne. Le repeindre en « Connexion
         // perdue » montrerait une fausse cause. Neutralisation : repeindre
         // quand même — `dernier_etat` vaut `ConnexionPerdue`.
+        //
+        // Et la boucle sort en fin NORMALE (tâche 10, D3) : avant, elle sortait
+        // en `LienPerdu`, et `sky-probe view` imprimait « ÉCHEC ».
         let t0 = Instant::now();
         let mut lien = LienFactice::nouveau();
         let mut v = visionnage(&[], Issue::Image, t0);
@@ -1108,7 +1102,7 @@ mod tests {
             .expect("traitement");
 
         assert_eq!(v.afficheur().dernier_etat(), Some(EtatVisionnage::PartageArrete));
-        assert!(matches!(suite, Suite::LienPerdu(_)), "la boucle s'arrête quand même");
+        assert_eq!(suite, Suite::PartageArrete, "un arrêt annoncé n'est pas un lien perdu");
     }
 
     #[test]
@@ -1151,7 +1145,7 @@ mod tests {
 
         for numero in 0..issues.len() {
             v.traiter(&mut lien, image(false, true), t0)
-                .unwrap_or_else(|e| panic!("l'unité {numero} ne doit pas faire abandonner : {e}"));
+                .unwrap_or_else(|e| panic!("l'unité {numero} ne doit pas faire abandonner : {e:?}"));
         }
     }
 
@@ -1189,14 +1183,115 @@ mod tests {
     #[test]
     fn la_fermeture_de_la_fenetre_remonte_a_la_boucle() {
         // La croix de la fenêtre doit arrêter le visionnage ; la boucle
-        // n'interroge que `Visionnage::fermeture_demandee`. Neutralisation :
+        // n'interroge que `Visionnage::servir_fenetre`. Neutralisation :
         // rendre `false` en dur — le test rougit.
         let t0 = Instant::now();
         let mut v = visionnage(&[], Issue::Image, t0);
 
-        assert!(!v.fermeture_demandee(), "rien n'a été demandé");
+        assert!(!v.servir_fenetre().expect("service"), "rien n'a été demandé");
         v.afficheur_mut().demander_la_fermeture();
-        assert!(v.fermeture_demandee(), "la fermeture demandée remonte");
+        assert!(v.servir_fenetre().expect("service"), "la fermeture demandée remonte");
+    }
+
+    #[test]
+    fn f11_bascule_le_plein_ecran_et_ne_ferme_rien() {
+        // D6 (tâche 10) : `PleinEcranBascule` était PRODUIT par `sky-rendu`
+        // depuis la tâche 3 et lu par personne — la serrure posée mais jamais
+        // branchée. Neutralisation : ignorer `PleinEcranBascule` dans
+        // `servir_fenetre` — aucune bascule, le test rougit.
+        let t0 = Instant::now();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        v.afficheur_mut().appuyer_sur_f11();
+        let fermeture = v.servir_fenetre().expect("service");
+
+        assert_eq!(v.afficheur().bascules(), 1, "F11 bascule le plein écran");
+        assert!(!fermeture, "F11 n'est pas une demande de fermeture");
+    }
+
+    /// Une boucle complète sur doublures, bornée : un défaut qui la ferait
+    /// tourner sans fin rend le test rouge au lieu de le figer.
+    fn boucler(
+        lien: &mut LienFactice,
+        v: Visionnage<DecodeurFactice, FenetreFactice>,
+        arret: &Arret,
+    ) -> Result<Fin, ErreurPartage> {
+        boucle(lien, v, None, Some(Duration::from_secs(5)), arret, &mut |_| {})
+    }
+
+    #[test]
+    fn la_croix_de_la_fenetre_leve_le_meme_arret_que_le_bouton() {
+        // D8 : UN SEUL CHEMIN D'ARRÊT. La croix ne sort pas de la boucle par
+        // elle-même : elle lève le signal que lève aussi le bouton
+        // « Arrêter » de l'interface (`Noyau::arreter`). Neutralisation :
+        // `break Fin::Arrete` directement sur la croix, sans lever le signal —
+        // la fin est la même, mais `arret` reste muet et ce test rougit.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+        v.afficheur_mut().demander_la_fermeture();
+        let fermee = v.afficheur().temoin_de_fermeture();
+        let arret = Arret::nouveau();
+
+        let fin = boucler(&mut lien, v, &arret);
+
+        assert_eq!(fin.ok(), Some(Fin::Arrete));
+        assert!(arret.est_demande(), "la croix lève le signal du bouton, pas un second chemin");
+        assert!(fermee.get(), "la fenêtre est détruite à la sortie");
+        assert_eq!(lien.polls(), 0, "aucun tour de réception après la croix");
+    }
+
+    #[test]
+    fn le_bouton_arreter_sort_de_la_boucle_et_ferme_la_fenetre() {
+        // Le chemin du bouton : le signal levé de l'extérieur. La boucle PREND
+        // le visionnage, donc la fenêtre tombe avec elle — c'est le témoin qui
+        // le dit, pas une supposition.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let v = visionnage(&[], Issue::Image, t0);
+        let fermee = v.afficheur().temoin_de_fermeture();
+        let arret = Arret::nouveau();
+        arret.demander();
+
+        let fin = boucler(&mut lien, v, &arret);
+
+        assert_eq!(fin.ok(), Some(Fin::Arrete));
+        assert!(fermee.get(), "la fenêtre est détruite à l'arrêt");
+    }
+
+    #[test]
+    fn un_arret_annonce_par_l_hote_finit_en_partage_arrete() {
+        // D3 (tâche 10), au niveau de la boucle : l'hôte annonce l'arrêt puis
+        // raccroche. Avant, la boucle sortait en `Fin::LienTombe` et
+        // `sky-probe view` imprimait « ÉCHEC » pour un arrêt normal.
+        // Neutralisations mesurées : (1) traduire `Suite::PartageArrete` en
+        // `Fin::LienTombe` dans `boucle` — ce test rougit seul ; (2) faire
+        // rendre `Suite::LienPerdu` au `Failed` qui suit l'annonce — il rougit
+        // avec `la_fin_du_lien_apres_un_arret_annonce_ne_masque_pas_l_arret`,
+        // qui éprouve la même décision un étage plus bas.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        lien.injecter(LinkEvent::Controle(MessageControle::PartageArrete));
+        lien.injecter(LinkEvent::Failed("le lien est tombé".to_string()));
+        let v = visionnage(&[], Issue::Image, t0);
+
+        let fin = boucler(&mut lien, v, &Arret::nouveau());
+
+        assert_eq!(fin.ok(), Some(Fin::PartageArrete));
+    }
+
+    #[test]
+    fn un_lien_qui_tombe_sans_annonce_reste_un_echec() {
+        // Le pendant du précédent : sans lui, « toute fin de lien est un arrêt
+        // normal » passerait. Une panne doit rester une panne.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        lien.injecter(LinkEvent::Failed("le lien est tombé".to_string()));
+        let v = visionnage(&[], Issue::Image, t0);
+
+        let fin = boucler(&mut lien, v, &Arret::nouveau());
+
+        assert_eq!(fin.ok(), Some(Fin::LienTombe("le lien est tombé".to_string())));
     }
 
     #[test]

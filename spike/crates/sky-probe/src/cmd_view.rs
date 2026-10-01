@@ -17,6 +17,7 @@ pub fn run(ami_designe: &str, secondes: u64, sortie: &str) -> anyhow::Result<()>
     // Pris AVANT le coffre, comme au C2 : c'est d'ici que se mesurent
     // « Réponse reçue après » et « depuis le lancement de view ».
     let lancement = Instant::now();
+    conscience_dpi_par_moniteur();
     let (config, coffre) = config_et_coffre()?;
     // Jamais demandé : `view` s'arrête à `--seconds`, comme au C2.
     let arret = Arret::nouveau();
@@ -35,6 +36,27 @@ pub fn run(ami_designe: &str, secondes: u64, sortie: &str) -> anyhow::Result<()>
     )
     .map_err(erreur_partage)?;
     afficher_fin(fin, sortie)
+}
+
+/// La conscience DPI par moniteur, posée AVANT que `regarder` n'ouvre la
+/// fenêtre de visionnage (jalon 2, tâche 10).
+///
+/// Sans elle, à 150 % ou 200 % de mise à l'échelle, Windows étire la fenêtre et
+/// le texte de l'écran reçu devient flou — exactement ce que `view` sert à
+/// juger. L'application la déclare dans son manifeste (`sky-app/build.rs`) ;
+/// ici, un appel suffit et reste limité à `view` : les commandes de mesure du
+/// jalon 0 (`capture`, `encode`…) gardent le comportement qu'on a mesuré.
+///
+/// Un échec n'arrête rien : la documentation de Windows le prévoit quand le
+/// réglage est déjà posé, ou sur un Windows antérieur à 10 version 1703, et
+/// l'image reste correcte, seulement moins nette.
+fn conscience_dpi_par_moniteur() {
+    use windows::Win32::UI::HiDpi::{
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+    if unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }.is_err() {
+        println!("Conscience DPI non posée : l'image peut être moins nette à une mise à l'échelle de Windows.");
+    }
 }
 
 /// Les lignes du C2, pour chaque événement du spectateur.
@@ -58,9 +80,14 @@ fn lignes_spectateur(evenement: &Evenement, sortie: &str) -> Vec<String> {
             ),
             format!("Écriture du flux reçu dans {sortie}, dès le premier paquet.\n"),
         ],
-        Evenement::Mesures(Mesures::Reception { debit_mbps, images_par_s, gigue_ms }) => {
-            vec![format!("  {debit_mbps:.1} Mbps | {images_par_s} images/s | gigue {gigue_ms:.2} ms")]
-        }
+        Evenement::Mesures(Mesures::Reception(m)) => vec![format!(
+            "  {:.1} Mbps | {:.0} images/s | gigue {:.2} ms | décodage {:.2} ms | {} images écartées",
+            f64::from(m.debit_kbps) / 1000.0,
+            m.images_par_seconde,
+            m.gigue_ms,
+            m.latence_decodage_ms,
+            m.images_abandonnees
+        )],
         // Événements de l'hôte : `regarder` ne les émet jamais.
         Evenement::Pret
         | Evenement::Disponible { .. }
@@ -89,13 +116,19 @@ fn afficher_fin(fin: Fin, sortie: &str) -> anyhow::Result<()> {
         Fin::NegociationRompue(raison) => println!("ÉCHEC : {raison}"),
         Fin::EtablissementEchoue(diagnostic) => afficher_diagnostic(&diagnostic),
         Fin::LienTombe(raison) => println!("\nÉCHEC : {raison}"),
+        // Une fin NORMALE : avant la tâche 10, elle arrivait en `LienTombe` et
+        // s'imprimait « ÉCHEC ».
+        Fin::PartageArrete => println!("\nTon ami a arrêté son partage. Fichier écrit : {sortie}"),
         Fin::DureeEcoulee(bilan) => {
             if let Bilan::Reception(b) = *bilan {
                 afficher_bilan(&b, sortie);
             }
         }
-        // `view` ne demande jamais l'arrêt ; les autres fins sont celles de l'hôte.
-        Fin::Arrete | Fin::AucuneDemande | Fin::ReponseRefusee | Fin::TamponSature { .. } => {}
+        // `view` ne demande jamais l'arrêt par signal ; la croix de la fenêtre,
+        // elle, le lève (un seul chemin d'arrêt, tâche 10). Les autres fins
+        // sont celles de l'hôte.
+        Fin::Arrete => println!("\nFenêtre fermée : visionnage arrêté. Fichier écrit : {sortie}"),
+        Fin::AucuneDemande | Fin::ReponseRefusee | Fin::FileDePaquetisationPleine => {}
     }
     Ok(())
 }

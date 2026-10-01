@@ -45,6 +45,18 @@ export type FinVue =
   | { cause: "trop_lente" }
   | { cause: "session_expiree" }
   | { cause: "aucune_demande"; fenetreS: number }
+  | { cause: "partage_arrete" }
+  | { cause: "sans_carte_nvidia" }
+  | { cause: "sans_decodage_444" }
+  | { cause: "decodeur_refuse" }
+  | {
+      cause: "resolution_trop_grande";
+      largeur: number;
+      hauteur: number;
+      largeurMax: number;
+      hauteurMax: number;
+    }
+  | { cause: "image_irreconstituable" }
   | { cause: "autre"; message: string };
 
 export type PartageVue =
@@ -66,6 +78,8 @@ export type PartageVue =
       debitMbps: number;
       imagesParS: number;
       gigueMs: number;
+      latenceDecodageMs: number;
+      imagesAbandonnees: number;
       depuisMs: number;
     }
   | { etat: "termine"; fin: FinVue };

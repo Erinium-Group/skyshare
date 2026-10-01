@@ -62,7 +62,9 @@ pub const MESSAGE_PENDANT_PARTAGE: &str =
     "Impossible pendant un partage ou une attente : arrête-le d'abord.";
 pub const MESSAGE_SESSION_EXPIREE: &str = "Session expirée — reconnecte-toi";
 /// Spec §4 : pas de repli logiciel x264 (question ouverte du projet). Une
-/// machine sans carte NVIDIA peut encore REGARDER.
+/// machine sans carte NVIDIA ne peut pas non plus REGARDER depuis le jalon 2 —
+/// ni NVENC ni NVDEC (spec du jalon 2, §7) ; elle l'apprend au clic sur
+/// « Regarder », par `FinVue::SansCarteNvidia`.
 pub const MESSAGE_SANS_NVIDIA: &str =
     "Partage impossible : aucune carte NVIDIA utilisable sur cette machine.";
 /// L'écran choisi n'est plus dans la liste relevée à l'instant du clic — il a
@@ -2775,6 +2777,8 @@ mod tests {
             debit_mbps: 12.4,
             images_par_s: 107,
             gigue_ms: 5.0,
+            latence_decodage_ms: 1.5,
+            images_abandonnees: 0,
             depuis_ms: 1,
         });
         assert_eq!(c.noyau.phase(), Phase::EnCours);

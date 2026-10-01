@@ -202,6 +202,24 @@ fn activer_au_premier_lancement(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    /// D7 (jalon 2, tâche 10) : la conscience DPI par moniteur est déclarée
+    /// dans le manifeste que `build.rs` donne à `tauri-build`, et la
+    /// dépendance aux contrôles communs v6 du manifeste par défaut n'est pas
+    /// perdue en le remplaçant.
+    ///
+    /// Ce test lit le FICHIER : il ne prouve pas que le manifeste est embarqué
+    /// dans l'exécutable. Cette preuve-là se fait sur la build empaquetée, en y
+    /// cherchant « PerMonitorV2 » (rapport de la tâche 10).
+    ///
+    /// Neutralisation : retirer la ligne `dpiAwareness` — ce test rougit.
+    #[test]
+    fn le_manifeste_declare_la_conscience_dpi_par_moniteur() {
+        const MANIFESTE: &str = include_str!("../manifeste-windows.xml");
+        assert!(MANIFESTE.contains(">PerMonitorV2, PerMonitor</dpiAwareness>"));
+        assert!(MANIFESTE.contains(">true/pm</dpiAware>"));
+        assert!(MANIFESTE.contains("Microsoft.Windows.Common-Controls"));
+    }
+
     /// Arbitrage du contrôleur (tâche 6) : la version de développement et de
     /// test ne doit jamais toucher aux données de la version installée. Ce
     /// test s'exécute toujours en profil `debug` (`cargo test`) ; il prouve

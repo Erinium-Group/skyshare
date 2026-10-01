@@ -1,0 +1,26 @@
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!-- Repris tel quel du manifeste par défaut de tauri-build 2.6.3 : les
+       boîtes de dialogue de Tauri exigent les contrôles communs v6. -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+  <!-- Conscience DPI par moniteur (jalon 2, tâche 10). Sans elle, à 150 % ou
+       200 % de mise à l'échelle, Windows étirerait la fenêtre de visionnage et
+       l'écran partagé perdrait sa netteté. Voir build.rs pour le pourquoi
+       d'un manifeste plutôt que d'un appel au démarrage. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2, PerMonitor</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>

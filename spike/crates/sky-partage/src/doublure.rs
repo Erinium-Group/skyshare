@@ -5,11 +5,13 @@
 //! morceau du module de tests de `hote` : le côté spectateur en a besoin aussi,
 //! et ne pourrait pas l'atteindre s'il vivait dans `mod tests`.
 
+use std::cell::Cell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 use sky_decode::{ErreurDecodeur, SurfaceCuda};
 use sky_net::{ErreurEnvoi, LinkEvent, MessageControle};
-use sky_rendu::{EtatVisionnage, ImageAAfficher};
+use sky_rendu::{EtatVisionnage, EvenementFenetre, ImageAAfficher};
 
 use crate::hote::LienVideo;
 use crate::spectateur::{Afficheur, Decodage, LienSpectateur};
@@ -118,6 +120,10 @@ impl LienSpectateur for LienFactice {
     fn poll(&mut self) -> anyhow::Result<LinkEvent> {
         LienVideo::poll(self)
     }
+
+    fn vers_internet(&self) -> u64 {
+        0
+    }
 }
 
 /// Une image décodée pour de faux : une géométrie, et une poignée de surface
@@ -220,17 +226,44 @@ pub enum Geste {
 /// `cargo test`.
 pub struct FenetreFactice {
     journal: Vec<Geste>,
-    fermeture: bool,
+    /// Ce que le prochain pompage rendra, comme la procédure de fenêtre le
+    /// déposerait.
+    en_attente: Vec<EvenementFenetre>,
+    bascules: usize,
+    /// Passe à `true` quand la fenêtre est détruite : c'est ce que voit un test
+    /// qui veut savoir si la boucle l'a bien laissée tomber.
+    fermee: Rc<Cell<bool>>,
 }
 
 impl FenetreFactice {
     pub fn nouvelle() -> FenetreFactice {
-        FenetreFactice { journal: Vec::new(), fermeture: false }
+        FenetreFactice {
+            journal: Vec::new(),
+            en_attente: Vec::new(),
+            bascules: 0,
+            fermee: Rc::new(Cell::new(false)),
+        }
     }
 
-    /// Fait répondre « oui » au prochain `fermeture_demandee`.
+    /// Comme un clic sur la croix : le prochain pompage rend
+    /// `FermetureDemandee`.
     pub fn demander_la_fermeture(&mut self) {
-        self.fermeture = true;
+        self.en_attente.push(EvenementFenetre::FermetureDemandee);
+    }
+
+    /// Comme F11 : le prochain pompage rend `PleinEcranBascule`.
+    pub fn appuyer_sur_f11(&mut self) {
+        self.en_attente.push(EvenementFenetre::PleinEcranBascule);
+    }
+
+    /// Nombre de bascules du plein écran demandées à la fenêtre.
+    pub fn bascules(&self) -> usize {
+        self.bascules
+    }
+
+    /// Un témoin qui survit à la fenêtre et dit si elle a été détruite.
+    pub fn temoin_de_fermeture(&self) -> Rc<Cell<bool>> {
+        Rc::clone(&self.fermee)
     }
 
     pub fn journal(&self) -> &[Geste] {
@@ -262,8 +295,19 @@ impl Afficheur for FenetreFactice {
         Ok(())
     }
 
-    fn fermeture_demandee(&mut self) -> bool {
-        std::mem::take(&mut self.fermeture)
+    fn evenements(&mut self) -> Vec<EvenementFenetre> {
+        std::mem::take(&mut self.en_attente)
+    }
+
+    fn basculer_plein_ecran(&mut self) -> anyhow::Result<()> {
+        self.bascules += 1;
+        Ok(())
+    }
+}
+
+impl Drop for FenetreFactice {
+    fn drop(&mut self) {
+        self.fermee.set(true);
     }
 }
 

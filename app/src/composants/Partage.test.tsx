@@ -69,13 +69,17 @@ describe("barre de partage", () => {
   });
 
   it("sans carte NVIDIA, Partager est désactivé et le dit", () => {
-    // Pas de repli logiciel x264 (question ouverte du projet) : sans carte
-    // NVIDIA, la machine ne peut que recevoir. Un bouton actif enverrait une
-    // demande de disponibilité en PRODUCTION pour un partage impossible.
-    // Neutralisation : retirer `!instantane.nvenc ||` du `disabled`.
+    // Pas de repli logiciel x264 (question ouverte du projet). Un bouton actif
+    // enverrait une demande de disponibilité en PRODUCTION pour un partage
+    // impossible. Neutralisation : retirer `!instantane.nvenc ||` du
+    // `disabled`.
     render(<BarrePartage instantane={instantaneDeTest({ nvenc: false })} />);
     expect(screen.getByRole("button", { name: "Partager mon écran" })).toBeDisabled();
     expect(screen.getByText(/aucune carte NVIDIA/)).toBeInTheDocument();
+    // Tâche 10 du jalon 2 : sans carte NVIDIA, la machine ne reçoit pas non
+    // plus (ni NVENC ni NVDEC, spec du jalon 2 §7). L'ancien « Tu peux
+    // regarder » promettait le contraire. Neutralisation : le remettre.
+    expect(screen.queryByText(/regarder/)).toBeNull();
   });
 
   it("pendant qu'une action court, Partager est désactivé", async () => {
@@ -162,10 +166,11 @@ describe("barre de partage", () => {
 });
 
 describe("panneau de partage", () => {
-  it("le spectateur voit la connexion directe, et que l'image n'est pas encore là", () => {
-    // Spec D2 : « Le panneau le dit en toutes lettres ». Sans cette phrase, un
-    // écran noir passe pour un bug, et l'utilisateur cherche une panne qui
-    // n'existe pas. Neutralisation : retirer le paragraphe.
+  it("le spectateur voit la connexion directe, et où s'affiche l'image", () => {
+    // Jalon 2, décision D4 : l'image est dans une fenêtre SÉPARÉE, nommée
+    // d'après l'ami. Sans cette phrase, l'utilisateur la chercherait dans ce
+    // panneau. Neutralisation : remettre l'ancien « L'image n'est pas encore
+    // affichée » — devenu faux à la tâche 9 — ou retirer le paragraphe.
     render(
       <PanneauPartage
         instantane={instantaneDeTest({
@@ -176,14 +181,44 @@ describe("panneau de partage", () => {
             debitMbps: 12.4,
             imagesParS: 107,
             gigueMs: 5,
+            latenceDecodageMs: 1.5,
+            imagesAbandonnees: 0,
             depuisMs: Date.now(),
           },
         })}
       />,
     );
     expect(screen.getByText("Connecté en 0,6 s · connexion directe, sans relais")).toBeInTheDocument();
-    expect(screen.getByText(/image n'est pas encore affichée/)).toBeInTheDocument();
+    expect(screen.getByText(/L'image s'affiche dans la fenêtre « SkyShare — écran de Bob »/)).toBeInTheDocument();
+    expect(screen.queryByText(/pas encore affichée/)).toBeNull();
     expect(screen.getByText("107 images/s")).toBeInTheDocument();
+  });
+
+  it("la latence de décodage et les images écartées atteignent le panneau", () => {
+    // Spec du jalon 2, §8 : ces deux mesures étaient calculées puis jetées.
+    // Valeurs distinctes de celles des autres tests, pour qu'un affichage
+    // figé ne passe pas. Neutralisation : retirer la mesure « Décodage » du
+    // panneau — ce test rougit.
+    render(
+      <PanneauPartage
+        instantane={instantaneDeTest({
+          partage: {
+            etat: "regarde",
+            ami: "Bob",
+            connecteEnS: 0.6,
+            debitMbps: 12.4,
+            imagesParS: 107,
+            gigueMs: 5,
+            latenceDecodageMs: 2.4,
+            imagesAbandonnees: 17,
+            depuisMs: Date.now(),
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("Décodage")).toBeInTheDocument();
+    expect(screen.getByText("2,4 ms")).toBeInTheDocument();
+    expect(screen.getByText("17")).toBeInTheDocument();
   });
 
   it("les mesures du spectateur sont écrites à la française", () => {
@@ -200,6 +235,8 @@ describe("panneau de partage", () => {
             debitMbps: 12.4,
             imagesParS: 107,
             gigueMs: 5,
+            latenceDecodageMs: 1.5,
+            imagesAbandonnees: 0,
             depuisMs: Date.now(),
           },
         })}
@@ -230,6 +267,8 @@ describe("panneau de partage", () => {
             debitMbps: 12.4,
             imagesParS: 107,
             gigueMs: 5,
+            latenceDecodageMs: 1.5,
+            imagesAbandonnees: 0,
             depuisMs: Date.now(),
           },
         })}
@@ -253,9 +292,10 @@ describe("panneau de partage", () => {
   });
 
   it("le panneau dit aussi que rien n'est écrit sur le disque", () => {
-    // Spec D2 : la vidéo reçue est mesurée puis JETÉE. C'est une promesse de
-    // vie privée faite au spectateur ET à l'hôte, au même titre que « aucune
-    // adresse journalisée ». Neutralisation : retirer la fin de la phrase.
+    // Spec D2 : la vidéo reçue est affichée, jamais enregistrée. C'est une
+    // promesse de vie privée faite au spectateur ET à l'hôte, au même titre que
+    // « aucune adresse journalisée ». Neutralisation : retirer la dernière
+    // phrase.
     render(
       <PanneauPartage
         instantane={instantaneDeTest({
@@ -266,12 +306,14 @@ describe("panneau de partage", () => {
             debitMbps: 12.4,
             imagesParS: 107,
             gigueMs: 5,
+            latenceDecodageMs: 1.5,
+            imagesAbandonnees: 0,
             depuisMs: Date.now(),
           },
         })}
       />,
     );
-    expect(screen.getByText(/rien n'est écrit sur le disque/)).toBeInTheDocument();
+    expect(screen.getByText(/Rien n'est écrit sur le disque/)).toBeInTheDocument();
   });
 
   it("l'attente du spectateur annonce ses 60 secondes", () => {
@@ -383,6 +425,8 @@ describe("on ne reçoit pas non plus sans le savoir", () => {
             debitMbps: 12.4,
             imagesParS: 107,
             gigueMs: 5,
+            latenceDecodageMs: 1.5,
+            imagesAbandonnees: 0,
             depuisMs: Date.now(),
           },
         })}
@@ -425,6 +469,8 @@ describe("on ne reçoit pas non plus sans le savoir", () => {
             debitMbps: 12.4,
             imagesParS: 107,
             gigueMs: 5,
+            latenceDecodageMs: 1.5,
+            imagesAbandonnees: 0,
             depuisMs: Date.now(),
           },
         })}
@@ -442,6 +488,8 @@ describe("on ne reçoit pas non plus sans le savoir", () => {
         debitMbps: 12.4,
         imagesParS: 107,
         gigueMs: 5,
+        latenceDecodageMs: 1.5,
+        imagesAbandonnees: 0,
         depuisMs: Date.now(),
       },
     });
@@ -489,6 +537,8 @@ describe("le temps restant s'écoule", () => {
         debitMbps: 12.4,
         imagesParS: 107,
         gigueMs: 5,
+        latenceDecodageMs: 1.5,
+        imagesAbandonnees: 0,
         depuisMs: Date.now(),
       },
     });

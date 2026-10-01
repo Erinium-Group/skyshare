@@ -39,6 +39,75 @@ describe("les quatre échecs de la spec §4, au mot près", () => {
   });
 });
 
+/**
+ * Les quatre textes du décodage, spec du jalon 2 §7, au mot près — un test par
+ * cause, pour la même raison qu'au-dessus. Neutralisation de chacun : changer
+ * un mot de son texte, ou faire rendre à sa branche le texte d'une autre ; il
+ * rougit, et lui seul.
+ */
+describe("les quatre messages du décodage, spec du jalon 2 §7, au mot près", () => {
+  it("aucune carte NVIDIA : ni partager ni recevoir", () => {
+    expect(messageDeFin({ cause: "sans_carte_nvidia" })).toBe(
+      "Cette machine n'a pas de carte graphique NVIDIA. SkyShare ne peut ni partager son écran ni en recevoir un sur cette machine.",
+    );
+  });
+
+  it("carte antérieure à Turing : partager oui, recevoir non", () => {
+    expect(messageDeFin({ cause: "sans_decodage_444" })).toBe(
+      "La carte graphique de cette machine peut partager un écran, mais pas en recevoir un : son décodeur ne prend pas en charge la couleur pleine résolution.",
+    );
+  });
+
+  it("décodeur refusé : fermer ce qui occupe la carte", () => {
+    expect(messageDeFin({ cause: "decodeur_refuse" })).toBe(
+      "Le décodeur vidéo n'a pas pu démarrer. Fermez les autres applications qui utilisent la carte graphique, puis réessayez.",
+    );
+  });
+
+  it("image irreconstituable : demander de relancer le partage", () => {
+    expect(messageDeFin({ cause: "image_irreconstituable" })).toBe(
+      "L'image ne peut pas être reconstituée. Demandez à la personne qui partage de relancer son partage.",
+    );
+  });
+});
+
+describe("les fins du visionnage hors spec", () => {
+  it("résolution trop grande : les chiffres viennent du cœur, et l'ami n'est pas accusé", () => {
+    // Texte NOUVEAU (tâche 10), absent de la spec. Les chiffres viennent de
+    // la variante — deux jeux différents donnent deux phrases différentes, ce
+    // qu'un texte écrit en dur ne ferait pas. Neutralisation : intervertir
+    // `largeurMax` et `hauteurMax` dans le gabarit — la première assertion
+    // rougit.
+    expect(
+      messageDeFin({
+        cause: "resolution_trop_grande",
+        largeur: 2560,
+        hauteur: 1440,
+        largeurMax: 2048,
+        hauteurMax: 1152,
+      }),
+    ).toBe(
+      "Le décodeur vidéo de cette carte graphique s'arrête à 2048×1152 : SkyShare a besoin d'au moins 2560×1440 pour recevoir un écran sur cette machine.",
+    );
+    expect(
+      messageDeFin({
+        cause: "resolution_trop_grande",
+        largeur: 2560,
+        hauteur: 1440,
+        largeurMax: 1920,
+        hauteurMax: 1088,
+      }),
+    ).toContain("1920×1088");
+  });
+
+  it("l'ami qui arrête son partage ne se dit pas comme un arrêt volontaire", () => {
+    // D3 (tâche 10). Neutralisation : rendre « Partage arrêté. » — la
+    // comparaison avec la fin `arrete` rougit.
+    expect(messageDeFin({ cause: "partage_arrete" })).toBe("Ton ami a arrêté son partage.");
+    expect(messageDeFin({ cause: "partage_arrete" })).not.toBe(messageDeFin({ cause: "arrete" }));
+  });
+});
+
 describe("les autres fins", () => {
   it("« autre » rend le message du cœur, sans rien y ajouter", () => {
     // ARBITRAGE 4 DU CONTRÔLEUR : l'interface ne FABRIQUE aucun message

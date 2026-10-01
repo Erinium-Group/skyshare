@@ -130,10 +130,7 @@ fn afficher_fin(fin: Fin, plancher: u32, plafond: u32) -> anyhow::Result<()> {
         Fin::NegociationRompue(raison) => println!("ÉCHEC : {raison}"),
         Fin::EtablissementEchoue(diagnostic) => afficher_diagnostic(&diagnostic),
         Fin::LienTombe(raison) => println!("\nÉCHEC : {raison}"),
-        // Les champs `morceau`/`morceaux` de la variante datent du découpage
-        // maison et ne comptent plus rien depuis la tâche 8 : ils ne sont pas
-        // affichés. Le nom du type suivra (tâche 10).
-        Fin::TamponSature { .. } => println!(
+        Fin::FileDePaquetisationPleine => println!(
             "\nÉCHEC : la file de paquetisation vidéo est restée pleine plus de \
              {} ms — le correspondant ne consomme plus le flux. Arrêt pour ne \
              pas produire un flux corrompu.",
@@ -145,7 +142,11 @@ fn afficher_fin(fin: Fin, plancher: u32, plafond: u32) -> anyhow::Result<()> {
             }
         }
         // `host` ne demande jamais l'arrêt ; les autres fins sont celles du spectateur.
-        Fin::Arrete | Fin::AucunAppareilChezLAmi { .. } | Fin::DemandeRefusee { .. } | Fin::PasDeReponse { .. } => {}
+        Fin::Arrete
+        | Fin::AucunAppareilChezLAmi { .. }
+        | Fin::DemandeRefusee { .. }
+        | Fin::PasDeReponse { .. }
+        | Fin::PartageArrete => {}
     }
     Ok(())
 }
@@ -220,6 +221,10 @@ pub(crate) fn erreur_compte(erreur: ErreurCompte) -> anyhow::Error {
 pub(crate) fn erreur_partage(e: ErreurPartage) -> anyhow::Error {
     match e {
         ErreurPartage::Compte(c) => erreur_compte(c),
+        // Le terminal montre le texte, détail technique compris : c'est un
+        // outil de développement. L'application, elle, se branche sur la
+        // variante et n'affiche jamais ce texte (`sky-app/src/partage.rs`).
+        ErreurPartage::Visionnage(v) => anyhow::Error::new(v),
         ErreurPartage::Autre(a) => a,
     }
 }

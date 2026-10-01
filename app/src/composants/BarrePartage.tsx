@@ -139,11 +139,18 @@ export function BarrePartage({ instantane }: { instantane: Instantane }) {
       >
         Partager mon écran
       </button>
-      {/* Pas de repli logiciel x264 — question ouverte du projet. La machine ne
-          peut que recevoir, et on le dit plutôt que de laisser un bouton mort. */}
+      {/* Pas de repli logiciel x264 — question ouverte du projet. On le dit
+          plutôt que de laisser un bouton mort.
+
+          « Tu peux regarder » a été RETIRÉ (tâche 10 du jalon 2) : c'était faux
+          depuis le décodage. Sans carte NVIDIA il n'y a ni NVENC ni NVDEC, donc
+          ni diffusion ni réception (spec du jalon 2, §7). Et `nvenc` ne dit que
+          « aucun codec de partage retenu » : il ne suffit pas à affirmer quoi
+          que ce soit de la réception, que le décodeur tranche lui-même au clic
+          sur « Regarder », avec son propre message. */}
       {!instantane.nvenc && (
         <p className="text-xs text-texte-3">
-          Partage impossible : aucune carte NVIDIA sur cette machine. Tu peux regarder.
+          Partage impossible : aucune carte NVIDIA sur cette machine.
         </p>
       )}
       {actions.message && (

@@ -17,7 +17,11 @@ pub mod spectateur;
 
 pub use arret::{synchroniser_sauf_arret, Arret, ErreurAttente, HorlogeArretable, PAS_D_ATTENTE};
 pub use evenement::{
-    Bilan, BilanEnvoi, BilanReception, Diagnostic, ErreurPartage, Evenement, Fin, Mesures, Quantiles,
+    Bilan, BilanEnvoi, BilanReception, Diagnostic, ErreurPartage, ErreurVisionnage, Evenement, Fin,
+    Mesures, MesuresVisionnage, Quantiles,
 };
+/// Réexportée : `ErreurVisionnage::Decodeur` la porte, et qui reçoit l'une doit
+/// pouvoir nommer les variantes de l'autre sans dépendre de `sky-decode`.
+pub use sky_decode::ErreurDecodeur;
 pub use hote::{heberger, FabriqueSynthetique, Images, ParametresHote, SourceImages, FPS};
 pub use spectateur::{regarder, trouver_ami, Designation, ParametresSpectateur, Puits};
