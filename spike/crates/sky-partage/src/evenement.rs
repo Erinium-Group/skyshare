@@ -56,9 +56,14 @@ pub struct BilanEnvoi {
     pub encodage_ms: Option<Quantiles>,
     pub envoyes_octets: u64,
     pub cible_finale_bps: u32,
+    /// Toujours 0 côté hôte depuis que la vidéo est passée sur la piste média :
+    /// le spectateur ne renvoie plus l'horodatage, donc plus aucun retour n'est
+    /// reçu. `rtt_ms` est vide pour la même raison.
     pub retours: u64,
-    pub echecs_envoi: u64,
-    pub tentatives_envoi: u64,
+    /// Images que la piste a d'abord refusées (`TropDImagesEnAttente`) et qui
+    /// sont parties après un `poll` : du retard rattrapé, pas des envois perdus.
+    pub refus_absorbes: u64,
+    pub images_ecrites: u64,
     pub rtt_ms: Option<Quantiles>,
     pub vers_internet: u64,
 }
@@ -116,8 +121,16 @@ pub enum Fin {
     NegociationRompue(String),
     /// `etablir` : canal non ouvert en `DELAI_ETABLISSEMENT`.
     EtablissementEchoue(Diagnostic),
-    /// Hôte : tampon d'émission plein plus de `BUDGET_RETRY_ENVOI` —
-    /// « la connexion était trop lente pour la vidéo » (écart 7).
+    /// Hôte : la **file de paquetisation** de la piste média est restée pleine
+    /// plus de `BUDGET_RETRY_ENVOI` — « la connexion était trop lente pour la
+    /// vidéo » (écart 7). Le correspondant ne dépile plus rien.
+    ///
+    /// Le nom et les deux champs datent du découpage maison, supprimé à la
+    /// tâche 8 : il n'y a plus ni tampon d'émission ni morceaux, et une image
+    /// est une unité indivisible, d'où le « 1 sur 1 » que l'hôte y met. Le
+    /// renommage (`FileDePaquetisationPleine`, sans champs) traverse `sky-app`
+    /// et appartient à la tâche 10 ; ne pas lire ces noms comme une description
+    /// du mécanisme actuel.
     TamponSature { morceau: usize, morceaux: usize },
     /// Le lien est tombé pendant le flux.
     LienTombe(String),

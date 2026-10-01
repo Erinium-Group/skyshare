@@ -86,6 +86,18 @@ impl Pacer {
     /// plus brutale sans qu'une ligne change ici. Avant promotion : soit
     /// normaliser la formule par `_ecoule`, soit inscrire la cadence dans le
     /// type.
+    ///
+    /// **En boucle ouverte depuis le jalon 2, tâche 8 :** le seul appelant
+    /// (`sky-partage::hote`) ne peut plus renseigner ni l'un ni l'autre de ces
+    /// deux paramètres. Il passe `rtt_ms = 0` — plus aucun écho ne revient à
+    /// l'hôte depuis que la vidéo est sur la piste média — et un `perte_pct`
+    /// dont le numérateur est structurellement nul sur le chemin nominal (0 refus
+    /// de paquetisation mesuré sur 21552 écritures). `congestionne` est donc
+    /// toujours faux : la cible monte de `MONTEE` à chaque appel jusqu'au
+    /// plafond et n'en redescend jamais. Ce régulateur est correct et testé,
+    /// mais **branché sur un capteur débranché** : ne pas le compter comme un
+    /// contrôle de congestion actif. La source à retrouver est RTCP, présent sur
+    /// la piste média et lu par personne (écart 7).
     pub fn on_feedback(&mut self, perte_pct: f32, rtt_ms: u32, _ecoule: Duration) {
         let congestionne = perte_pct > Self::SEUIL_PERTE || rtt_ms > Self::SEUIL_RTT_MS;
 

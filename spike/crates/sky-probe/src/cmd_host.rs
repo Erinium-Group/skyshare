@@ -130,10 +130,13 @@ fn afficher_fin(fin: Fin, plancher: u32, plafond: u32) -> anyhow::Result<()> {
         Fin::NegociationRompue(raison) => println!("ÉCHEC : {raison}"),
         Fin::EtablissementEchoue(diagnostic) => afficher_diagnostic(&diagnostic),
         Fin::LienTombe(raison) => println!("\nÉCHEC : {raison}"),
-        Fin::TamponSature { morceau, morceaux } => println!(
-            "\nÉCHEC : tampon d'émission saturé plus de {} ms \
-             (morceau {morceau}/{morceaux}) — arrêt pour ne pas \
-             produire un flux corrompu.",
+        // Les champs `morceau`/`morceaux` de la variante datent du découpage
+        // maison et ne comptent plus rien depuis la tâche 8 : ils ne sont pas
+        // affichés. Le nom du type suivra (tâche 10).
+        Fin::TamponSature { .. } => println!(
+            "\nÉCHEC : la file de paquetisation vidéo est restée pleine plus de \
+             {} ms — le correspondant ne consomme plus le flux. Arrêt pour ne \
+             pas produire un flux corrompu.",
             BUDGET_RETRY_ENVOI.as_millis(),
         ),
         Fin::DureeEcoulee(bilan) => {
@@ -167,8 +170,8 @@ fn afficher_bilan(b: &BilanEnvoi, plancher: u32, plafond: u32) {
         plancher,
         plafond
     );
-    println!("Retours reçus      : {}", b.retours);
-    println!("Échecs d'envoi     : {} / {}", b.echecs_envoi, b.tentatives_envoi);
+    println!("Retours reçus      : {} (aucun écho depuis la piste média)", b.retours);
+    println!("Refus rattrapés    : {} / {} images écrites", b.refus_absorbes, b.images_ecrites);
     match &b.rtt_ms {
         None => println!("RTT                : non mesuré (aucun retour reçu)"),
         Some(q) => println!(
