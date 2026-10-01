@@ -1,18 +1,16 @@
 //! La comptabilité du spectateur, extraite de la boucle de `cmd_view` (jalon
-//! C2) pour être testable sans réseau : ce qui compte une image, le débit,
-//! la gigue RFC 3550 et le transit. Rend la charge utile ; c'est l'appelant
-//! qui décide de l'écrire ou de la jeter.
+//! C2) pour être testable sans réseau : ce qui compte une image, le débit, la
+//! gigue RFC 3550 et le transit.
+//!
+//! Depuis la tâche 9, elle ne découpe plus rien. Le découpage maison — un
+//! en-tête de 9 octets (horodatage sur 8, drapeau de premier morceau sur 1)
+//! préfixé à chaque message du canal de données — a disparu des deux côtés :
+//! l'hôte écrit des unités d'accès entières sur la piste média (tâche 8) et
+//! `LinkEvent::Image` porte déjà l'horodatage et le drapeau d'image clé. Un
+//! événement reçu **est** une image : il n'y a plus de premier morceau à
+//! reconnaître, donc plus d'en-tête à retirer.
 
 use crate::evenement::Quantiles;
-
-/// Dernier vestige du découpage maison : l'en-tête de 9 octets (horodatage sur
-/// 8, drapeau de premier morceau sur 1) que l'hôte préfixait à chaque morceau
-/// envoyé par le canal de données. L'hôte ne l'écrit plus depuis la tâche 8 —
-/// il écrit des unités d'accès entières sur la piste média — et cette
-/// comptabilité-ci disparaît avec la migration du spectateur (tâche 9). La
-/// constante est descendue ici, où vit son unique appelant, pour que `hote` soit
-/// débarrassé du découpage sans attendre.
-const EN_TETE_MORCEAU: usize = 9;
 
 #[derive(Default)]
 pub struct Reception {
@@ -25,34 +23,24 @@ pub struct Reception {
 }
 
 impl Reception {
-    /// Absorbe un message du canal. `None` pour un message trop court pour
-    /// porter un en-tête complet (ignoré, comme au C2) ; sinon la charge
-    /// utile, sans son en-tête.
+    /// Compte une unité d'accès arrivée sur la piste média : ses octets, son
+    /// transit, et la gigue qu'elle révèle.
     ///
-    /// Seul le PREMIER morceau d'une image (drapeau non nul) porte les
-    /// statistiques par image : compteur, transit, gigue — calculés image à
-    /// image, pas morceau à morceau (ce qui mesurerait notre découpage).
-    pub fn absorber<'d>(&mut self, d: &'d [u8], arrivee_us: u64) -> Option<&'d [u8]> {
-        if d.len() <= EN_TETE_MORCEAU {
-            return None;
+    /// `emission_us` est l'horodatage de l'émetteur (celui de
+    /// `LinkEvent::Image`, ramené en microsecondes) et `arrivee_us` notre
+    /// horloge locale.
+    pub fn compter_image(&mut self, octets: usize, emission_us: u64, arrivee_us: u64) {
+        self.transits_us.push(arrivee_us as i64 - emission_us as i64);
+        if let (Some(prec_emis), Some(prec_arr)) = (self.dernier_emission, self.derniere_arrivee) {
+            let delta_emission = emission_us as i64 - prec_emis as i64;
+            let delta_arrivee = arrivee_us as i64 - prec_arr as i64;
+            let ecart = (delta_arrivee - delta_emission).unsigned_abs() as f64;
+            self.gigue_us += (ecart - self.gigue_us) / 16.0;
         }
-        let emission = u64::from_le_bytes(d[..8].try_into().expect("8 octets d'horodatage"));
-        let premier_morceau = d[8] != 0;
-        let charge = &d[EN_TETE_MORCEAU..];
-        if premier_morceau {
-            self.transits_us.push(arrivee_us as i64 - emission as i64);
-            if let (Some(prec_emis), Some(prec_arr)) = (self.dernier_emission, self.derniere_arrivee) {
-                let delta_emission = emission as i64 - prec_emis as i64;
-                let delta_arrivee = arrivee_us as i64 - prec_arr as i64;
-                let ecart = (delta_arrivee - delta_emission).unsigned_abs() as f64;
-                self.gigue_us += (ecart - self.gigue_us) / 16.0;
-            }
-            self.dernier_emission = Some(emission);
-            self.derniere_arrivee = Some(arrivee_us);
-            self.images += 1;
-        }
-        self.octets += charge.len() as u64;
-        Some(charge)
+        self.dernier_emission = Some(emission_us);
+        self.derniere_arrivee = Some(arrivee_us);
+        self.images += 1;
+        self.octets += octets as u64;
     }
 
     pub fn octets(&self) -> u64 {
@@ -67,13 +55,14 @@ impl Reception {
         self.gigue_us / 1000.0
     }
 
-    /// Horodatage d'émission du dernier paquet vidéo reçu — renvoyé tel quel
-    /// à l'hôte, qui en tire un aller-retour réel.
-    pub fn dernier_horodatage_emission(&self) -> Option<u64> {
-        self.dernier_emission
-    }
-
     /// Médiane et p99 du transit (arrivée − émission), en ms. `None` sans image.
+    ///
+    /// **Seul l'écart entre ces valeurs a un sens, pas leur valeur absolue** :
+    /// les deux horloges n'ont pas la même origine — celle de l'émetteur compte
+    /// depuis SON départ (voir `LinkEvent::Image::horodatage_ms`), celle du
+    /// spectateur depuis le début de la réception. C'était déjà vrai du
+    /// découpage maison, qui portait un horodatage d'émetteur tout aussi local ;
+    /// rien ne s'est dégradé ici, mais rien ne s'est corrigé non plus.
     pub fn transit_ms(&mut self) -> Option<Quantiles> {
         if self.transits_us.is_empty() {
             return None;
@@ -91,34 +80,17 @@ impl Reception {
 mod tests {
     use super::*;
 
-    /// Un morceau tel que l'hôte l'envoie : 8 octets d'horodatage
-    /// d'émission, 1 octet drapeau, la charge.
-    fn morceau(emission_us: u64, premier: bool, charge: &[u8]) -> Vec<u8> {
-        let mut m = emission_us.to_le_bytes().to_vec();
-        m.push(u8::from(premier));
-        m.extend_from_slice(charge);
-        m
-    }
-
     #[test]
-    fn seul_le_premier_morceau_compte_une_image() {
-        // Neutralisation : compter une image par morceau — `images` vaut 2.
+    fn une_image_recue_compte_ses_octets_et_une_image() {
+        // Remplace `seul_le_premier_morceau_compte_une_image` : il n'y a plus de
+        // morceaux, mais la comptabilité par image reste ce qui alimente le
+        // débit et les images par seconde. Neutralisation : ne pas additionner
+        // `octets` — `octets()` vaut 0.
         let mut r = Reception::default();
-        r.absorber(&morceau(0, true, b"abc"), 1_000);
-        r.absorber(&morceau(0, false, b"de"), 1_100);
-        assert_eq!(r.images(), 1);
+        r.compter_image(3, 0, 1_000);
+        r.compter_image(2, 16_000, 17_000);
+        assert_eq!(r.images(), 2);
         assert_eq!(r.octets(), 5);
-    }
-
-    #[test]
-    fn la_charge_rendue_est_sans_en_tete_et_un_message_trop_court_est_ignore() {
-        // Neutralisation : `<` au lieu de `<=` sur la longueur — le message
-        // de 9 octets rend `Some(&[])` au lieu de `None`.
-        let mut r = Reception::default();
-        let m = morceau(0, true, b"xyz");
-        assert_eq!(r.absorber(&m, 5), Some(&b"xyz"[..]));
-        assert_eq!(r.absorber(&[0u8; EN_TETE_MORCEAU], 6), None);
-        assert_eq!(r.octets(), 3);
     }
 
     #[test]
@@ -126,20 +98,21 @@ mod tests {
         // Émissions à 0 et 10 000 µs, arrivées à 1 000 et 13 000 µs : écart
         // 2 000 µs, lissé au 1/16 → 125 µs. Neutralisation : diviser par 8.
         let mut r = Reception::default();
-        r.absorber(&morceau(0, true, b"a"), 1_000);
-        r.absorber(&morceau(10_000, true, b"b"), 13_000);
+        r.compter_image(1, 0, 1_000);
+        r.compter_image(1, 10_000, 13_000);
         assert!((r.gigue_ms() - 0.125).abs() < 1e-9, "gigue {}", r.gigue_ms());
     }
 
     #[test]
-    fn le_transit_est_mesure_image_par_image() {
-        // Neutralisation : un échantillon de transit par morceau — 2 au lieu de 1.
+    fn le_transit_s_echantillonne_une_fois_par_image() {
+        // Neutralisation : ne rien pousser dans `transits_us` — `transit_ms()`
+        // reste `None` et le test rougit sur le `unwrap`.
         let mut r = Reception::default();
         assert_eq!(r.transit_ms(), None);
-        r.absorber(&morceau(0, true, b"a"), 2_000);
-        r.absorber(&morceau(0, false, b"b"), 9_000);
+        r.compter_image(1, 0, 2_000);
+        r.compter_image(1, 1_000, 5_000);
         let q = r.transit_ms().unwrap();
-        assert_eq!(q.echantillons, 1, "un seul échantillon : le second morceau n'ouvre pas d'image");
-        assert!((q.p50 - 2.0).abs() < 1e-9);
+        assert_eq!(q.echantillons, 2, "un échantillon par image reçue");
+        assert!((q.p50 - 4.0).abs() < 1e-9, "p50 {}", q.p50);
     }
 }

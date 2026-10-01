@@ -4067,8 +4067,10 @@ dependencies = [
  "sky-capture",
  "sky-compte",
  "sky-crypto",
+ "sky-decode",
  "sky-encode",
  "sky-net",
+ "sky-rendu",
  "windows 0.62.2",
 ]
 

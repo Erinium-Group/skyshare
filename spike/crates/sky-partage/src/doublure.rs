@@ -7,9 +7,12 @@
 
 use std::collections::VecDeque;
 
+use sky_decode::{ErreurDecodeur, SurfaceCuda};
 use sky_net::{ErreurEnvoi, LinkEvent, MessageControle};
+use sky_rendu::{EtatVisionnage, ImageAAfficher};
 
 use crate::hote::LienVideo;
+use crate::spectateur::{Afficheur, Decodage, LienSpectateur};
 
 /// Une unité d'accès telle que l'hôte l'a écrite sur la piste média.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +36,8 @@ pub struct LienFactice {
     /// Nombre de places encore à libérer avant qu'une écriture soit acceptée.
     places_a_liberer: usize,
     polls: u64,
+    /// Fait refuser tout message de contrôle, comme un canal qui s'est fermé.
+    controles_refuses: bool,
 }
 
 impl LienFactice {
@@ -43,7 +48,13 @@ impl LienFactice {
             evenements: VecDeque::new(),
             places_a_liberer: 0,
             polls: 0,
+            controles_refuses: false,
         }
+    }
+
+    /// Fait refuser tout message de contrôle : le canal est fermé.
+    pub fn refuser_les_controles(&mut self) {
+        self.controles_refuses = true;
     }
 
     /// Les unités d'accès acceptées, dans l'ordre. Une écriture refusée n'y
@@ -84,6 +95,9 @@ impl LienVideo for LienFactice {
     }
 
     fn envoyer_controle(&mut self, message: &MessageControle) -> Result<(), ErreurEnvoi> {
+        if self.controles_refuses {
+            return Err(ErreurEnvoi::CanalFerme);
+        }
         self.messages.push(message.clone());
         Ok(())
     }
@@ -92,6 +106,164 @@ impl LienVideo for LienFactice {
         self.polls += 1;
         self.places_a_liberer = self.places_a_liberer.saturating_sub(1);
         Ok(self.evenements.pop_front().unwrap_or(LinkEvent::Idle))
+    }
+}
+
+/// Côté spectateur, seuls deux gestes du lien servent : écouter et demander.
+impl LienSpectateur for LienFactice {
+    fn envoyer_controle(&mut self, message: &MessageControle) -> Result<(), ErreurEnvoi> {
+        LienVideo::envoyer_controle(self, message)
+    }
+
+    fn poll(&mut self) -> anyhow::Result<LinkEvent> {
+        LienVideo::poll(self)
+    }
+}
+
+/// Une image décodée pour de faux : une géométrie, et une poignée de surface
+/// qui ne pointe nulle part.
+///
+/// Rien ne la lit jamais : `FenetreFactice` note la géométrie et s'arrête là.
+/// C'est tout l'intérêt de `ImageAAfficher` — `sky-decode` ne laisse personne
+/// fabriquer une `ImageDecodee`, qui exige une session NVDEC vivante, donc sans
+/// ce trait la boucle du spectateur ne serait éprouvable que sur une machine à
+/// carte NVIDIA, avec un vrai flux HEVC.
+pub struct ImageFactice {
+    pub largeur: u32,
+    pub hauteur: u32,
+}
+
+impl ImageAAfficher for ImageFactice {
+    fn largeur(&self) -> u32 {
+        self.largeur
+    }
+
+    fn hauteur(&self) -> u32 {
+        self.hauteur
+    }
+
+    fn surface(&self) -> SurfaceCuda {
+        SurfaceCuda { pointeur: 0, pas: 0, hauteur_surface: 0 }
+    }
+}
+
+/// Ce qu'un appel à `Decodage::decoder` rendra.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Issue {
+    /// `Ok(None)` : le décodeur a avalé l'unité sans rendre d'image — le cas des
+    /// en-têtes VPS/SPS/PPS, qui n'est pas une erreur.
+    Avalee,
+    /// `Ok(Some(image))`.
+    Image,
+    /// `Err(..)` : le décodeur refuse l'unité.
+    Echec,
+}
+
+/// Un décodeur dont chaque réponse est écrite d'avance.
+///
+/// Il ne décode rien : ce qui s'éprouve ici est la décision du spectateur
+/// — afficher, attendre, demander une image clé — et non NVDEC, que
+/// `sky-decode` mesure déjà sur son propre banc.
+pub struct DecodeurFactice {
+    issues: VecDeque<Issue>,
+    /// Ce que rendent les appels au-delà de `issues`.
+    defaut: Issue,
+    unites: Vec<Vec<u8>>,
+}
+
+impl DecodeurFactice {
+    /// Rend `issues` dans l'ordre, puis `defaut` indéfiniment.
+    pub fn puis(issues: &[Issue], defaut: Issue) -> DecodeurFactice {
+        DecodeurFactice { issues: issues.iter().copied().collect(), defaut, unites: Vec::new() }
+    }
+
+    /// Les unités d'accès poussées dans le décodeur, dans l'ordre.
+    pub fn unites(&self) -> &[Vec<u8>] {
+        &self.unites
+    }
+}
+
+impl Decodage for DecodeurFactice {
+    type Image = ImageFactice;
+
+    fn decoder(
+        &mut self,
+        unite: &[u8],
+        _horodatage_ms: u64,
+    ) -> Result<Option<ImageFactice>, ErreurDecodeur> {
+        self.unites.push(unite.to_vec());
+        match self.issues.pop_front().unwrap_or(self.defaut) {
+            Issue::Avalee => Ok(None),
+            Issue::Image => Ok(Some(ImageFactice { largeur: 1920, hauteur: 1080 })),
+            // Une variante sans donnée, pour que la doublure n'ait pas à
+            // fabriquer un diagnostic qu'elle ne saurait pas rendre juste.
+            Issue::Echec => Err(ErreurDecodeur::QuatreQuatreQuatreNonPris),
+        }
+    }
+}
+
+/// Ce que le spectateur a demandé à l'écran, dans l'ordre.
+///
+/// Un seul journal pour les images ET les états : c'est l'ORDRE qui porte la
+/// garantie qu'on veut prouver — qu'aucune image n'est montrée avant d'être
+/// digne de confiance. Deux listes séparées la perdraient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Geste {
+    Etat(EtatVisionnage),
+    Image { largeur: u32, hauteur: u32 },
+}
+
+/// Une fenêtre qui n'en est pas une : elle note, elle ne dessine pas.
+///
+/// Indispensable ici — le propriétaire travaille sur la machine des tests, et
+/// une `Fenetre` réelle lui ouvrirait une fenêtre sous le nez à chaque
+/// `cargo test`.
+pub struct FenetreFactice {
+    journal: Vec<Geste>,
+    fermeture: bool,
+}
+
+impl FenetreFactice {
+    pub fn nouvelle() -> FenetreFactice {
+        FenetreFactice { journal: Vec::new(), fermeture: false }
+    }
+
+    /// Fait répondre « oui » au prochain `fermeture_demandee`.
+    pub fn demander_la_fermeture(&mut self) {
+        self.fermeture = true;
+    }
+
+    pub fn journal(&self) -> &[Geste] {
+        &self.journal
+    }
+
+    /// Le dernier état montré, ou `None` si aucun ne l'a été.
+    pub fn dernier_etat(&self) -> Option<EtatVisionnage> {
+        self.journal.iter().rev().find_map(|g| match g {
+            Geste::Etat(etat) => Some(*etat),
+            Geste::Image { .. } => None,
+        })
+    }
+
+    /// Le nombre d'images déposées à l'écran.
+    pub fn images_affichees(&self) -> usize {
+        self.journal.iter().filter(|g| matches!(g, Geste::Image { .. })).count()
+    }
+}
+
+impl Afficheur for FenetreFactice {
+    fn afficher(&mut self, image: &dyn ImageAAfficher) -> anyhow::Result<()> {
+        self.journal.push(Geste::Image { largeur: image.largeur(), hauteur: image.hauteur() });
+        Ok(())
+    }
+
+    fn afficher_etat(&mut self, etat: EtatVisionnage) -> anyhow::Result<()> {
+        self.journal.push(Geste::Etat(etat));
+        Ok(())
+    }
+
+    fn fermeture_demandee(&mut self) -> bool {
+        std::mem::take(&mut self.fermeture)
     }
 }
 

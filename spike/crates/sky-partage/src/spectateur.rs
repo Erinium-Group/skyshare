@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use sky_compte::{deposer, relever, resoudre_ami, Ami, Coffre, Config, ErreurCompte, Etat};
 use sky_crypto::Identity;
-use sky_net::{LinkEvent, PeerLink};
+use sky_decode::{Decodeur, ErreurDecodeur, ImageDecodee};
+use sky_net::{ErreurEnvoi, LinkEvent, MessageControle, PeerLink};
+use sky_rendu::{EtatVisionnage, EvenementFenetre, Fenetre, ImageAAfficher};
 
 use crate::arret::{synchroniser_sauf_arret, Arret, ErreurAttente, HorlogeArretable};
 use crate::etablissement::{etablir, Etablissement};
@@ -18,6 +20,400 @@ use crate::rendez_vous::{interroger, reponse_a_l_offre, session_de, ATTENTE_SPEC
 
 /// Où écrire le flux reçu, si quelqu'un le veut.
 pub type Puits = Box<dyn Write>;
+
+/// Délai minimum entre deux demandes d'image clé.
+///
+/// Sans cette limitation, un flux inintelligible provoquerait une avalanche de
+/// demandes, donc une avalanche d'images clés — chacune bien plus grosse qu'une
+/// image ordinaire — qui saturerait la liaison exactement quand elle va déjà
+/// mal. Une seconde suffit : l'hôte force l'IDR sans délai (voir
+/// `hote::EnvoiVideo::servir`), et plusieurs demandes rapprochées ne lui
+/// coûteraient qu'un seul IDR de toute façon.
+const DELAI_ENTRE_DEMANDES: Duration = Duration::from_secs(1);
+
+/// Nombre d'unités d'accès refusées de suite par le décodeur au-delà duquel on
+/// renonce.
+///
+/// Une image clé répare un trou dans le flux ; elle ne répare pas un décodeur
+/// qui refuse tout — carte débranchée, contexte CUDA perdu, flux qui n'est pas
+/// du 4:4:4. Comme `ErreurDecodeur` ne distingue pas ces deux situations, c'est
+/// la PERSISTANCE qui les sépare : deux secondes de refus d'affilée à 60 im/s
+/// ne sont plus un trou. Sans ce plafond, le spectateur demanderait une image
+/// clé par seconde jusqu'à la fin des temps en montrant « En attente de
+/// l'image… ».
+const ECHECS_DECODAGE_AVANT_ABANDON: u32 = 120;
+
+/// Ce que le spectateur annonce au décodeur comme taille maximale.
+///
+/// La vraie résolution vient du rappel de séquence de NVDEC, pas d'ici : le
+/// décodeur prend `max(cette annonce, taille codée du flux)` pour son
+/// `ulMaxWidth` (voir `sky-decode`), donc un hôte en 4K fonctionne quand même.
+/// Ces deux valeurs ne sont qu'un plancher de marge, et ce sont celles du jalon
+/// 0 — 2560×1440, la résolution réellement mesurée.
+const LARGEUR_ANNONCEE: u32 = 2560;
+const HAUTEUR_ANNONCEE: u32 = 1440;
+
+/// Taille d'ouverture de la fenêtre. Elle n'impose rien au flux : le rendu met
+/// l'image à l'échelle, et l'utilisateur redimensionne.
+const LARGEUR_FENETRE: u32 = 1280;
+const HAUTEUR_FENETRE: u32 = 720;
+
+/// Ce que la boucle du spectateur attend du lien pair-à-pair : écouter, et
+/// demander une image clé. Elle n'écrit jamais de vidéo — c'est ce qui la
+/// distingue de `hote::LienVideo`.
+pub trait LienSpectateur {
+    fn envoyer_controle(&mut self, message: &MessageControle) -> Result<(), ErreurEnvoi>;
+    fn poll(&mut self) -> anyhow::Result<LinkEvent>;
+}
+
+impl LienSpectateur for PeerLink {
+    fn envoyer_controle(&mut self, message: &MessageControle) -> Result<(), ErreurEnvoi> {
+        PeerLink::envoyer_controle(self, message)
+    }
+
+    fn poll(&mut self) -> anyhow::Result<LinkEvent> {
+        PeerLink::poll(self)
+    }
+}
+
+/// Ce que la boucle du spectateur attend de l'écran.
+///
+/// `sky_rendu::Fenetre` en est la seule implémentation réelle. Le trait vit ici
+/// et non dans `sky-rendu` pour une raison simple : il n'y a qu'un appelant, et
+/// le trait est local, donc l'implémenter pour un type étranger est licite.
+/// Sans lui, aucun test ne serait possible — une `Fenetre` réelle ouvre une
+/// fenêtre réelle.
+pub trait Afficheur {
+    fn afficher(&mut self, image: &dyn ImageAAfficher) -> anyhow::Result<()>;
+    fn afficher_etat(&mut self, etat: EtatVisionnage) -> anyhow::Result<()>;
+    /// Traite les messages en attente et dit si l'utilisateur a fermé la
+    /// fenêtre. À appeler à chaque tour : une fenêtre qu'on ne pompe pas est
+    /// déclarée « ne répond pas » par Windows.
+    fn fermeture_demandee(&mut self) -> bool;
+}
+
+impl Afficheur for Fenetre {
+    fn afficher(&mut self, image: &dyn ImageAAfficher) -> anyhow::Result<()> {
+        Fenetre::afficher(self, image)
+    }
+
+    fn afficher_etat(&mut self, etat: EtatVisionnage) -> anyhow::Result<()> {
+        Fenetre::afficher_etat(self, etat)
+    }
+
+    fn fermeture_demandee(&mut self) -> bool {
+        Fenetre::pompe_messages(self).contains(&EvenementFenetre::FermetureDemandee)
+    }
+}
+
+/// Le geste du décodeur dont la boucle a besoin.
+///
+/// Un type associé plutôt que `ImageDecodee` en dur : `ImageDecodee::nouvelle`
+/// est `pub(crate)` dans `sky-decode` et exige une session NVDEC vivante, donc
+/// aucune doublure ne saurait en rendre une.
+pub trait Decodage {
+    type Image: ImageAAfficher;
+    fn decoder(
+        &mut self,
+        unite: &[u8],
+        horodatage_ms: u64,
+    ) -> Result<Option<Self::Image>, ErreurDecodeur>;
+}
+
+impl Decodage for Decodeur {
+    type Image = ImageDecodee;
+
+    fn decoder(
+        &mut self,
+        unite: &[u8],
+        horodatage_ms: u64,
+    ) -> Result<Option<ImageDecodee>, ErreurDecodeur> {
+        Decodeur::decoder(self, unite, horodatage_ms)
+    }
+}
+
+/// Ce que le visionnage remonte une fois par seconde. Aucun champ ne porte
+/// d'adresse, et c'est vérifié par un test : cette structure traverse
+/// `sky-app` jusqu'à l'interface, où la promesse « aucune adresse IP n'est
+/// jamais journalisée » doit encore tenir.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MesuresVisionnage {
+    pub images_par_seconde: f32,
+    pub debit_kbps: u32,
+    pub latence_decodage_ms: f32,
+    /// Cumulé depuis le début : les images décodées puis jetées faute d'être
+    /// dignes de confiance, et celles que le décodeur a refusées.
+    pub images_abandonnees: u32,
+    pub gigue_ms: f32,
+}
+
+/// Ce que `Visionnage::traiter` dit à la boucle de faire ensuite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Suite {
+    Continuer,
+    LienPerdu(String),
+}
+
+/// La décision du spectateur : quoi décoder, quoi afficher, quand redemander
+/// une image clé.
+///
+/// # Quand a-t-on le droit d'afficher
+///
+/// **Jamais avant une image clé, et plus du tout après un trou.** Ce n'est pas
+/// une précaution théorique : le flux est en rafraîchissement intra progressif
+/// (GOP et `idrPeriod` infinis, période de 2 s), et dans ce régime un
+/// spectateur qui n'a pas reçu d'image clé obtient **des images, mais fausses,
+/// sans que le décodeur signale la moindre erreur**. Le défaut ne se dénonce
+/// pas : il n'y a pas « rien à l'écran », il y a une image plausible et
+/// mensongère. Mesuré pendant ce jalon.
+///
+/// La règle est donc : on n'affiche qu'une image dont toute la chaîne de
+/// références est arrivée. Concrètement `cle_vue` s'allume sur une image clé et
+/// s'éteint dès qu'un trou est signalé (`sans_perte == false`) ou que le
+/// décodeur refuse une unité ; tant qu'il est éteint, l'écran montre
+/// `EtatVisionnage::EnAttente` et l'hôte reçoit une demande d'image clé.
+///
+/// L'arbitrage écarté était de **garder la dernière bonne image à l'écran**
+/// pendant la réparation, ce qui serait plus doux à regarder. Deux raisons de
+/// ne pas le faire ici : il faudrait retenir l'`ImageDecodee`, or le décodeur
+/// n'a que quatre surfaces de sortie et `cuvidDecodePicture` **bloque le fil
+/// appelant** quand elles sont épuisées — garder une image d'un tour sur
+/// l'autre, c'est risquer de bloquer la réception. Et un gel muet est à son
+/// tour un défaut qui ne se dénonce pas, alors que « En attente de l'image… »
+/// se lit. Le coût est borné par un aller-retour de demande d'image clé.
+pub struct Visionnage<D, A> {
+    decodeur: D,
+    afficheur: A,
+    reception: Reception,
+    /// L'origine des horodatages d'arrivée. Une durée, jamais une heure.
+    origine: Instant,
+    /// Le droit d'afficher. Voir la note de la structure.
+    cle_vue: bool,
+    /// Ce qui est à l'écran, pour ne pas le repeindre soixante fois par
+    /// seconde. `None` quand c'est une image.
+    etat_affiche: Option<EtatVisionnage>,
+    derniere_demande: Option<Instant>,
+    echecs_consecutifs: u32,
+    images_abandonnees: u32,
+    // La fenêtre de mesure, remise à zéro à chaque relevé.
+    debut_fenetre: Instant,
+    octets_precedent: u64,
+    images_precedent: u64,
+    latence_us_fenetre: u64,
+    images_decodees_fenetre: u64,
+}
+
+impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
+    pub fn nouveau(decodeur: D, afficheur: A, maintenant: Instant) -> Visionnage<D, A> {
+        Visionnage {
+            decodeur,
+            afficheur,
+            reception: Reception::default(),
+            origine: maintenant,
+            cle_vue: false,
+            etat_affiche: None,
+            derniere_demande: None,
+            echecs_consecutifs: 0,
+            images_abandonnees: 0,
+            debut_fenetre: maintenant,
+            octets_precedent: 0,
+            images_precedent: 0,
+            latence_us_fenetre: 0,
+            images_decodees_fenetre: 0,
+        }
+    }
+
+    /// Montre l'attente avant la première image. Le canal est ouvert, l'hôte
+    /// n'a encore rien envoyé : une fenêtre noire muette serait un défaut.
+    pub fn commencer(&mut self) -> anyhow::Result<()> {
+        self.montrer(EtatVisionnage::EnAttente)
+    }
+
+    pub fn fermeture_demandee(&mut self) -> bool {
+        self.afficheur.fermeture_demandee()
+    }
+
+    pub fn reception(&mut self) -> &mut Reception {
+        &mut self.reception
+    }
+
+    pub fn afficheur(&self) -> &A {
+        &self.afficheur
+    }
+
+    pub fn afficheur_mut(&mut self) -> &mut A {
+        &mut self.afficheur
+    }
+
+    pub fn decodeur(&self) -> &D {
+        &self.decodeur
+    }
+
+    pub fn traiter(
+        &mut self,
+        lien: &mut dyn LienSpectateur,
+        evenement: LinkEvent,
+        maintenant: Instant,
+    ) -> anyhow::Result<Suite> {
+        match evenement {
+            LinkEvent::Image { donnees, horodatage_ms, cle, sans_perte } => {
+                self.sur_image(lien, &donnees, horodatage_ms, cle, sans_perte, maintenant)?;
+            }
+            LinkEvent::Controle(MessageControle::PartageArrete) => {
+                self.montrer(EtatVisionnage::PartageArrete)?;
+            }
+            // L'hôte ne nous en demande pas : c'est NOUS qui en envoyons.
+            LinkEvent::Controle(MessageControle::DemandeImageCle) => {}
+            LinkEvent::Failed(raison) => {
+                self.montrer(EtatVisionnage::ConnexionPerdue)?;
+                return Ok(Suite::LienPerdu(raison));
+            }
+            LinkEvent::Connected | LinkEvent::Idle => {}
+        }
+        Ok(Suite::Continuer)
+    }
+
+    fn sur_image(
+        &mut self,
+        lien: &mut dyn LienSpectateur,
+        donnees: &[u8],
+        horodatage_ms: u64,
+        cle: bool,
+        sans_perte: bool,
+        maintenant: Instant,
+    ) -> anyhow::Result<()> {
+        let arrivee_us = maintenant.saturating_duration_since(self.origine).as_micros() as u64;
+        self.reception.compter_image(donnees.len(), horodatage_ms * 1_000, arrivee_us);
+
+        // Le trou s'est produit AVANT cette image : il invalide les références
+        // accumulées, mais pas une image clé, qui n'en utilise aucune. D'où
+        // l'ordre — on perd le droit d'afficher, puis une image clé le rend.
+        if !sans_perte {
+            self.cle_vue = false;
+        }
+        if cle {
+            self.cle_vue = true;
+        }
+
+        let debut = Instant::now();
+        let decodee = match self.decodeur.decoder(donnees, horodatage_ms) {
+            Ok(decodee) => decodee,
+            Err(erreur) => {
+                self.echecs_consecutifs += 1;
+                if self.echecs_consecutifs >= ECHECS_DECODAGE_AVANT_ABANDON {
+                    return Err(anyhow::Error::new(erreur).context(format!(
+                        "{ECHECS_DECODAGE_AVANT_ABANDON} unités d'accès refusées de suite par le \
+                         décodeur : ce n'est plus un trou dans le flux"
+                    )));
+                }
+                // Un refus isolé peut venir d'une unité tronquée ; une image clé
+                // repart de zéro et la répare.
+                self.cle_vue = false;
+                return self.abandonner(lien, maintenant);
+            }
+        };
+        // Le plafond compte les refus CONSÉCUTIFS : des refus épars sur une
+        // liaison qui marche ne doivent pas s'additionner jusqu'à l'abandon.
+        self.echecs_consecutifs = 0;
+
+        // `Ok(None)` n'est pas une erreur : le décodeur a avalé des en-têtes de
+        // séquence. Rien à afficher, rien à réparer.
+        let Some(image) = decodee else {
+            return Ok(());
+        };
+        self.latence_us_fenetre += debut.elapsed().as_micros() as u64;
+        self.images_decodees_fenetre += 1;
+
+        if !self.cle_vue {
+            // Décodée sans erreur, et pourtant fausse : voir la note de
+            // `Visionnage`. C'est ici, et nulle part ailleurs, que le spectateur
+            // refuse d'afficher du faux sans le savoir.
+            return self.abandonner(lien, maintenant);
+        }
+        self.afficheur.afficher(&image)?;
+        self.etat_affiche = None;
+        // `image` tombe ici : une des quatre surfaces de sortie de NVDEC est
+        // rendue tout de suite. La retenir d'un tour sur l'autre bloquerait
+        // `cuvidDecodePicture` dès qu'elles seraient épuisées.
+        Ok(())
+    }
+
+    /// Cette image ne sera pas montrée : on le compte, on montre l'attente, et
+    /// on demande à l'hôte l'image clé qui remettra le flux d'aplomb.
+    fn abandonner(
+        &mut self,
+        lien: &mut dyn LienSpectateur,
+        maintenant: Instant,
+    ) -> anyhow::Result<()> {
+        self.images_abandonnees = self.images_abandonnees.saturating_add(1);
+        self.montrer(EtatVisionnage::EnAttente)?;
+        self.demander_image_cle(lien, maintenant)
+    }
+
+    /// Demande une image clé à l'hôte, au plus une par `DELAI_ENTRE_DEMANDES`.
+    fn demander_image_cle(
+        &mut self,
+        lien: &mut dyn LienSpectateur,
+        maintenant: Instant,
+    ) -> anyhow::Result<()> {
+        if self
+            .derniere_demande
+            .is_some_and(|precedente| maintenant.saturating_duration_since(precedente) < DELAI_ENTRE_DEMANDES)
+        {
+            return Ok(());
+        }
+        // Un refus d'envoi n'interrompt PAS le visionnage, et c'est délibéré :
+        // le seul refus plausible ici est un canal qui se ferme, et dans ce cas
+        // le `poll` du tour suivant rend `Failed`, qui donne à l'utilisateur
+        // « Connexion perdue » au lieu d'une erreur brute. Rien n'est tu pour
+        // autant — l'écran montre déjà l'attente et `images_abandonnees` monte.
+        // L'horodatage n'est retenu que si la demande est bien partie, pour que
+        // la limitation ne consomme pas le quota d'une demande perdue.
+        if lien.envoyer_controle(&MessageControle::DemandeImageCle).is_ok() {
+            self.derniere_demande = Some(maintenant);
+        }
+        Ok(())
+    }
+
+    /// Repeint un état, et seulement s'il change.
+    fn montrer(&mut self, etat: EtatVisionnage) -> anyhow::Result<()> {
+        if self.etat_affiche == Some(etat) {
+            return Ok(());
+        }
+        self.afficheur.afficher_etat(etat)?;
+        self.etat_affiche = Some(etat);
+        Ok(())
+    }
+
+    /// Clôt la fenêtre de mesure et rend ce qu'elle a vu.
+    pub fn relever_mesures(&mut self, maintenant: Instant) -> MesuresVisionnage {
+        let secondes = maintenant.saturating_duration_since(self.debut_fenetre).as_secs_f64();
+        // Un relevé à durée nulle ne se divise pas ; il n'arrive qu'appelé deux
+        // fois dans la même microseconde, donc jamais dans la boucle.
+        let par_seconde = |quantite: f64| if secondes > 0.0 { quantite / secondes } else { 0.0 };
+        let octets = self.reception.octets() - self.octets_precedent;
+        let images = self.reception.images() - self.images_precedent;
+        let latence_ms = if self.images_decodees_fenetre > 0 {
+            self.latence_us_fenetre as f64 / self.images_decodees_fenetre as f64 / 1000.0
+        } else {
+            0.0
+        };
+
+        self.octets_precedent = self.reception.octets();
+        self.images_precedent = self.reception.images();
+        self.latence_us_fenetre = 0;
+        self.images_decodees_fenetre = 0;
+        self.debut_fenetre = maintenant;
+
+        MesuresVisionnage {
+            images_par_seconde: par_seconde(images as f64) as f32,
+            debit_kbps: (par_seconde(octets as f64 * 8.0) / 1000.0) as u32,
+            latence_decodage_ms: latence_ms as f32,
+            images_abandonnees: self.images_abandonnees,
+            gigue_ms: self.reception.gigue_ms() as f32,
+        }
+    }
+}
 
 /// Comment l'appelant désigne l'ami à regarder.
 pub enum Designation<'a> {
@@ -125,79 +521,417 @@ pub fn regarder(
     // Ouvert APRÈS la connexion, comme le fichier de `view` au C2 : jamais de
     // fichier vide laissé par une négociation ratée.
     let puits = ouvrir_puits()?;
-    recevoir(&mut link, puits, p.duree_max, arret, evenements)
+    recevoir(&mut link, &ami.discord_name, puits, p.duree_max, arret, evenements)
 }
 
-/// La boucle de réception de `cmd_view` (C2), l'écriture du fichier devenue
-/// optionnelle. Les en-têtes de séquence n'étant émis qu'une fois (GOP
-/// infini), le puits reçoit tout depuis le tout premier paquet.
+/// La boucle de réception : décoder, afficher, mesurer.
+///
+/// Le décodeur et la fenêtre sont créés ICI plutôt que reçus en paramètre, pour
+/// que ni `ParametresSpectateur` ni la signature de `regarder` ne changent —
+/// `sky-probe` et `sky-app` les construisent, et les deux appartiennent à
+/// d'autres tâches. Tout ce qui se décide se décide dans `Visionnage`, qui est
+/// éprouvé par doublures ; cette fonction-ci n'est plus que du câblage.
 fn recevoir(
     link: &mut PeerLink,
+    nom_de_l_hote: &str,
     mut puits: Option<Puits>,
     duree_max: Option<Duration>,
     arret: &Arret,
     evenements: &mut dyn FnMut(Evenement),
 ) -> Result<Fin, ErreurPartage> {
-    let mut reception = Reception::default();
-    let t0 = Instant::now();
-    let mut dernier_affichage = Instant::now();
-    let mut octets_precedent = 0u64;
-    let mut images_precedent = 0u64;
+    // Avant la fenêtre : sans décodeur, il n'y aurait rien à y montrer, et le
+    // message d'`ErreurDecodeur` est le seul diagnostic du projet sur ce point.
+    let decodeur = Decodeur::nouveau(LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)
+        .map_err(|e| ErreurPartage::Autre(anyhow::Error::new(e)))?;
+    let fenetre = Fenetre::ouvrir(
+        &format!("SkyShare — écran de {nom_de_l_hote}"),
+        LARGEUR_FENETRE,
+        HAUTEUR_FENETRE,
+    )?;
 
-    loop {
+    let t0 = Instant::now();
+    let mut visionnage = Visionnage::nouveau(decodeur, fenetre, t0);
+    visionnage.commencer()?;
+    let mut dernier_releve = t0;
+
+    let fin = loop {
         if arret.est_demande() {
-            vider(&mut puits);
-            return Ok(Fin::Arrete);
+            break Fin::Arrete;
         }
         if duree_max.is_some_and(|d| t0.elapsed() >= d) {
-            break;
+            break Fin::DureeEcoulee(Box::new(bilan(link, &mut visionnage, t0)));
         }
-        // TRANSITOIRE (jalon 2, tâche 5) : la vidéo ne passe plus par le canal
-        // de données, donc plus rien n'alimente `reception` ni le puits jusqu'à
-        // la piste média de la tâche 6. Le retour d'horodatage vers l'émetteur
-        // (RTT) a été retiré pour la même raison : il n'avait plus rien à dire.
-        if let LinkEvent::Failed(raison) = link.poll()? {
-            vider(&mut puits);
-            return Ok(Fin::LienTombe(raison));
+        // À chaque tour : une fenêtre qu'on ne pompe pas est déclarée « ne
+        // répond pas » par Windows, et la croix doit arrêter le visionnage.
+        if visionnage.fermeture_demandee() {
+            break Fin::Arrete;
         }
 
-        if dernier_affichage.elapsed() >= Duration::from_secs(1) {
-            let ecoule = dernier_affichage.elapsed().as_secs_f64();
+        let evenement = LienSpectateur::poll(link)?;
+        // Le puits reçoit l'unité d'accès telle qu'elle est arrivée, avant tout
+        // décodage : c'est ce que `sky-probe view` écrit dans son fichier.
+        if let (LinkEvent::Image { donnees, .. }, Some(p)) = (&evenement, puits.as_mut()) {
+            p.write_all(donnees).map_err(anyhow::Error::from)?;
+        }
+        if let Suite::LienPerdu(raison) = visionnage.traiter(link, evenement, Instant::now())? {
+            break Fin::LienTombe(raison);
+        }
+
+        let maintenant = Instant::now();
+        if maintenant.duration_since(dernier_releve) >= Duration::from_secs(1) {
+            let m = visionnage.relever_mesures(maintenant);
+            dernier_releve = maintenant;
+            // `Mesures::Reception` est dérivée du MÊME relevé, pour qu'il n'y
+            // ait qu'une source de vérité. Son renommage vers
+            // `MesuresVisionnage` traverse `sky-app` : c'est la tâche 10.
             evenements(Evenement::Mesures(Mesures::Reception {
-                debit_mbps: (reception.octets() - octets_precedent) as f64 * 8.0 / ecoule / 1e6,
-                images_par_s: reception.images() - images_precedent,
-                gigue_ms: reception.gigue_ms(),
+                debit_mbps: f64::from(m.debit_kbps) / 1000.0,
+                images_par_s: m.images_par_seconde.round() as u64,
+                gigue_ms: f64::from(m.gigue_ms),
             }));
-            octets_precedent = reception.octets();
-            images_precedent = reception.images();
-            dernier_affichage = Instant::now();
         }
-    }
+    };
 
+    // Même sur un arrêt ou un lien tombé : ce qui est déjà reçu est écrit en
+    // entier, et un fichier tronqué en silence serait un faux témoignage.
     if let Some(p) = puits.as_mut() {
         p.flush().map_err(anyhow::Error::from)?;
     }
+    Ok(fin)
+}
+
+fn bilan<D: Decodage, A: Afficheur>(
+    link: &PeerLink,
+    visionnage: &mut Visionnage<D, A>,
+    t0: Instant,
+) -> Bilan {
     let (_, vers_internet) = link.destinations();
-    Ok(Fin::DureeEcoulee(Box::new(Bilan::Reception(BilanReception {
+    let reception = visionnage.reception();
+    Bilan::Reception(BilanReception {
         duree_s: t0.elapsed().as_secs_f64(),
         images: reception.images(),
         octets: reception.octets(),
         transit_ms: reception.transit_ms(),
         gigue_ms: reception.gigue_ms(),
         vers_internet,
-    }))))
-}
-
-fn vider(puits: &mut Option<Puits>) {
-    if let Some(p) = puits.as_mut() {
-        p.flush().ok();
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use sky_compte::Ami;
+
+    use crate::doublure::{DecodeurFactice, FenetreFactice, Geste, Issue, LienFactice};
+
+    /// Une unité d'accès de `taille` octets, telle que la piste média la rend.
+    fn image_de(taille: usize, cle: bool, sans_perte: bool) -> LinkEvent {
+        LinkEvent::Image { donnees: vec![7u8; taille], horodatage_ms: 0, cle, sans_perte }
+    }
+
+    fn image(cle: bool, sans_perte: bool) -> LinkEvent {
+        image_de(3, cle, sans_perte)
+    }
+
+    fn visionnage(
+        issues: &[Issue],
+        defaut: Issue,
+        maintenant: Instant,
+    ) -> Visionnage<DecodeurFactice, FenetreFactice> {
+        Visionnage::nouveau(
+            DecodeurFactice::puis(issues, defaut),
+            FenetreFactice::nouvelle(),
+            maintenant,
+        )
+    }
+
+    fn demandes(lien: &LienFactice) -> usize {
+        lien.messages_envoyes().iter().filter(|m| **m == MessageControle::DemandeImageCle).count()
+    }
+
+    #[test]
+    fn une_demande_d_image_cle_est_limitee_a_une_par_seconde() {
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Echec, t0);
+
+        // Dix refus de décodage au MÊME instant : rien ne peut s'être écoulé.
+        for _ in 0..10 {
+            v.traiter(&mut lien, image(false, true), t0).expect("traitement");
+        }
+
+        assert_eq!(demandes(&lien), 1, "dix échecs au même instant ne font qu'une demande");
+    }
+
+    #[test]
+    fn une_demande_d_image_cle_repart_apres_le_delai() {
+        // Le pendant du test précédent : la limitation retient, elle ne bloque
+        // pas. Sans lui, remplacer le délai par l'éternité resterait vert.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Echec, t0);
+
+        v.traiter(&mut lien, image(false, true), t0).expect("traitement");
+        let juste_avant = t0 + DELAI_ENTRE_DEMANDES - Duration::from_millis(1);
+        v.traiter(&mut lien, image(false, true), juste_avant).expect("traitement");
+        assert_eq!(demandes(&lien), 1, "à 999 ms, le délai n'est pas écoulé");
+
+        v.traiter(&mut lien, image(false, true), t0 + DELAI_ENTRE_DEMANDES).expect("traitement");
+        assert_eq!(demandes(&lien), 2, "le délai écoulé, une nouvelle demande part");
+    }
+
+    #[test]
+    fn les_mesures_ne_contiennent_aucune_adresse() {
+        let mesures = MesuresVisionnage {
+            images_par_seconde: 60.0,
+            debit_kbps: 12_400,
+            latence_decodage_ms: 1.57,
+            images_abandonnees: 0,
+            gigue_ms: 5.0,
+        };
+        // La promesse « aucune adresse IP n'est jamais journalisée » doit tenir
+        // jusque dans ce qui remonte à l'interface. Ce test rougit si quelqu'un
+        // ajoute un champ d'adresse à la structure.
+        let rendu = format!("{mesures:?}").to_lowercase();
+        for interdit in ["addr", "adresse", "ip", "socket", "peer", "pair"] {
+            assert!(!rendu.contains(interdit), "« {interdit} » apparaît dans les mesures : {rendu}");
+        }
+    }
+
+    #[test]
+    fn la_perte_de_connexion_affiche_un_etat_et_pas_une_fenetre_noire() {
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        let suite = v
+            .traiter(&mut lien, LinkEvent::Failed("le lien est tombé".to_string()), t0)
+            .expect("traitement");
+
+        assert_eq!(v.afficheur().dernier_etat(), Some(EtatVisionnage::ConnexionPerdue));
+        assert_eq!(suite, Suite::LienPerdu("le lien est tombé".to_string()));
+    }
+
+    #[test]
+    fn le_partage_arrete_affiche_son_etat() {
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        v.traiter(&mut lien, LinkEvent::Controle(MessageControle::PartageArrete), t0)
+            .expect("traitement");
+
+        assert_eq!(v.afficheur().dernier_etat(), Some(EtatVisionnage::PartageArrete));
+    }
+
+    #[test]
+    fn aucune_image_ne_s_affiche_avant_une_image_cle() {
+        // LE test de ce jalon. Sous rafraîchissement intra progressif, une image
+        // décodée sans sa chaîne de références est FAUSSE et le décodeur ne dit
+        // rien : le décodeur rend ici `Ok(Some(image))`, tout va bien de son
+        // point de vue, et c'est pourtant exactement ce qu'il ne faut pas
+        // montrer. Neutralisation : retirer la garde `cle_vue` de `sur_image`.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        v.traiter(&mut lien, image(false, true), t0).expect("traitement");
+
+        assert_eq!(v.afficheur().images_affichees(), 0, "une image non clé ne s'affiche pas");
+        assert_eq!(v.afficheur().dernier_etat(), Some(EtatVisionnage::EnAttente));
+        assert_eq!(demandes(&lien), 1, "et l'hôte est prévenu qu'il manque une image clé");
+    }
+
+    #[test]
+    fn une_image_cle_ouvre_l_affichage_et_celles_qui_suivent_passent() {
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        v.traiter(&mut lien, image(true, true), t0).expect("traitement");
+        v.traiter(&mut lien, image(false, true), t0).expect("traitement");
+
+        assert_eq!(
+            v.afficheur().journal(),
+            [
+                Geste::Image { largeur: 1920, hauteur: 1080 },
+                Geste::Image { largeur: 1920, hauteur: 1080 },
+            ],
+            "l'image clé ouvre l'affichage, et aucun état ne s'intercale"
+        );
+        assert_eq!(demandes(&lien), 0, "rien ne manque : aucune demande");
+    }
+
+    #[test]
+    fn un_trou_dans_le_flux_referme_l_affichage_et_demande_une_image_cle() {
+        // `sans_perte == false` est, sous GOP infini, le SEUL signal qu'un
+        // paquet a manqué — le décodeur n'en dira rien.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        v.traiter(&mut lien, image(true, true), t0).expect("traitement");
+        v.traiter(&mut lien, image(false, false), t0).expect("traitement");
+
+        assert_eq!(v.afficheur().images_affichees(), 1, "l'image d'après le trou ne s'affiche pas");
+        assert_eq!(v.afficheur().dernier_etat(), Some(EtatVisionnage::EnAttente));
+        assert_eq!(demandes(&lien), 1);
+    }
+
+    #[test]
+    fn une_image_cle_apres_un_trou_s_affiche_quand_meme() {
+        // Le trou précède l'image ; si celle-ci est clé, elle ne dépend
+        // d'aucune référence perdue. L'écarter ferait attendre pour rien.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        v.traiter(&mut lien, image(true, false), t0).expect("traitement");
+
+        assert_eq!(v.afficheur().images_affichees(), 1);
+        assert_eq!(demandes(&lien), 0, "l'image clé est déjà là : rien à demander");
+    }
+
+    #[test]
+    fn un_refus_de_decodage_demande_une_image_cle_et_compte_un_abandon() {
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[Issue::Image], Issue::Echec, t0);
+
+        v.traiter(&mut lien, image(true, true), t0).expect("traitement");
+        v.traiter(&mut lien, image(false, true), t0).expect("un refus n'est pas une erreur fatale");
+
+        assert_eq!(v.afficheur().dernier_etat(), Some(EtatVisionnage::EnAttente));
+        assert_eq!(demandes(&lien), 1);
+        assert_eq!(v.relever_mesures(t0 + Duration::from_secs(1)).images_abandonnees, 1);
+    }
+
+    #[test]
+    fn des_refus_sans_fin_finissent_par_remonter_une_erreur() {
+        // Une image clé répare un trou, pas un décodeur qui refuse tout. Sans
+        // ce plafond, le spectateur demanderait une image clé par seconde
+        // indéfiniment en montrant « En attente de l'image… ».
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Echec, t0);
+
+        for numero in 1..ECHECS_DECODAGE_AVANT_ABANDON {
+            v.traiter(&mut lien, image(false, true), t0)
+                .unwrap_or_else(|e| panic!("le refus {numero} ne doit pas encore abandonner : {e}"));
+        }
+        let erreur = v
+            .traiter(&mut lien, image(false, true), t0)
+            .expect_err("au-delà du plafond, le refus remonte");
+
+        assert!(
+            erreur.to_string().contains("de suite"),
+            "l'erreur dit que les refus se sont enchaînés : {erreur}"
+        );
+    }
+
+    #[test]
+    fn un_canal_de_controle_ferme_n_interrompt_pas_le_visionnage() {
+        // Course réelle : le spectateur détecte un trou à l'instant où l'hôte
+        // raccroche. Faire remonter ce refus d'envoi donnerait à l'utilisateur
+        // une erreur brute là où le `Failed` du tour suivant lui dit
+        // « Connexion perdue ». Neutralisation : remettre le `?` sur
+        // `envoyer_controle` — le premier `traiter` rend `Err`.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        lien.refuser_les_controles();
+        let mut v = visionnage(&[], Issue::Echec, t0);
+
+        v.traiter(&mut lien, image(false, true), t0).expect("un canal fermé n'est pas fatal");
+        assert_eq!(v.afficheur().dernier_etat(), Some(EtatVisionnage::EnAttente));
+
+        // Et la demande perdue n'a pas consommé le quota : dès que le canal
+        // revient, elle repart sans attendre une seconde.
+        let mut lien = LienFactice::nouveau();
+        v.traiter(&mut lien, image(false, true), t0).expect("traitement");
+        assert_eq!(demandes(&lien), 1, "une demande perdue ne compte pas comme envoyée");
+    }
+
+    #[test]
+    fn une_unite_decodee_remet_le_compteur_de_refus_a_zero() {
+        // Trouvé par une neutralisation INOPÉRANTE : retirer la remise à zéro
+        // laissait les 51 tests verts. Sans elle, des refus ÉPARS — un paquet
+        // perdu de temps en temps sur une liaison qui marche — s'additionnent
+        // jusqu'au plafond, et le visionnage s'arrête sur un flux parfaitement
+        // sain. Le plafond doit compter les refus CONSÉCUTIFS, pas leur total.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut issues = Vec::new();
+        for _ in 0..ECHECS_DECODAGE_AVANT_ABANDON + 10 {
+            issues.push(Issue::Echec);
+            issues.push(Issue::Image);
+        }
+        let mut v = visionnage(&issues, Issue::Image, t0);
+
+        for numero in 0..issues.len() {
+            v.traiter(&mut lien, image(false, true), t0)
+                .unwrap_or_else(|e| panic!("l'unité {numero} ne doit pas faire abandonner : {e}"));
+        }
+    }
+
+    #[test]
+    fn les_en_tetes_de_sequence_ne_sont_pas_une_erreur() {
+        // `Ok(None)` : le décodeur a avalé des VPS/SPS/PPS. Rien à afficher,
+        // rien à réparer, rien à demander.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Avalee, t0);
+
+        let suite = v.traiter(&mut lien, image(true, true), t0).expect("traitement");
+
+        assert_eq!(suite, Suite::Continuer);
+        assert_eq!(v.afficheur().images_affichees(), 0);
+        assert_eq!(demandes(&lien), 0, "des en-têtes avalés ne sont pas un flux illisible");
+        assert_eq!(v.relever_mesures(t0 + Duration::from_secs(1)).images_abandonnees, 0);
+    }
+
+    #[test]
+    fn l_unite_poussee_dans_le_decodeur_est_celle_recue_sans_en_tete() {
+        // Le découpage maison préfixait neuf octets à chaque morceau, et c'est
+        // `Reception::absorber` qui les retirait. Il n'y a plus ni l'un ni
+        // l'autre : l'unité d'accès va au décodeur telle quelle. Neutralisation :
+        // sauter un octet à l'entrée de `sur_image` — les octets diffèrent.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        v.traiter(&mut lien, image_de(5, true, true), t0).expect("traitement");
+
+        assert_eq!(v.decodeur().unites(), [vec![7u8; 5]]);
+    }
+
+    #[test]
+    fn la_fermeture_de_la_fenetre_remonte_a_la_boucle() {
+        // La croix de la fenêtre doit arrêter le visionnage ; la boucle
+        // n'interroge que `Visionnage::fermeture_demandee`. Neutralisation :
+        // rendre `false` en dur — le test rougit.
+        let t0 = Instant::now();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        assert!(!v.fermeture_demandee(), "rien n'a été demandé");
+        v.afficheur_mut().demander_la_fermeture();
+        assert!(v.fermeture_demandee(), "la fermeture demandée remonte");
+    }
+
+    #[test]
+    fn les_mesures_remontent_le_debit_et_les_images_recues() {
+        // Ces calculs existaient depuis le C2 et ne remontaient plus à personne.
+        // Neutralisation : rendre `debit_kbps: 0` — le test rougit.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        // 125 000 octets = 1 000 000 bits ; sur une seconde, 1 000 kbps.
+        v.traiter(&mut lien, image_de(125_000, true, true), t0).expect("traitement");
+        let mesures = v.relever_mesures(t0 + Duration::from_secs(1));
+
+        assert_eq!(mesures.debit_kbps, 1_000);
+        assert!((mesures.images_par_seconde - 1.0).abs() < 1e-6, "{}", mesures.images_par_seconde);
+    }
 
     fn ami(id: i64, nom: &str) -> Ami {
         Ami { id, friendship_id: id, discord_name: nom.to_string(), appareils: Vec::new() }

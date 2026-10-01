@@ -12,6 +12,8 @@ sky-net = { version = "0.0.0", path = "../sky-net" }
 sky-crypto = { version = "0.0.0", path = "../sky-crypto" }
 sky-capture = { version = "0.0.0", path = "../sky-capture" }
 sky-encode = { version = "0.0.0", path = "../sky-encode" }
+sky-decode = { version = "0.0.0", path = "../sky-decode" }
+sky-rendu = { version = "0.0.0", path = "../sky-rendu" }
 # Seulement pour nommer `ID3D11Device` dans la fabrique de la source
 # synthétique : c'est le device de la capture qui la crée.
 windows = { version = "0.62", features = ["Win32_Graphics_Direct3D11"] }
