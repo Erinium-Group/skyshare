@@ -374,6 +374,13 @@ fn diffuser(
                 // L'horodatage est une durée depuis le début de la diffusion, en
                 // millisecondes : c'est ce que porte l'horloge RTP, et le
                 // spectateur n'a aucun besoin de notre heure système.
+                //
+                // NE RIEN GLISSER QUI SERVE LE LIEN ENTRE `encode` CI-DESSUS ET
+                // CET APPEL : `envoyer_image` éteint la dette d'image clé à son
+                // entrée en se fiant à ce qu'aucune demande n'ait pu arriver
+                // entre les deux. Un `servir` ici perdrait la demande, et aucun
+                // test ne le dirait (voir l'invariant écrit dans
+                // `EnvoiVideo::envoyer_image`).
                 let horodatage_ms = t0.elapsed().as_millis() as u64;
                 match envoi.envoyer_image(link, &mut enc, &pkt.data, horodatage_ms)? {
                     IssueEnvoi::Envoyee => {}
@@ -587,6 +594,15 @@ impl EnvoiVideo {
         // La retirer laisserait le budget désactivé à vie et ferait de CHAQUE
         // image un IDR ; la déplacer après la boucle rouvre le trou ci-dessus.
         // Les deux cas ont leur test.
+        //
+        // INVARIANT DONT CECI DÉPEND, et qu'aucun test ne peut garder : entre
+        // `enc.encode` et cet appel, dans `diffuser`, **rien ne sert le lien**.
+        // C'est ce qui autorise à dire « l'image en main satisfait la dette en
+        // cours » : aucune demande ne peut s'être glissée entre les deux.
+        // Intercaler un `servir` (ou tout appel qui polle) à cet endroit de
+        // `diffuser` rouvrirait exactement la régression décrite plus haut, et
+        // **aucun test ne le signalerait** — ils n'atteignent pas `diffuser`. Qui
+        // ajoute un service réseau là doit déplacer cette extinction avec lui.
         self.image_cle_due = false;
 
         let debut = Instant::now();
@@ -697,10 +713,16 @@ fn annoncer_l_arret(lien: &mut dyn LienVideo) -> Result<(), ErreurEnvoi> {
     lien.envoyer_controle(&MessageControle::PartageArrete)?;
     let jusqu_a = Instant::now() + DRAINAGE_ARRET;
     while Instant::now() < jusqu_a {
-        // Une demande d'image clé ne change plus rien à ce stade ; en revanche un
-        // lien déclaré perdu met fin au drainage sur-le-champ — rien ne partira
-        // plus, et c'est ce qui borne le coût d'une annonce tentée sur un lien
-        // mourant.
+        // Une demande d'image clé ne change plus rien à ce stade ; un lien
+        // déclaré perdu, lui, met fin au drainage sur-le-champ — rien ne
+        // partira plus.
+        //
+        // Ne pas compter sur cette sortie-là : l'événement de déconnexion a
+        // souvent déjà été consommé par la boucle de diffusion quand on arrive
+        // ici, et `poll` ne le répète pas forcément. Sur un vrai lien mourant,
+        // les `DRAINAGE_ARRET` peuvent donc s'écouler en entier — et c'est le
+        // délai lui-même, pas cet abrègement, qui borne le coût de l'annonce.
+        // L'abrègement n'est éprouvé que sur doublure.
         match lien.poll() {
             Ok(LinkEvent::Failed(_)) | Err(_) => break,
             Ok(_) => std::thread::sleep(GRANULARITE_SERVICE_RESEAU),
@@ -883,8 +905,12 @@ mod tests {
 
     #[test]
     fn le_drainage_de_l_arret_s_arrete_des_que_le_lien_est_declare_perdu() {
-        // C'est ce qui borne le coût de l'annonce désormais sans exception : sur
-        // un lien mourant, le drainage ne consomme pas ses 50 ms.
+        // Ce que ce test prouve, et rien de plus : QUAND le drainage voit un
+        // `LinkEvent::Failed`, il s'arrête au lieu d'attendre ses 50 ms.
+        //
+        // Il ne prouve pas qu'un vrai lien mourant le lui montrera : la boucle de
+        // diffusion a souvent déjà consommé cet événement avant l'annonce. Le
+        // coût de l'annonce est borné par `DRAINAGE_ARRET`, pas par cette sortie.
         let mut lien = LienFactice::nouveau();
         lien.injecter(LinkEvent::Failed("le lien a été perdu".to_string()));
         let debut = Instant::now();
