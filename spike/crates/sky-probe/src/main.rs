@@ -89,7 +89,8 @@ enum Cmd {
         height: u32,
     },
     /// Reçoit : demande le partage d'un ami par la boîte aux lettres, écrit
-    /// le flux reçu et mesure débit/gigue/transit (Q4, Q5)
+    /// le flux reçu et mesure débit/gigue/transit (Q4, Q5). OUVRE UNE FENÊTRE
+    /// qui affiche l'écran reçu ; la fermer arrête la réception.
     View {
         /// Ami à regarder : nom Discord exact ou identifiant (voir `friends list`)
         ami: String,

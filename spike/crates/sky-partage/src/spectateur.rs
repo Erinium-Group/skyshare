@@ -43,6 +43,77 @@ const DELAI_ENTRE_DEMANDES: Duration = Duration::from_secs(1);
 /// l'image… ».
 const ECHECS_DECODAGE_AVANT_ABANDON: u32 = 120;
 
+/// Temps pendant lequel le spectateur attend une image clé, demandes
+/// comprises, avant de renoncer avec `ErreurVisionnage::ImageIrreconstituable`.
+///
+/// **Valeur CHOISIE, pas mesurée.** Dix secondes, c'est dix demandes au rythme
+/// de `DELAI_ENTRE_DEMANDES` : assez pour qu'une image clé perdue à son tour, ou
+/// deux, soient redemandées ; assez peu pour qu'un spectateur ne contemple pas
+/// « En attente de l'image… » sans fin. Ce plafond couvre ce que
+/// `ECHECS_DECODAGE_AVANT_ABANDON` ne voit pas : un décodeur qui ne REFUSE rien
+/// mais ne rend rien d'affichable — en-têtes de séquence perdus (`Ok(None)` à
+/// chaque unité), ou hôte qui n'honore pas les demandes.
+const ATTENTE_IMAGE_CLE_MAX: Duration = Duration::from_secs(10);
+
+/// Pause sur `LinkEvent::Idle` dans la boucle de réception.
+///
+/// `PeerLink::poll` ne bloque jamais (socket non bloquant) : sans pause, la
+/// boucle brûlerait un cœur entier, là où le jalon 0 mesurait 0,10 % de CPU pour
+/// toute la chaîne. On ne dort QUE sur `Idle` — tant que le lien a quelque chose
+/// à rendre, on le vide sans attendre.
+///
+/// **Sous Windows, une milliseconde demandée dure plutôt ~15 ms** (résolution
+/// par défaut de l'ordonnanceur, mesuré à la tâche 5). Une unité d'accès arrivée
+/// au début d'une pause peut donc attendre jusqu'à ~15 ms avant d'être décodée.
+/// **L'effet sur la latence d'affichage n'est pas mesuré** — à mesurer à l'essai
+/// réel à deux machines.
+const PAUSE_SUR_INACTIVITE: Duration = Duration::from_millis(1);
+
+/// Pourquoi le visionnage s'arrête en erreur, typé pour que l'appelant puisse
+/// donner à chaque cause son message honnête (spec §7).
+///
+/// Elle voyage dans `ErreurPartage::Autre` et se retrouve par
+/// `downcast_ref::<ErreurVisionnage>()`. Une variante dédiée de
+/// `ErreurPartage` serait plus directe, mais `sky-app` (`partage.rs`) et
+/// `sky-probe` (`cmd_host.rs`) font un `match` exhaustif sur `ErreurPartage` :
+/// l'ajouter casserait leur compilation, et ces fichiers appartiennent à la
+/// tâche 10. Le type est préservé jusqu'à la sortie ; seul le chemin pour
+/// l'atteindre change.
+#[derive(Debug)]
+pub enum ErreurVisionnage {
+    /// Le décodeur refuse : à l'ouverture (pas de carte, pas de 4:4:4,
+    /// résolution trop grande…) ou `ECHECS_DECODAGE_AVANT_ABANDON` fois de
+    /// suite pendant le flux. Les cinq variantes sont intactes.
+    Decodeur(ErreurDecodeur),
+    /// Aucune image clé en `ATTENTE_IMAGE_CLE_MAX` malgré les demandes.
+    ImageIrreconstituable,
+}
+
+impl std::fmt::Display for ErreurVisionnage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ErreurVisionnage::Decodeur(erreur) => erreur.fmt(f),
+            // Le texte de la spec §7, mot pour mot : `sky-app` affiche
+            // aujourd'hui `to_string()`, l'utilisateur le lit donc déjà tel quel.
+            ErreurVisionnage::ImageIrreconstituable => f.write_str(
+                "L'image ne peut pas être reconstituée. Demandez à la personne qui partage de \
+                 relancer son partage.",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ErreurVisionnage {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            // Transparente, comme `#[error(transparent)]` : l'affichage reprend
+            // déjà celui du décodeur, la chaîne ne doit pas le répéter.
+            ErreurVisionnage::Decodeur(erreur) => erreur.source(),
+            ErreurVisionnage::ImageIrreconstituable => None,
+        }
+    }
+}
+
 /// Ce que le spectateur annonce au décodeur comme taille maximale.
 ///
 /// La vraie résolution vient du rappel de séquence de NVDEC, pas d'ici : le
@@ -193,6 +264,13 @@ pub struct Visionnage<D, A> {
     /// seconde. `None` quand c'est une image.
     etat_affiche: Option<EtatVisionnage>,
     derniere_demande: Option<Instant>,
+    /// Depuis quand on attend une image clé sans rien pouvoir afficher.
+    /// Effacé à chaque image affichée : c'est la durée d'UNE attente que borne
+    /// `ATTENTE_IMAGE_CLE_MAX`, pas l'âge du visionnage.
+    en_attente_depuis: Option<Instant>,
+    /// L'hôte a annoncé l'arrêt. Le `Failed` qui suit en est la conséquence,
+    /// pas une panne : il ne doit pas repeindre « Connexion perdue » par-dessus.
+    partage_arrete: bool,
     echecs_consecutifs: u32,
     images_abandonnees: u32,
     // La fenêtre de mesure, remise à zéro à chaque relevé.
@@ -213,6 +291,8 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             cle_vue: false,
             etat_affiche: None,
             derniere_demande: None,
+            en_attente_depuis: None,
+            partage_arrete: false,
             echecs_consecutifs: 0,
             images_abandonnees: 0,
             debut_fenetre: maintenant,
@@ -260,15 +340,32 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
                 self.sur_image(lien, &donnees, horodatage_ms, cle, sans_perte, maintenant)?;
             }
             LinkEvent::Controle(MessageControle::PartageArrete) => {
+                self.partage_arrete = true;
                 self.montrer(EtatVisionnage::PartageArrete)?;
             }
             // L'hôte ne nous en demande pas : c'est NOUS qui en envoyons.
             LinkEvent::Controle(MessageControle::DemandeImageCle) => {}
             LinkEvent::Failed(raison) => {
-                self.montrer(EtatVisionnage::ConnexionPerdue)?;
+                // Après un arrêt annoncé, l'hôte raccroche : ce `Failed` est la
+                // conséquence de l'arrêt, et l'utilisateur doit continuer à lire
+                // la vraie cause. `Fin::PartageArrete` reste à la tâche 10.
+                if !self.partage_arrete {
+                    self.montrer(EtatVisionnage::ConnexionPerdue)?;
+                }
                 return Ok(Suite::LienPerdu(raison));
             }
             LinkEvent::Connected | LinkEvent::Idle => {}
+        }
+        // Vérifié APRÈS l'événement : une image clé arrivée pile au terme du
+        // délai est affichée, pas refusée. Et sur tout événement, `Idle`
+        // compris : le délai court aussi quand l'hôte ne dit plus rien. Après un
+        // arrêt annoncé, plus rien n'est attendu — on n'y renonce pas.
+        if let Some(depuis) = self.en_attente_depuis {
+            if !self.partage_arrete
+                && maintenant.saturating_duration_since(depuis) >= ATTENTE_IMAGE_CLE_MAX
+            {
+                return Err(anyhow::Error::new(ErreurVisionnage::ImageIrreconstituable));
+            }
         }
         Ok(Suite::Continuer)
     }
@@ -295,16 +392,28 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             self.cle_vue = true;
         }
 
+        // Sans droit d'afficher, on demande une image clé QUEL QUE SOIT le
+        // résultat du décodage — et donc AVANT lui. Le cas qui l'exige : des
+        // en-têtes de séquence perdus. L'hôte ne les joint qu'une fois ; sans
+        // eux NVDEC rend `Ok(None)` à chaque unité (0 image sur 9 paquets,
+        // mesuré à la tâche 7), ne refuse rien, et aucun autre chemin ne
+        // demanderait quoi que ce soit : « En attente » à vie. Une image clé
+        // forcée porte ses propres en-têtes (mesuré à la tâche 7), donc la
+        // demander suffit. Même raisonnement après un trou : un trou est un
+        // trou, qu'il produise une image ou non.
+        if !self.cle_vue {
+            self.attendre_une_image_cle(lien, maintenant)?;
+        }
+
         let debut = Instant::now();
         let decodee = match self.decodeur.decoder(donnees, horodatage_ms) {
             Ok(decodee) => decodee,
             Err(erreur) => {
                 self.echecs_consecutifs += 1;
                 if self.echecs_consecutifs >= ECHECS_DECODAGE_AVANT_ABANDON {
-                    return Err(anyhow::Error::new(erreur).context(format!(
-                        "{ECHECS_DECODAGE_AVANT_ABANDON} unités d'accès refusées de suite par le \
-                         décodeur : ce n'est plus un trou dans le flux"
-                    )));
+                    // Typée jusqu'à la sortie : la tâche 10 donne un message
+                    // propre à chacune des cinq variantes du décodeur.
+                    return Err(anyhow::Error::new(ErreurVisionnage::Decodeur(erreur)));
                 }
                 // Un refus isolé peut venir d'une unité tronquée ; une image clé
                 // repart de zéro et la répare.
@@ -317,7 +426,8 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
         self.echecs_consecutifs = 0;
 
         // `Ok(None)` n'est pas une erreur : le décodeur a avalé des en-têtes de
-        // séquence. Rien à afficher, rien à réparer.
+        // séquence. Rien à afficher ; s'il manquait quelque chose, la demande est
+        // déjà partie plus haut.
         let Some(image) = decodee else {
             return Ok(());
         };
@@ -332,6 +442,7 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
         }
         self.afficheur.afficher(&image)?;
         self.etat_affiche = None;
+        self.en_attente_depuis = None;
         // `image` tombe ici : une des quatre surfaces de sortie de NVDEC est
         // rendue tout de suite. La retenir d'un tour sur l'autre bloquerait
         // `cuvidDecodePicture` dès qu'elles seraient épuisées.
@@ -346,7 +457,18 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
         maintenant: Instant,
     ) -> anyhow::Result<()> {
         self.images_abandonnees = self.images_abandonnees.saturating_add(1);
+        self.attendre_une_image_cle(lien, maintenant)
+    }
+
+    /// Rien d'affichable : on le dit à l'écran, on démarre le délai d'attente
+    /// s'il ne court pas déjà, et on demande une image clé (limitée).
+    fn attendre_une_image_cle(
+        &mut self,
+        lien: &mut dyn LienSpectateur,
+        maintenant: Instant,
+    ) -> anyhow::Result<()> {
         self.montrer(EtatVisionnage::EnAttente)?;
+        self.en_attente_depuis.get_or_insert(maintenant);
         self.demander_image_cle(lien, maintenant)
     }
 
@@ -459,6 +581,16 @@ pub fn regarder(
     if coffre.identifiant_appareil().map_err(ErreurPartage::Compte)?.is_none() {
         return Ok(Fin::AucunAppareilLocal);
     }
+    // Le décodeur AVANT toute négociation, et c'est voulu (spec §5 : les
+    // capacités s'interrogent « avant ») : une machine sans carte NVIDIA, ou dont
+    // le décodeur ne prend pas le 4:4:4, l'apprend en une fraction de seconde au
+    // lieu de traverser la boîte aux lettres et ICE — et l'hôte ne démarre ni
+    // capture ni encodage pour un spectateur qui n'aurait rien pu en faire. Après
+    // la vérification d'appareil, qui est locale et donne un message plus utile.
+    // Le contexte CUDA tenu pendant l'attente ne coûte rien de mesurable ; il est
+    // lié à ce fil, qui est aussi celui de la boucle de réception.
+    let decodeur = Decodeur::nouveau(LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)
+        .map_err(|e| ErreurPartage::Autre(anyhow::Error::new(ErreurVisionnage::Decodeur(e))))?;
     // L'identité DURABLE : c'est pour sa clé d'annuaire que l'hôte scelle
     // l'enveloppe de sa réponse. La clé de l'offre, elle, est éphémère.
     let identite = coffre.identite().map_err(ErreurPartage::Compte)?;
@@ -521,28 +653,26 @@ pub fn regarder(
     // Ouvert APRÈS la connexion, comme le fichier de `view` au C2 : jamais de
     // fichier vide laissé par une négociation ratée.
     let puits = ouvrir_puits()?;
-    recevoir(&mut link, &ami.discord_name, puits, p.duree_max, arret, evenements)
+    recevoir(&mut link, decodeur, &ami.discord_name, puits, p.duree_max, arret, evenements)
 }
 
 /// La boucle de réception : décoder, afficher, mesurer.
 ///
-/// Le décodeur et la fenêtre sont créés ICI plutôt que reçus en paramètre, pour
-/// que ni `ParametresSpectateur` ni la signature de `regarder` ne changent —
-/// `sky-probe` et `sky-app` les construisent, et les deux appartiennent à
-/// d'autres tâches. Tout ce qui se décide se décide dans `Visionnage`, qui est
-/// éprouvé par doublures ; cette fonction-ci n'est plus que du câblage.
+/// Le décodeur (créé en tête de `regarder`) et la fenêtre sont fabriqués dans ce
+/// module plutôt que reçus de l'appelant, pour que ni `ParametresSpectateur` ni
+/// la signature de `regarder` ne changent — `sky-probe` et `sky-app` les
+/// construisent, et les deux appartiennent à d'autres tâches. Tout ce qui se
+/// décide se décide dans `Visionnage`, qui est éprouvé par doublures ; cette
+/// fonction-ci n'est plus que du câblage.
 fn recevoir(
     link: &mut PeerLink,
+    decodeur: Decodeur,
     nom_de_l_hote: &str,
     mut puits: Option<Puits>,
     duree_max: Option<Duration>,
     arret: &Arret,
     evenements: &mut dyn FnMut(Evenement),
 ) -> Result<Fin, ErreurPartage> {
-    // Avant la fenêtre : sans décodeur, il n'y aurait rien à y montrer, et le
-    // message d'`ErreurDecodeur` est le seul diagnostic du projet sur ce point.
-    let decodeur = Decodeur::nouveau(LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)
-        .map_err(|e| ErreurPartage::Autre(anyhow::Error::new(e)))?;
     let fenetre = Fenetre::ouvrir(
         &format!("SkyShare — écran de {nom_de_l_hote}"),
         LARGEUR_FENETRE,
@@ -568,6 +698,7 @@ fn recevoir(
         }
 
         let evenement = LienSpectateur::poll(link)?;
+        let inactif = matches!(evenement, LinkEvent::Idle);
         // Le puits reçoit l'unité d'accès telle qu'elle est arrivée, avant tout
         // décodage : c'est ce que `sky-probe view` écrit dans son fichier.
         if let (LinkEvent::Image { donnees, .. }, Some(p)) = (&evenement, puits.as_mut()) {
@@ -589,6 +720,12 @@ fn recevoir(
                 images_par_s: m.images_par_seconde.round() as u64,
                 gigue_ms: f64::from(m.gigue_ms),
             }));
+        }
+
+        // Sur `Idle` seulement : voir `PAUSE_SUR_INACTIVITE` (~15 ms réels sous
+        // Windows, effet sur la latence non mesuré).
+        if inactif {
+            std::thread::sleep(PAUSE_SUR_INACTIVITE);
         }
     };
 
@@ -823,10 +960,155 @@ mod tests {
             .traiter(&mut lien, image(false, true), t0)
             .expect_err("au-delà du plafond, le refus remonte");
 
+        // L'erreur TYPÉE du décodeur doit survivre jusqu'à la sortie : la tâche
+        // 10 donne à chacune de ses cinq variantes un message différent (spec
+        // §7). Neutralisation : l'envelopper dans un `anyhow!` textuel — le
+        // `downcast_ref` rend `None`.
         assert!(
-            erreur.to_string().contains("de suite"),
-            "l'erreur dit que les refus se sont enchaînés : {erreur}"
+            matches!(
+                erreur.downcast_ref::<ErreurVisionnage>(),
+                Some(ErreurVisionnage::Decodeur(ErreurDecodeur::QuatreQuatreQuatreNonPris))
+            ),
+            "la variante du décodeur est préservée : {erreur:?}"
         );
+    }
+
+    #[test]
+    fn sans_en_tetes_un_flux_qui_ne_rend_rien_demande_une_image_cle() {
+        // C1. L'hôte ne joint les en-têtes de séquence qu'UNE fois. S'ils se
+        // perdent, NVDEC n'a pas de SPS et rend `Ok(None)` à chaque unité (0 image
+        // sur 9 paquets, mesuré à la tâche 7) : aucun refus, donc aucun plafond
+        // atteint. Une image clé forcée porte ses propres en-têtes — la demander
+        // suffit à réparer. Ici aucun trou n'est signalé : seul le fait de n'avoir
+        // jamais vu d'image clé doit déclencher la demande.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Avalee, t0);
+
+        for _ in 0..5 {
+            v.traiter(&mut lien, image(false, true), t0).expect("traitement");
+        }
+
+        assert_eq!(demandes(&lien), 1, "des unités avalées sans image clé déclenchent UNE demande");
+        assert_eq!(v.afficheur().dernier_etat(), Some(EtatVisionnage::EnAttente));
+    }
+
+    #[test]
+    fn un_trou_demande_une_image_cle_meme_si_rien_n_est_decode() {
+        // C1, second volet : un trou est un trou, qu'il produise une image ou
+        // non. Sans cela, la dernière image affichée resterait figée à l'écran
+        // — un gel muet — et rien ne partirait vers l'hôte.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[Issue::Image], Issue::Avalee, t0);
+
+        v.traiter(&mut lien, image(true, true), t0).expect("traitement");
+        v.traiter(&mut lien, image(false, false), t0).expect("traitement");
+
+        assert_eq!(demandes(&lien), 1, "le trou déclenche la demande, même sans image décodée");
+        assert_eq!(
+            v.afficheur().journal(),
+            [Geste::Image { largeur: 1920, hauteur: 1080 }, Geste::Etat(EtatVisionnage::EnAttente)],
+            "l'image d'avant le trou ne reste pas figée sans le dire"
+        );
+    }
+
+    #[test]
+    fn apres_un_trou_l_image_cle_suivante_rouvre_l_affichage() {
+        // I1 — la propriété centrale de l'arbitrage : la reprise. Clé → image →
+        // trou → image → CLÉ → image. Neutralisation : « seule la première image
+        // clé ouvre l'affichage » — ce test doit rougir, et lui seul.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        for (cle, sans_perte) in
+            [(true, true), (false, true), (false, false), (false, true), (true, true), (false, true)]
+        {
+            v.traiter(&mut lien, image(cle, sans_perte), t0).expect("traitement");
+        }
+
+        let image_affichee = Geste::Image { largeur: 1920, hauteur: 1080 };
+        assert_eq!(
+            v.afficheur().journal(),
+            [
+                image_affichee,
+                image_affichee,
+                Geste::Etat(EtatVisionnage::EnAttente),
+                image_affichee,
+                image_affichee,
+            ],
+            "quatre images sur six, un seul « En attente » entre elles"
+        );
+        assert_eq!(demandes(&lien), 1);
+    }
+
+    #[test]
+    fn sans_image_cle_malgre_les_demandes_le_visionnage_renonce() {
+        // I2. Le décodeur ne refuse rien — il rend des images, fausses — mais
+        // l'image clé demandée n'arrive jamais. Au-delà d'`ATTENTE_IMAGE_CLE_MAX`,
+        // on renonce avec la cause de la spec §7. Le dernier événement est un
+        // `Idle` : le délai court même quand l'hôte ne dit plus rien.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        v.traiter(&mut lien, image(false, true), t0).expect("traitement");
+        let juste_avant = t0 + ATTENTE_IMAGE_CLE_MAX - Duration::from_millis(1);
+        v.traiter(&mut lien, image(false, true), juste_avant).expect("le délai n'est pas écoulé");
+        let erreur = v
+            .traiter(&mut lien, LinkEvent::Idle, t0 + ATTENTE_IMAGE_CLE_MAX)
+            .expect_err("le délai écoulé, le visionnage renonce");
+
+        assert!(
+            matches!(
+                erreur.downcast_ref::<ErreurVisionnage>(),
+                Some(ErreurVisionnage::ImageIrreconstituable)
+            ),
+            "la cause est typée : {erreur:?}"
+        );
+        assert!(demandes(&lien) >= 2, "plusieurs demandes sont parties avant de renoncer");
+    }
+
+    #[test]
+    fn une_image_cle_arrivee_a_temps_remet_le_delai_d_attente_a_zero() {
+        // Le pendant d'I2 : le délai mesure UNE attente, pas l'âge du
+        // visionnage. Neutralisation : ne pas l'effacer à l'affichage — le
+        // dernier `traiter` rend `Err`. La première unité est avalée (en-têtes
+        // perdus) plutôt que décodée puis jetée : ce test éprouve le délai, et
+        // ne doit pas dépendre de la reprise, qu'éprouve
+        // `apres_un_trou_l_image_cle_suivante_rouvre_l_affichage`.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[Issue::Avalee], Issue::Image, t0);
+
+        v.traiter(&mut lien, image(false, true), t0).expect("traitement");
+        let a_temps = t0 + ATTENTE_IMAGE_CLE_MAX - Duration::from_millis(1);
+        v.traiter(&mut lien, image(true, true), a_temps).expect("l'image clé arrive à temps");
+        v.traiter(&mut lien, LinkEvent::Idle, t0 + ATTENTE_IMAGE_CLE_MAX * 2)
+            .expect("on affiche : aucune attente en cours");
+
+        assert_eq!(v.afficheur().images_affichees(), 1);
+    }
+
+    #[test]
+    fn la_fin_du_lien_apres_un_arret_annonce_ne_masque_pas_l_arret() {
+        // I3. L'hôte annonce l'arrêt, puis raccroche : le `Failed` qui suit est
+        // la CONSÉQUENCE de l'arrêt, pas une panne. Le repeindre en « Connexion
+        // perdue » montrerait une fausse cause. Neutralisation : repeindre
+        // quand même — `dernier_etat` vaut `ConnexionPerdue`.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Image, t0);
+
+        v.traiter(&mut lien, LinkEvent::Controle(MessageControle::PartageArrete), t0)
+            .expect("traitement");
+        let suite = v
+            .traiter(&mut lien, LinkEvent::Failed("le lien est tombé".to_string()), t0)
+            .expect("traitement");
+
+        assert_eq!(v.afficheur().dernier_etat(), Some(EtatVisionnage::PartageArrete));
+        assert!(matches!(suite, Suite::LienPerdu(_)), "la boucle s'arrête quand même");
     }
 
     #[test]
