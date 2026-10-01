@@ -39,10 +39,10 @@ pub const FPS: u32 = 60;
 const GRANULARITE_SERVICE_RESEAU: Duration = Duration::from_millis(1);
 
 /// Temps pendant lequel le lien est encore servi après l'annonce de l'arrêt,
-/// pour que le message ait le temps de partir — voir
-/// `EnvoiVideo::annoncer_l_arret`. Un aller simple sur un chemin direct se
-/// compte en dizaines de millisecondes ; ce délai s'ajoute une seule fois, à la
-/// toute fin d'un partage.
+/// pour que le message ait le temps de partir — voir `annoncer_l_arret`, qui
+/// abrège ce délai dès que le lien est déclaré perdu. Un aller simple sur un
+/// chemin direct se compte en dizaines de millisecondes ; ce délai s'ajoute une
+/// seule fois, à la toute fin d'un partage.
 const DRAINAGE_ARRET: Duration = Duration::from_millis(50);
 
 /// Budget de relance pour une image déjà encodée que la piste média refuse
@@ -218,21 +218,31 @@ pub fn heberger(
 /// spectateur reste devant une image figée sans explication, et « une fenêtre
 /// noire muette est un défaut, pas un état ».
 ///
-/// Un seul appel pour toutes les sorties, plutôt qu'un appel sur chacune :
-/// ajouter demain une sortie à la boucle ne peut plus oublier l'annonce.
-///
-/// La seule exception est `Fin::LienTombe` : le lien est déjà perdu, il n'y a
-/// plus rien à qui parler.
+/// Un seul appel pour toutes les sorties, plutôt qu'un appel sur chacune, et
+/// **sans aucune exception** : ajouter demain une sortie à la boucle ne peut plus
+/// oublier l'annonce, et aucune déduction sur l'état du lien ne peut la
+/// supprimer à tort (voir le commentaire du corps).
 fn en_annoncant_l_arret<L: LienVideo>(
     lien: &mut L,
     diffusion: impl FnOnce(&mut L) -> Result<Fin, ErreurPartage>,
 ) -> Result<Fin, ErreurPartage> {
     let issue = diffusion(lien);
-    if !matches!(&issue, Ok(Fin::LienTombe(_))) {
-        // L'annonce est un service rendu au spectateur, pas une garantie : un
-        // lien qui vient de casser ne peut plus rien porter.
-        let _ = annoncer_l_arret(lien);
-    }
+    // Sans exception, et c'est délibéré. La ronde 1 exemptait `Fin::LienTombe`,
+    // sous l'idée qu'il n'y a plus personne à qui parler — mais `Fin::LienTombe`
+    // couvre aussi les refus de la PISTE MÉDIA (`PisteFermee`,
+    // `CodecNonNegocie`, `EcritureRefusee`), et le canal de données qui porte
+    // `PartageArrete` peut alors être parfaitement vivant. L'exception
+    // réintroduisait donc, par une déduction fausse, le défaut même qu'elle
+    // accompagnait.
+    //
+    // Annoncer toujours coûte presque rien et ne déduit rien : sur un lien
+    // vraiment mort, `envoyer_controle` échoue d'emblée (`ecrire` ne trouve plus
+    // le canal, donc `CanalFerme`) et le drainage n'a même pas lieu ; si malgré
+    // tout il avait lieu, il s'arrête au premier `LinkEvent::Failed`.
+    //
+    // L'annonce reste un service rendu au spectateur, jamais une garantie : son
+    // échec ne change pas l'issue du partage.
+    let _ = annoncer_l_arret(lien);
     issue
 }
 
@@ -341,7 +351,6 @@ fn diffuser(
                 // paquet déjà produit (GOP infini : le flux resterait cohérent).
                 images_sautees += 1;
             } else if let Some(pkt) = enc.encode(&image)? {
-                envoi.image_encodee();
                 images_encodees += 1;
                 budget_octets -= pkt.data.len() as f64;
                 echantillons_encode_us.push(pkt.encode_us);
@@ -366,7 +375,11 @@ fn diffuser(
                         // qu'il faudra renommer, pas cet appel.
                         return Ok(Fin::TamponSature { morceau: 1, morceaux: 1 });
                     }
-                    IssueEnvoi::LienTombe(raison) => return Ok(Fin::LienTombe(raison)),
+                    // `Fin::LienTombe` est la seule fin existante pour un flux
+                    // qui s'interrompt ; la rebaptiser traverse `sky-app`
+                    // (tâche 10). L'annonce de l'arrêt, elle, est tentée dans
+                    // tous les cas par `en_annoncant_l_arret`.
+                    IssueEnvoi::FluxInterrompu(raison) => return Ok(Fin::LienTombe(raison)),
                 }
             }
         }
@@ -383,23 +396,31 @@ fn diffuser(
             } else {
                 0.0
             };
-            // LIMITE CONNUE, ÉCRITE EXPRÈS : depuis cette tâche, le `Pacer`
-            // tourne en BOUCLE OUVERTE, et sa cible reste collée au plafond.
-            // Ses deux entrées sont mortes :
-            //   — `rtt_ms` vaut littéralement 0, car plus aucun écho
-            //     d'horodatage ne revient à l'hôte (la tâche 5 a retiré l'écho
-            //     du canal de données, et la piste média ne remonte rien ici) ;
-            //   — `perte_pct` ne compte que des `TropDImagesEnAttente`
-            //     rattrapés, or la mesure est de 0 refus sur 21552 écritures
-            //     quand la boucle sert le réseau : numérateur nul par
-            //     construction sur le chemin nominal.
-            // `congestionne` est donc toujours faux, la cible monte de 8 % par
-            // tic jusqu'au plafond et n'en redescend jamais. Le débit du jalon 2
-            // est le plafond choisi par l'utilisateur, et `enable_bwe` n'étant
-            // pas activé, le pacer de `str0m` est un `NullPacer` : rien d'autre
-            // ne régule en dessous. Acceptable pour un jalon qui vise le premier
-            // pixel ; la source à retrouver est RTCP, présent sur la piste média
-            // et lu par personne (écart 7, jalon 3).
+            // LIMITE CONNUE, ÉCRITE EXPRÈS. Ce que le régulateur reçoit ici, et
+            // ce que ça vaut — en distinguant le mesuré du possible :
+            //   — `rtt_ms` : 0, passé en dur. Celui-là est bel et bien MORT :
+            //     plus aucun écho d'horodatage ne revient à l'hôte (la tâche 5 a
+            //     retiré l'écho du canal de données, et la piste média ne remonte
+            //     rien ici). `SEUIL_RTT_MS` ne peut donc jamais être franchi.
+            //   — `perte_pct` : SILENCIEUSE, pas morte. Elle ne compte que les
+            //     `TropDImagesEnAttente` rattrapés, et la sonde du 27/09/2026 en
+            //     a MESURÉ zéro sur 21552 écritures à 100 Mbps quand la boucle
+            //     sert le réseau entre deux images. Ce zéro est une mesure, pas
+            //     une propriété du code : `fenetre_refus` s'incrémente dès qu'un
+            //     refus est rattrapé, et `SEUIL_PERTE` valant 2 %, un seul refus
+            //     dans une fenêtre de moins de cinquante images suffit à déclarer
+            //     la congestion — à 60 i/s une fenêtre de 100 ms en contient
+            //     environ six, donc un refus y pèse ~16 %. Une file arriérée fait
+            //     donc réagir le régulateur.
+            // Conséquence, à lire comme telle : SUR LE CHEMIN NOMINAL MESURÉ,
+            // aucune des deux entrées ne signale rien, la cible monte de 8 % par
+            // tic jusqu'au plafond et y reste — le débit du jalon 2 est le
+            // plafond choisi par l'utilisateur, et `enable_bwe` n'étant pas
+            // activé, le pacer de `str0m` est un `NullPacer` : rien d'autre ne
+            // régule en dessous. Ce n'est pas « toujours » : c'est ce qui a été
+            // observé, et seule la perte peut encore le démentir. Acceptable pour
+            // un jalon qui vise le premier pixel ; la source à retrouver est
+            // RTCP, présent sur la piste média et lu par personne (écart 7).
             pacer.on_feedback(perte_pct, 0, dernier_feedback.elapsed());
             envoi.fenetre_images = 0;
             envoi.fenetre_refus = 0;
@@ -457,9 +478,15 @@ enum IssueEnvoi {
     /// La file de paquetisation est restée pleine au-delà de
     /// `BUDGET_RETRY_ENVOI` : le correspondant ne consomme plus rien.
     FilePleine,
-    /// Le lien est tombé, ou la piste s'est refermée. Raison déjà rédigée pour
-    /// l'utilisateur, et sans adresse.
-    LienTombe(String),
+    /// Plus rien ne peut être écrit : soit le lien est tombé
+    /// (`LinkEvent::Failed`), soit la piste média ne prend plus d'image
+    /// (`PisteFermee`, `CodecNonNegocie`, `EcritureRefusee`).
+    ///
+    /// Les deux cas ne se valent pas — dans le second, le canal de données peut
+    /// rester vivant — et c'est pourquoi la variante ne s'appelle pas
+    /// « LienTombe » : ce nom a déjà fait déduire à tort qu'il n'y avait plus
+    /// personne à prévenir. Raison déjà rédigée pour l'utilisateur, sans adresse.
+    FluxInterrompu(String),
 }
 
 /// L'émission vidéo vers un spectateur : ce qu'il lui reste à apprendre du
@@ -544,6 +571,15 @@ impl EnvoiVideo {
                     // Après l'acceptation, jamais avant : une image refusée est
                     // réécrite telle quelle, en-têtes compris.
                     self.entetes_a_joindre = false;
+                    // L'image qui part est celle qu'une éventuelle demande
+                    // attendait : la dette d'image clé est éteinte ici, et non à
+                    // l'encodage. Un tour plus tard, donc, que le drapeau de
+                    // NVENC — mais aucune décision de saut ne se prend entre
+                    // l'encodage et cette écriture, et la rabaisser ICI est ce
+                    // qui rend le câblage atteignable par un test : la retirer
+                    // laisserait le budget désactivé à vie, et chaque image
+                    // deviendrait un IDR.
+                    self.image_cle_due = false;
                     self.octets += a_ecrire.len() as u64;
                     self.images += 1;
                     self.fenetre_images += 1;
@@ -559,7 +595,7 @@ impl EnvoiVideo {
                     // le refus ci-dessous (mesuré : 0 refus sur 21552 écritures
                     // à 100 Mbps avec ce service, des refus sans lui).
                     if let Some(raison) = self.servir(lien, encodeur)? {
-                        return Ok(IssueEnvoi::LienTombe(raison));
+                        return Ok(IssueEnvoi::FluxInterrompu(raison));
                     }
                     return Ok(IssueEnvoi::Envoyee);
                 }
@@ -570,11 +606,11 @@ impl EnvoiVideo {
                     refuse = true;
                     // Un `poll` par place à libérer, et la même image réécrite.
                     if let Some(raison) = self.servir(lien, encodeur)? {
-                        return Ok(IssueEnvoi::LienTombe(raison));
+                        return Ok(IssueEnvoi::FluxInterrompu(raison));
                     }
                     std::thread::sleep(GRANULARITE_SERVICE_RESEAU);
                 }
-                Err(autre) => return Ok(IssueEnvoi::LienTombe(autre.to_string())),
+                Err(autre) => return Ok(IssueEnvoi::FluxInterrompu(autre.to_string())),
             }
         }
     }
@@ -617,21 +653,15 @@ impl EnvoiVideo {
     /// **Sauf si une image clé est due.** Le drapeau de NVENC ne retombe qu'à un
     /// encodage réel : sauter la capture ne perd pas l'IDR, elle le REPORTE — et
     /// pendant ce report le spectateur continue d'afficher du faux sans le
-    /// savoir, ce que la demande existe justement pour clore. Le budget est
-    /// structurellement serré (l'encodeur est configuré au plafond et jamais
-    /// reconfiguré — écart 5), donc ce report n'est pas théorique. Une image clé
-    /// passe donc devant le budget : au pire une image de plus que prévu, une
-    /// fois par demande.
+    /// savoir, ce que la demande existe justement pour clore. Et le report n'est
+    /// pas théorique : l'encodeur est configuré au plafond et jamais reconfiguré
+    /// (écart 5), le budget tourne donc autour de zéro dès que la cible atteint
+    /// ce plafond — ce qu'elle fait sur le chemin mesuré. Une image clé passe
+    /// donc devant le budget : au pire une image de plus que prévu, une fois par
+    /// demande.
     fn sauter_ce_tour(&self, budget_octets: f64) -> bool {
         budget_octets < 0.0 && !self.image_cle_due
     }
-
-    /// Une image vient d'être encodée : si une image clé était due, c'est celle-là
-    /// (NVENC rabaisse son drapeau au même moment).
-    fn image_encodee(&mut self) {
-        self.image_cle_due = false;
-    }
-
 }
 
 /// Annonce au spectateur que le partage s'arrête, puis sert le lien le temps que
@@ -647,12 +677,14 @@ fn annoncer_l_arret(lien: &mut dyn LienVideo) -> Result<(), ErreurEnvoi> {
     lien.envoyer_controle(&MessageControle::PartageArrete)?;
     let jusqu_a = Instant::now() + DRAINAGE_ARRET;
     while Instant::now() < jusqu_a {
-        // Rien à traiter à ce stade : ni une chute du lien ni une demande
-        // d'image clé ne changent plus quoi que ce soit.
-        if lien.poll().is_err() {
-            break;
+        // Une demande d'image clé ne change plus rien à ce stade ; en revanche un
+        // lien déclaré perdu met fin au drainage sur-le-champ — rien ne partira
+        // plus, et c'est ce qui borne le coût d'une annonce tentée sur un lien
+        // mourant.
+        match lien.poll() {
+            Ok(LinkEvent::Failed(_)) | Err(_) => break,
+            Ok(_) => std::thread::sleep(GRANULARITE_SERVICE_RESEAU),
         }
-        std::thread::sleep(GRANULARITE_SERVICE_RESEAU);
     }
     Ok(())
 }
@@ -806,32 +838,62 @@ mod tests {
     }
 
     #[test]
-    fn une_fin_normale_annonce_l_arret_et_un_lien_tombe_ne_l_annonce_pas() {
-        // Les deux bords de la même règle, dans un seul test pour qu'ils ne
-        // puissent pas diverger : on annonce sur toute sortie SAUF quand le lien
-        // est déjà perdu — il n'y a alors plus personne à qui parler.
+    fn toute_sortie_de_diffusion_tente_d_annoncer_l_arret_sans_exception() {
+        // Ce test disait l'inverse à la ronde 1 : « un lien tombé ne l'annonce
+        // pas ». L'exception a été retirée, et c'est ce qu'il garantit désormais.
+        // `Fin::LienTombe` ne veut pas dire que le lien est mort — elle couvre
+        // aussi les refus de la piste média, canal de données vivant. Déduire de
+        // cette fin qu'il n'y a plus personne à prévenir laissait le spectateur
+        // figé sans explication.
         let mut apres_arret = LienFactice::nouveau();
         let issue = en_annoncant_l_arret(&mut apres_arret, |_| Ok(Fin::Arrete));
         assert_eq!(issue.ok(), Some(Fin::Arrete));
         assert!(apres_arret.messages_envoyes().contains(&MessageControle::PartageArrete));
 
-        let mut apres_chute = LienFactice::nouveau();
-        let _ = en_annoncant_l_arret(&mut apres_chute, |_| {
-            Ok(Fin::LienTombe("le lien a été perdu".to_string()))
+        let mut apres_interruption = LienFactice::nouveau();
+        let _ = en_annoncant_l_arret(&mut apres_interruption, |_| {
+            Ok(Fin::LienTombe("la piste vidéo s'est refermée".to_string()))
         });
         assert!(
-            apres_chute.messages_envoyes().is_empty(),
-            "rien à annoncer sur un lien tombé : {:?}",
-            apres_chute.messages_envoyes()
+            apres_interruption.messages_envoyes().contains(&MessageControle::PartageArrete),
+            "un flux interrompu doit lui aussi tenter l'annonce : {:?}",
+            apres_interruption.messages_envoyes()
         );
     }
 
     #[test]
-    fn une_image_cle_due_passe_devant_le_budget() {
+    fn le_drainage_de_l_arret_s_arrete_des_que_le_lien_est_declare_perdu() {
+        // C'est ce qui borne le coût de l'annonce désormais sans exception : sur
+        // un lien mourant, le drainage ne consomme pas ses 50 ms.
+        let mut lien = LienFactice::nouveau();
+        lien.injecter(LinkEvent::Failed("le lien a été perdu".to_string()));
+        let debut = Instant::now();
+
+        annoncer_l_arret(&mut lien).expect("annonce déposée");
+
+        assert!(
+            debut.elapsed() < DRAINAGE_ARRET,
+            "le drainage devait s'arrêter au premier échec : {:?}",
+            debut.elapsed()
+        );
+        assert_eq!(lien.messages_envoyes(), [MessageControle::PartageArrete]);
+    }
+
+    #[test]
+    fn une_image_cle_due_passe_devant_le_budget_puis_lui_rend_la_main() {
+        // Deux moitiés indissociables, dans un seul test pour qu'elles ne
+        // divergent pas.
+        //
         // Sauter la capture ne perd pas l'IDR, elle le REPORTE (le drapeau de
         // NVENC ne retombe qu'à un encodage réel) — et pendant ce report le
-        // spectateur affiche du faux sans le savoir. Le budget du Pacer ne doit
-        // donc pas pouvoir retarder l'image clé.
+        // spectateur affiche du faux sans le savoir : le budget ne doit donc pas
+        // pouvoir retarder l'image clé.
+        //
+        // Et la dette doit s'éteindre quand l'image part : sans cela le budget
+        // serait désactivé à vie et CHAQUE image deviendrait un IDR, ce qui
+        // ferait exploser le débit sans qu'aucun signal ne l'annonce. C'est
+        // l'envoi qui l'éteint, précisément pour que ce câblage-là soit
+        // atteignable sans GPU.
         let mut lien = LienFactice::nouveau();
         let mut encodeur = RepriseFactice::avec_entetes(entetes_factices());
         let mut envoi = EnvoiVideo::nouveau();
@@ -844,15 +906,18 @@ mod tests {
 
         lien.injecter(LinkEvent::Controle(MessageControle::DemandeImageCle));
         envoi.servir(&mut lien, &mut encodeur).expect("service");
+        assert_eq!(encodeur.images_cle_forcees(), 1);
         assert!(
             !envoi.sauter_ce_tour(A_DECOUVERT),
             "une image clé due passe devant le budget"
         );
 
-        envoi.image_encodee();
+        envoi
+            .envoyer_image(&mut lien, &mut encodeur, &unite_factice(), 0)
+            .expect("l'image clé part");
         assert!(
             envoi.sauter_ce_tour(A_DECOUVERT),
-            "l'image clé produite, le budget reprend la main"
+            "l'image clé envoyée, le budget reprend la main"
         );
     }
 
@@ -902,7 +967,10 @@ mod tests {
             .envoyer_image(&mut PisteMorte, &mut encodeur, &unite_factice(), 0)
             .expect("envoi");
 
-        assert!(matches!(issue, IssueEnvoi::LienTombe(_)), "la piste fermée fait tomber le lien");
+        assert!(
+            matches!(issue, IssueEnvoi::FluxInterrompu(_)),
+            "la piste fermée interrompt le flux — sans pour autant dire que le lien est mort"
+        );
         assert!(debut.elapsed() < BUDGET_RETRY_ENVOI, "rendu sans consommer le budget de relance");
     }
 

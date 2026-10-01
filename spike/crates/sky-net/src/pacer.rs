@@ -87,17 +87,26 @@ impl Pacer {
     /// normaliser la formule par `_ecoule`, soit inscrire la cadence dans le
     /// type.
     ///
-    /// **En boucle ouverte depuis le jalon 2, tâche 8 :** le seul appelant
-    /// (`sky-partage::hote`) ne peut plus renseigner ni l'un ni l'autre de ces
-    /// deux paramètres. Il passe `rtt_ms = 0` — plus aucun écho ne revient à
-    /// l'hôte depuis que la vidéo est sur la piste média — et un `perte_pct`
-    /// dont le numérateur est structurellement nul sur le chemin nominal (0 refus
-    /// de paquetisation mesuré sur 21552 écritures). `congestionne` est donc
-    /// toujours faux : la cible monte de `MONTEE` à chaque appel jusqu'au
-    /// plafond et n'en redescend jamais. Ce régulateur est correct et testé,
-    /// mais **branché sur un capteur débranché** : ne pas le compter comme un
-    /// contrôle de congestion actif. La source à retrouver est RTCP, présent sur
-    /// la piste média et lu par personne (écart 7).
+    /// **Ce que son appelant lui donne réellement depuis le jalon 2, tâche 8**,
+    /// en distinguant le mesuré du possible. Le seul appelant
+    /// (`sky-partage::hote`) passe :
+    ///
+    /// - `rtt_ms = 0`, en dur. Cette entrée est **morte** : plus aucun écho ne
+    ///   revient à l'hôte depuis que la vidéo est sur la piste média, donc
+    ///   `SEUIL_RTT_MS` ne peut jamais être franchi.
+    /// - un `perte_pct` **silencieux, pas mort** : il ne compte que les refus de
+    ///   paquetisation rattrapés, et la sonde du 27/09/2026 en a **mesuré** zéro
+    ///   sur 21552 écritures à 100 Mbps. Ce zéro est une observation, pas une
+    ///   propriété du code : un seul refus dans une fenêtre de moins de cinquante
+    ///   images porte `perte_pct` au-delà de `SEUIL_PERTE`, et une file arriérée
+    ///   fait donc bien réagir ce régulateur.
+    ///
+    /// Autrement dit : **sur le chemin nominal mesuré**, rien ne signale de
+    /// congestion, la cible monte de `MONTEE` à chaque appel jusqu'au plafond et
+    /// y reste. Ne pas compter cela comme un contrôle de congestion actif — mais
+    /// ne pas lire non plus que ce régulateur est inerte : il lui reste une
+    /// entrée, et elle fonctionne. La source qui manque est RTCP, présent sur la
+    /// piste média et lu par personne (écart 7).
     pub fn on_feedback(&mut self, perte_pct: f32, rtt_ms: u32, _ecoule: Duration) {
         let congestionne = perte_pct > Self::SEUIL_PERTE || rtt_ms > Self::SEUIL_RTT_MS;
 
