@@ -235,10 +235,19 @@ fn en_annoncant_l_arret<L: LienVideo>(
     // réintroduisait donc, par une déduction fausse, le défaut même qu'elle
     // accompagnait.
     //
-    // Annoncer toujours coûte presque rien et ne déduit rien : sur un lien
-    // vraiment mort, `envoyer_controle` échoue d'emblée (`ecrire` ne trouve plus
-    // le canal, donc `CanalFerme`) et le drainage n'a même pas lieu ; si malgré
-    // tout il avait lieu, il s'arrête au premier `LinkEvent::Failed`.
+    // Annoncer toujours ne déduit rien, et son coût est borné par le DRAINAGE
+    // lui-même : au pire `DRAINAGE_ARRET` (50 ms), une fois par partage.
+    //
+    // Ne pas croire que l'écriture refuserait d'emblée sur un lien mort :
+    // `PeerLink::ecrire` ne rend `CanalFerme` que si le canal est tombé
+    // (`link.rs` ne le passe à `None` que sur `ChannelClose`), pas parce qu'un
+    // `LinkEvent::Failed` a été vu. L'annonce peut donc être acceptée dans le
+    // tampon d'un lien moribond et n'arriver jamais.
+    //
+    // `annoncer_l_arret` abrège bien son drainage sur un `LinkEvent::Failed`,
+    // mais cet événement a souvent déjà été consommé par la boucle de diffusion
+    // quand on arrive ici : sur un vrai lien, les 50 ms peuvent donc s'écouler
+    // en entier. L'abrègement n'est éprouvé que sur doublure.
     //
     // L'annonce reste un service rendu au spectateur, jamais une garantie : son
     // échec ne change pas l'issue du partage.
@@ -542,7 +551,7 @@ impl EnvoiVideo {
     /// chaîne pour tout le reste du flux (« ref POC introuvable » en cascade).
     ///
     /// Tout autre refus dit que la piste n'est plus écrivable : rien ne se
-    /// rattrape en réessayant, l'appel rend `LienTombe`.
+    /// rattrape en réessayant, l'appel rend `FluxInterrompu`.
     fn envoyer_image(
         &mut self,
         lien: &mut dyn LienVideo,
@@ -563,6 +572,23 @@ impl EnvoiVideo {
             Cow::Borrowed(unite)
         };
 
+        // La dette d'image clé s'éteint ICI, à l'entrée, et non à l'acceptation
+        // de l'écriture.
+        //
+        // L'image qu'on nous confie est celle qu'une demande antérieure
+        // attendait : NVENC vient de l'encoder en IDR, et il a rabaissé son
+        // propre drapeau au même instant. Mais `servir` tourne AUSSI dans la
+        // boucle de relance ci-dessous : une demande qui arrive pendant les
+        // refus concerne l'image SUIVANTE, pas celle-ci, et l'éteindre après la
+        // boucle l'effacerait au profit d'une image encodée avant la demande —
+        // le budget pourrait alors sauter l'IDR demandé, c'est-à-dire précisément
+        // ce que la dette existe pour empêcher.
+        //
+        // La retirer laisserait le budget désactivé à vie et ferait de CHAQUE
+        // image un IDR ; la déplacer après la boucle rouvre le trou ci-dessus.
+        // Les deux cas ont leur test.
+        self.image_cle_due = false;
+
         let debut = Instant::now();
         let mut refuse = false;
         loop {
@@ -571,15 +597,6 @@ impl EnvoiVideo {
                     // Après l'acceptation, jamais avant : une image refusée est
                     // réécrite telle quelle, en-têtes compris.
                     self.entetes_a_joindre = false;
-                    // L'image qui part est celle qu'une éventuelle demande
-                    // attendait : la dette d'image clé est éteinte ici, et non à
-                    // l'encodage. Un tour plus tard, donc, que le drapeau de
-                    // NVENC — mais aucune décision de saut ne se prend entre
-                    // l'encodage et cette écriture, et la rabaisser ICI est ce
-                    // qui rend le câblage atteignable par un test : la retirer
-                    // laisserait le budget désactivé à vie, et chaque image
-                    // deviendrait un IDR.
-                    self.image_cle_due = false;
                     self.octets += a_ecrire.len() as u64;
                     self.images += 1;
                     self.fenetre_images += 1;
@@ -653,12 +670,15 @@ impl EnvoiVideo {
     /// **Sauf si une image clé est due.** Le drapeau de NVENC ne retombe qu'à un
     /// encodage réel : sauter la capture ne perd pas l'IDR, elle le REPORTE — et
     /// pendant ce report le spectateur continue d'afficher du faux sans le
-    /// savoir, ce que la demande existe justement pour clore. Et le report n'est
-    /// pas théorique : l'encodeur est configuré au plafond et jamais reconfiguré
-    /// (écart 5), le budget tourne donc autour de zéro dès que la cible atteint
-    /// ce plafond — ce qu'elle fait sur le chemin mesuré. Une image clé passe
-    /// donc devant le budget : au pire une image de plus que prévu, une fois par
-    /// demande.
+    /// savoir, ce que la demande existe justement pour clore.
+    ///
+    /// Ce report n'est probablement pas rare, et c'est une DÉDUCTION, pas une
+    /// mesure : l'encodeur est configuré au plafond et jamais reconfiguré
+    /// (écart 5), tandis que la cible du `Pacer` rejoint ce même plafond sur le
+    /// chemin observé — le budget devrait donc osciller autour de zéro, et un
+    /// IDR, plus gros qu'une image ordinaire, le faire passer à découvert. Rien
+    /// ici n'a été chronométré. Une image clé passe donc devant le budget : au
+    /// pire une image de plus que prévu, une fois par demande.
     fn sauter_ce_tour(&self, budget_octets: f64) -> bool {
         budget_octets < 0.0 && !self.image_cle_due
     }
@@ -918,6 +938,34 @@ mod tests {
         assert!(
             envoi.sauter_ce_tour(A_DECOUVERT),
             "l'image clé envoyée, le budget reprend la main"
+        );
+    }
+
+    #[test]
+    fn une_demande_arrivee_pendant_les_refus_concerne_l_image_suivante() {
+        // Le trou qu'a ouvert le déplacement de la ronde 2 : `servir` tourne
+        // aussi dans la boucle de relance. Une demande qui arrive PENDANT les
+        // refus porte sur l'image suivante — celle qu'on est en train d'écrire a
+        // été encodée avant elle. Éteindre la dette à l'acceptation l'effaçait
+        // donc au profit de la mauvaise image, et le budget pouvait sauter l'IDR
+        // demandé.
+        let mut lien = LienFactice::nouveau();
+        let mut encodeur = RepriseFactice::avec_entetes(entetes_factices());
+        let mut envoi = EnvoiVideo::nouveau();
+        // Une place à libérer : un refus, donc un tour de relance, donc un `poll`
+        // qui rendra la demande injectée.
+        lien.saturer(1);
+        lien.injecter(LinkEvent::Controle(MessageControle::DemandeImageCle));
+
+        let issue = envoi
+            .envoyer_image(&mut lien, &mut encodeur, &unite_factice(), 0)
+            .expect("envoi");
+
+        assert!(matches!(issue, IssueEnvoi::Envoyee), "l'image en cours part quand même");
+        assert_eq!(encodeur.images_cle_forcees(), 1, "la demande a bien été honorée");
+        assert!(
+            !envoi.sauter_ce_tour(-1.0),
+            "la demande arrivée pendant les refus doit survivre à l'image en cours"
         );
     }
 
