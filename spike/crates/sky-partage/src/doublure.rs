@@ -230,6 +230,8 @@ pub struct FenetreFactice {
     /// déposerait.
     en_attente: Vec<EvenementFenetre>,
     bascules: usize,
+    /// Fait échouer toute bascule du plein écran, comme un `SetWindowPos` refusé.
+    plein_ecran_refuse: bool,
     /// Passe à `true` quand la fenêtre est détruite : c'est ce que voit un test
     /// qui veut savoir si la boucle l'a bien laissée tomber.
     fermee: Rc<Cell<bool>>,
@@ -241,8 +243,14 @@ impl FenetreFactice {
             journal: Vec::new(),
             en_attente: Vec::new(),
             bascules: 0,
+            plein_ecran_refuse: false,
             fermee: Rc::new(Cell::new(false)),
         }
+    }
+
+    /// Fait échouer toute bascule du plein écran.
+    pub fn refuser_le_plein_ecran(&mut self) {
+        self.plein_ecran_refuse = true;
     }
 
     /// Comme un clic sur la croix : le prochain pompage rend
@@ -301,6 +309,9 @@ impl Afficheur for FenetreFactice {
 
     fn basculer_plein_ecran(&mut self) -> anyhow::Result<()> {
         self.bascules += 1;
+        if self.plein_ecran_refuse {
+            anyhow::bail!("passage en plein écran refusé");
+        }
         Ok(())
     }
 }

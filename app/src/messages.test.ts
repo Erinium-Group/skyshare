@@ -100,6 +100,18 @@ describe("les fins du visionnage hors spec", () => {
     ).toContain("1920×1088");
   });
 
+  it("un décodage interrompu en cours de flux ne parle ni de démarrage ni de la carte", () => {
+    // Ronde de correction 1, I-1. Texte NOUVEAU. Ce qu'il ne doit PAS dire
+    // compte autant que ce qu'il dit : l'image a pu s'afficher, et la carte
+    // peut être parfaitement capable. Neutralisation : rendre le texte de
+    // `decodeur_refuse` ou de `sans_decodage_444` — ce test rougit.
+    const texte = messageDeFin({ cause: "decodage_interrompu" });
+    expect(texte).toBe(
+      "Le décodage de l'image s'est interrompu en cours de visionnage, malgré les demandes de reprise. Relance le visionnage ; si cela se reproduit, demande à ton ami de relancer son partage.",
+    );
+    expect(texte).not.toMatch(/démarrer|carte graphique/);
+  });
+
   it("l'ami qui arrête son partage ne se dit pas comme un arrêt volontaire", () => {
     // D3 (tâche 10). Neutralisation : rendre « Partage arrêté. » — la
     // comparaison avec la fin `arrete` rougit.

@@ -163,10 +163,20 @@ pub fn fin_vue(issue: &Result<Fin, ErreurPartage>) -> FinVue {
 /// Les deux `match` sont exhaustifs, sans joker : une variante ajoutée à
 /// `ErreurDecodeur` ou à `ErreurVisionnage` ne compile pas tant qu'elle n'a pas
 /// sa cause.
+///
+/// LE MOMENT COMPTE AUTANT QUE LA VARIANTE (ronde de correction 1). Les
+/// messages de la spec §7 décrivent l'OUVERTURE : « n'a pas pu démarrer »,
+/// « cette carte ne prend pas en charge… ». Levée en cours de flux, la même
+/// `ErreurDecodeur` les rendrait faux — l'image s'est déjà affichée, et un
+/// `QuatreQuatreQuatreNonPris` du rappel de séquence accuse le flux reçu, pas
+/// la carte. Le flux a donc son propre message, qui ne désigne aucune cause.
 fn fin_de_visionnage(erreur: &ErreurVisionnage) -> FinVue {
     match erreur {
         ErreurVisionnage::ImageIrreconstituable => FinVue::ImageIrreconstituable,
-        ErreurVisionnage::Decodeur(decodeur) => match decodeur {
+        // La dernière erreur du décodeur n'est PAS lue : à ce stade, elle ne
+        // dit rien que l'utilisateur puisse lever.
+        ErreurVisionnage::DecodageInterrompu(_) => FinVue::DecodageInterrompu,
+        ErreurVisionnage::Ouverture(decodeur) => match decodeur {
             ErreurDecodeur::AucuneCarteNvidia(_) => FinVue::SansCarteNvidia,
             ErreurDecodeur::QuatreQuatreQuatreNonPris => FinVue::SansDecodage444,
             // Deux causes, un message : ce qu'il dit est vrai des deux — le
@@ -434,8 +444,8 @@ mod tests {
         );
     }
 
-    fn erreur_de_decodage(erreur: ErreurDecodeur) -> Result<Fin, ErreurPartage> {
-        Err(ErreurPartage::Visionnage(ErreurVisionnage::Decodeur(erreur)))
+    fn erreur_d_ouverture(erreur: ErreurDecodeur) -> Result<Fin, ErreurPartage> {
+        Err(ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(erreur)))
     }
 
     // D1 (tâche 10) : chaque cause de décodage a SA fin, donc son message. Un
@@ -453,7 +463,7 @@ mod tests {
             "LoadLibraryExW a échoué : le module spécifié est introuvable.",
         ] {
             assert_eq!(
-                fin_vue(&erreur_de_decodage(ErreurDecodeur::AucuneCarteNvidia(detail.into()))),
+                fin_vue(&erreur_d_ouverture(ErreurDecodeur::AucuneCarteNvidia(detail.into()))),
                 FinVue::SansCarteNvidia
             );
         }
@@ -462,7 +472,7 @@ mod tests {
     #[test]
     fn une_carte_sans_decodage_444_a_sa_fin() {
         assert_eq!(
-            fin_vue(&erreur_de_decodage(ErreurDecodeur::QuatreQuatreQuatreNonPris)),
+            fin_vue(&erreur_d_ouverture(ErreurDecodeur::QuatreQuatreQuatreNonPris)),
             FinVue::SansDecodage444
         );
     }
@@ -470,11 +480,11 @@ mod tests {
     #[test]
     fn une_session_refusee_et_un_contexte_cuda_perdu_partagent_un_message_honnete() {
         assert_eq!(
-            fin_vue(&erreur_de_decodage(ErreurDecodeur::SessionRefusee(-1))),
+            fin_vue(&erreur_d_ouverture(ErreurDecodeur::SessionRefusee(-1))),
             FinVue::DecodeurRefuse
         );
         assert_eq!(
-            fin_vue(&erreur_de_decodage(ErreurDecodeur::ContexteCuda("perdu".into()))),
+            fin_vue(&erreur_d_ouverture(ErreurDecodeur::ContexteCuda("perdu".into()))),
             FinVue::DecodeurRefuse
         );
     }
@@ -485,7 +495,7 @@ mod tests {
         // l'interface (même règle que `AucuneDemande { fenetre_s }`).
         // Neutralisation : intervertir `largeur_max` et `hauteur_max`.
         assert_eq!(
-            fin_vue(&erreur_de_decodage(ErreurDecodeur::ResolutionTropGrande {
+            fin_vue(&erreur_d_ouverture(ErreurDecodeur::ResolutionTropGrande {
                 largeur: 2560,
                 hauteur: 1440,
                 maximum: (2048, 1152),
@@ -496,6 +506,37 @@ mod tests {
                 largeur_max: 2048,
                 hauteur_max: 1152
             }
+        );
+    }
+
+    #[test]
+    fn une_erreur_nee_pendant_le_flux_ne_prend_jamais_un_message_d_ouverture() {
+        // Ronde de correction 1, I-1. Trois de ces variantes naissent aussi
+        // PENDANT le flux (`decodeur.rs` : `rendre_contexte_courant`,
+        // `verifier_format_de_sequence`, les rappels de décodage). Quelle que
+        // soit la variante portée, la fin est celle du flux — jamais « n'a pas
+        // pu démarrer », jamais « cette carte ne prend pas en charge… ».
+        // Neutralisation : faire passer `DecodageInterrompu` par le `match` de
+        // l'ouverture — ce test rougit (sur la première variante).
+        for erreur in [
+            ErreurDecodeur::QuatreQuatreQuatreNonPris,
+            ErreurDecodeur::SessionRefusee(-1),
+            ErreurDecodeur::ContexteCuda("perdu".into()),
+            ErreurDecodeur::AucuneCarteNvidia("détail".into()),
+            ErreurDecodeur::ResolutionTropGrande { largeur: 1, hauteur: 1, maximum: (1, 1) },
+        ] {
+            assert_eq!(
+                fin_vue(&Err(ErreurPartage::Visionnage(ErreurVisionnage::DecodageInterrompu(
+                    erreur
+                )))),
+                FinVue::DecodageInterrompu
+            );
+        }
+        // Le contrôle positif : la MÊME variante, à l'ouverture, garde le
+        // message de la spec. Sans lui, « tout est flux » passerait.
+        assert_eq!(
+            fin_vue(&erreur_d_ouverture(ErreurDecodeur::QuatreQuatreQuatreNonPris)),
+            FinVue::SansDecodage444
         );
     }
 

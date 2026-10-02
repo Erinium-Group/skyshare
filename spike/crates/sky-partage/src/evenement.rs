@@ -173,12 +173,26 @@ pub enum Fin {
 /// la tâche 10 elle passait par `ErreurPartage::Autre` et se retrouvait par
 /// `downcast_ref` — un chemin qu'un changement de type à l'insertion aurait
 /// cassé en silence, la compilation passant quand même.
+///
+/// L'ORIGINE EST DANS LE TYPE, et ce n'est pas un détail (ronde de correction 1
+/// de la tâche 10). Une même `ErreurDecodeur` ne dit pas la même chose selon le
+/// moment où elle naît : `QuatreQuatreQuatreNonPris` levée à l'ouverture veut
+/// dire « cette carte ne sait pas », levée par le rappel de séquence pendant le
+/// flux elle veut dire « ce FLUX n'est pas en 4:4:4 » — la carte va très bien.
+/// `SessionRefusee` en cours de flux arrive après que l'image s'est affichée,
+/// quand « le décodeur n'a pas pu démarrer » serait faux. Les messages de la
+/// spec §7 décrivent l'ouverture ; le flux a donc sa propre variante.
 #[derive(Debug)]
 pub enum ErreurVisionnage {
-    /// Le décodeur refuse : à l'ouverture (pas de carte, pas de 4:4:4,
-    /// résolution trop grande…) ou `ECHECS_DECODAGE_AVANT_ABANDON` fois de
-    /// suite pendant le flux. Les cinq variantes sont intactes.
-    Decodeur(ErreurDecodeur),
+    /// `Decodeur::nouveau` a refusé, en tête de `regarder`, avant toute
+    /// négociation : pas de carte, pas de 4:4:4, résolution trop grande,
+    /// session refusée. Les messages de la spec §7 sont ceux-là.
+    Ouverture(ErreurDecodeur),
+    /// Le décodeur, ouvert et fonctionnel, a refusé
+    /// `ECHECS_DECODAGE_AVANT_ABANDON` unités de suite PENDANT le flux, malgré
+    /// les demandes d'image clé. L'erreur portée est la dernière reçue : elle
+    /// renseigne `sky-probe`, elle ne désigne pas une cause à l'utilisateur.
+    DecodageInterrompu(ErreurDecodeur),
     /// Aucune image clé en `ATTENTE_IMAGE_CLE_MAX` malgré les demandes.
     ImageIrreconstituable,
 }
@@ -186,7 +200,12 @@ pub enum ErreurVisionnage {
 impl std::fmt::Display for ErreurVisionnage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ErreurVisionnage::Decodeur(erreur) => erreur.fmt(f),
+            ErreurVisionnage::Ouverture(erreur) => erreur.fmt(f),
+            // Le détail du décodeur est la `source` : la chaîne d'`anyhow` le
+            // dira une fois, sans le répéter ici.
+            ErreurVisionnage::DecodageInterrompu(_) => {
+                f.write_str("le décodage s'est interrompu en cours de flux")
+            }
             // Le texte de la spec §7, mot pour mot : c'est ce que lit
             // l'utilisateur de `sky-probe view`. L'application, elle, ne lit
             // jamais ce texte — elle se branche sur la variante (`fin_vue`).
@@ -203,7 +222,8 @@ impl std::error::Error for ErreurVisionnage {
         match self {
             // Transparente, comme `#[error(transparent)]` : l'affichage reprend
             // déjà celui du décodeur, la chaîne ne doit pas le répéter.
-            ErreurVisionnage::Decodeur(erreur) => erreur.source(),
+            ErreurVisionnage::Ouverture(erreur) => erreur.source(),
+            ErreurVisionnage::DecodageInterrompu(erreur) => Some(erreur),
             ErreurVisionnage::ImageIrreconstituable => None,
         }
     }

@@ -20,7 +20,7 @@ pub use evenement::{
     Bilan, BilanEnvoi, BilanReception, Diagnostic, ErreurPartage, ErreurVisionnage, Evenement, Fin,
     Mesures, MesuresVisionnage, Quantiles,
 };
-/// Réexportée : `ErreurVisionnage::Decodeur` la porte, et qui reçoit l'une doit
+/// Réexportée : `ErreurVisionnage` la porte, et qui reçoit l'une doit
 /// pouvoir nommer les variantes de l'autre sans dépendre de `sky-decode`.
 pub use sky_decode::ErreurDecodeur;
 pub use hote::{heberger, FabriqueSynthetique, Images, ParametresHote, SourceImages, FPS};

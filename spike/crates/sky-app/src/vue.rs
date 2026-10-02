@@ -93,6 +93,10 @@ pub enum FinVue {
     ResolutionTropGrande { largeur: u32, hauteur: u32, largeur_max: u32, hauteur_max: u32 },
     /// Aucune image clé malgré les demandes : le flux ne se répare pas.
     ImageIrreconstituable,
+    /// Le décodeur, ouvert, a refusé le flux trop longtemps EN COURS de
+    /// visionnage. Aucune cause désignée : les messages de l'ouverture
+    /// seraient faux ici (ronde de correction 1).
+    DecodageInterrompu,
     Autre { message: String },
 }
 
@@ -313,6 +317,7 @@ mod contrat_typescript {
                 hauteur_max: 2048,
             },
             FinVue::ImageIrreconstituable,
+            FinVue::DecodageInterrompu,
             FinVue::Autre { message: "quelque chose".to_string() },
         ];
         // Une variante ajoutée à `FinVue` sans être ajoutée au tableau
@@ -332,6 +337,7 @@ mod contrat_typescript {
                 | FinVue::DecodeurRefuse
                 | FinVue::ResolutionTropGrande { .. }
                 | FinVue::ImageIrreconstituable
+                | FinVue::DecodageInterrompu
                 | FinVue::Autre { .. } => {}
             }
         }

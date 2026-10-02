@@ -274,15 +274,23 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
     /// Le `match` est exhaustif : un événement de fenêtre ajouté demain sans
     /// destinataire ne compile pas. C'est ce qui manquait à F11, produit par
     /// `sky-rendu` depuis la tâche 3 et lu par personne jusqu'à la tâche 10.
-    pub fn servir_fenetre(&mut self) -> anyhow::Result<bool> {
+    pub fn servir_fenetre(&mut self) -> bool {
         let mut fermeture = false;
         for evenement in self.afficheur.evenements() {
             match evenement {
                 EvenementFenetre::FermetureDemandee => fermeture = true,
-                EvenementFenetre::PleinEcranBascule => self.afficheur.basculer_plein_ecran()?,
+                // Un geste de confort ne termine JAMAIS un visionnage (ronde de
+                // correction 1, I-2). `Fenetre::basculer_plein_ecran` laisse la
+                // fenêtre dans son état précédent quand il échoue : l'image
+                // continue, F11 n'a simplement rien fait. Aucun collecteur ne
+                // recevrait un journal — l'échec n'a pas d'autre témoin que la
+                // fenêtre restée telle quelle, que l'utilisateur voit.
+                EvenementFenetre::PleinEcranBascule => {
+                    let _ = self.afficheur.basculer_plein_ecran();
+                }
             }
         }
-        Ok(fermeture)
+        fermeture
     }
 
     pub fn reception(&mut self) -> &mut Reception {
@@ -384,9 +392,13 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             Err(erreur) => {
                 self.echecs_consecutifs += 1;
                 if self.echecs_consecutifs >= ECHECS_DECODAGE_AVANT_ABANDON {
-                    // Typée jusqu'à la sortie : `sky-app` donne un message
-                    // propre à chacune des cinq variantes du décodeur.
-                    return Err(ErreurPartage::Visionnage(ErreurVisionnage::Decodeur(erreur)));
+                    // EN COURS DE FLUX, pas à l'ouverture : la variante le dit,
+                    // pour que `sky-app` n'affiche pas un message d'ouverture
+                    // (« n'a pas pu démarrer », « cette carte ne prend pas en
+                    // charge… ») après une image déjà montrée.
+                    return Err(ErreurPartage::Visionnage(ErreurVisionnage::DecodageInterrompu(
+                        erreur,
+                    )));
                 }
                 // Un refus isolé peut venir d'une unité tronquée ; une image clé
                 // repart de zéro et la répare.
@@ -563,7 +575,7 @@ pub fn regarder(
     // Le contexte CUDA tenu pendant l'attente ne coûte rien de mesurable ; il est
     // lié à ce fil, qui est aussi celui de la boucle de réception.
     let decodeur = Decodeur::nouveau(LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)
-        .map_err(|e| ErreurPartage::Visionnage(ErreurVisionnage::Decodeur(e)))?;
+        .map_err(|e| ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(e)))?;
     // L'identité DURABLE : c'est pour sa clé d'annuaire que l'hôte scelle
     // l'enveloppe de sa réponse. La clé de l'offre, elle, est éphémère.
     let identite = coffre.identite().map_err(ErreurPartage::Compte)?;
@@ -681,7 +693,7 @@ fn boucle<D: Decodage, A: Afficheur>(
         // À chaque tour, et AVANT le signal d'arrêt : une fenêtre qu'on ne
         // pompe pas est déclarée « ne répond pas » par Windows, et la croix
         // doit être vue au tour même où elle est cliquée.
-        if visionnage.servir_fenetre()? {
+        if visionnage.servir_fenetre() {
             arret.demander();
         }
         if arret.est_demande() {
@@ -951,19 +963,44 @@ mod tests {
             .expect_err("au-delà du plafond, le refus remonte");
 
         // L'erreur TYPÉE du décodeur doit survivre jusqu'à la sortie, DANS SA
-        // VARIANTE d'`ErreurPartage` : `sky-app` donne à chacune des cinq
-        // variantes un message différent (spec §7), en se branchant sur le type
-        // et jamais sur un texte. Neutralisation (tâche 10) : la faire voyager
-        // dans `ErreurPartage::Autre(anyhow::Error::new(..))`, comme avant —
-        // ce test rougit.
+        // VARIANTE d'`ErreurPartage`, et marquée comme née PENDANT le flux :
+        // `sky-app` se branche sur le type, jamais sur un texte. Neutralisations
+        // (tâche 10) : la faire voyager dans `ErreurPartage::Autre(..)`, comme
+        // avant — ce test rougit ; la marquer `Ouverture` — il rougit aussi, avec
+        // `un_decodeur_qui_lache_apres_l_image_ne_dit_pas_qu_il_n_a_pas_demarre`.
         assert!(
             matches!(
                 erreur,
-                ErreurPartage::Visionnage(ErreurVisionnage::Decodeur(
+                ErreurPartage::Visionnage(ErreurVisionnage::DecodageInterrompu(
                     ErreurDecodeur::QuatreQuatreQuatreNonPris
                 ))
             ),
             "la variante du décodeur est préservée : {erreur:?}"
+        );
+    }
+
+    #[test]
+    fn un_decodeur_qui_lache_apres_l_image_ne_dit_pas_qu_il_n_a_pas_demarre() {
+        // Ronde de correction 1, I-1. Le scénario que la revue a décrit : une
+        // image clé s'affiche, puis le décodeur refuse tout jusqu'au plafond.
+        // La boucle entière, sur doublures, doit rendre une erreur NÉE DU FLUX
+        // — sans quoi `sky-app` afficherait « Le décodeur vidéo n'a pas pu
+        // démarrer » ou « cette carte ne prend pas en charge… » à quelqu'un
+        // qui vient de voir l'image. Neutralisation : faire remonter
+        // `Ouverture` dans `sur_image` — ce test rougit.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        lien.injecter(image(true, true));
+        for _ in 0..ECHECS_DECODAGE_AVANT_ABANDON {
+            lien.injecter(image(false, true));
+        }
+        let v = visionnage(&[Issue::Image], Issue::Echec, t0);
+
+        let erreur = boucler(&mut lien, v, &Arret::nouveau()).expect_err("le flux est abandonné");
+
+        assert!(
+            matches!(erreur, ErreurPartage::Visionnage(ErreurVisionnage::DecodageInterrompu(_))),
+            "une erreur née pendant le flux n'est pas une erreur d'ouverture : {erreur:?}"
         );
     }
 
@@ -1188,9 +1225,9 @@ mod tests {
         let t0 = Instant::now();
         let mut v = visionnage(&[], Issue::Image, t0);
 
-        assert!(!v.servir_fenetre().expect("service"), "rien n'a été demandé");
+        assert!(!v.servir_fenetre(), "rien n'a été demandé");
         v.afficheur_mut().demander_la_fermeture();
-        assert!(v.servir_fenetre().expect("service"), "la fermeture demandée remonte");
+        assert!(v.servir_fenetre(), "la fermeture demandée remonte");
     }
 
     #[test]
@@ -1203,10 +1240,32 @@ mod tests {
         let mut v = visionnage(&[], Issue::Image, t0);
 
         v.afficheur_mut().appuyer_sur_f11();
-        let fermeture = v.servir_fenetre().expect("service");
+        let fermeture = v.servir_fenetre();
 
         assert_eq!(v.afficheur().bascules(), 1, "F11 bascule le plein écran");
         assert!(!fermeture, "F11 n'est pas une demande de fermeture");
+    }
+
+    #[test]
+    fn un_f11_rate_ne_termine_pas_le_visionnage() {
+        // Ronde de correction 1, I-2 : avant, le `?` de `servir_fenetre`
+        // faisait d'un basculement raté une fin de visionnage, en
+        // `FinVue::Autre { "passage en plein écran" }`. La boucle doit au
+        // contraire continuer : ici, elle ne s'arrête qu'au lien qui tombe,
+        // injecté APRÈS le F11. Neutralisation : traiter l'échec de bascule
+        // comme une fermeture — la fin devient `Arrete` et le lien n'est
+        // jamais interrogé, ce test rougit.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        lien.injecter(LinkEvent::Failed("le lien est tombé".to_string()));
+        let mut v = visionnage(&[], Issue::Image, t0);
+        v.afficheur_mut().refuser_le_plein_ecran();
+        v.afficheur_mut().appuyer_sur_f11();
+
+        let fin = boucler(&mut lien, v, &Arret::nouveau());
+
+        assert_eq!(fin.ok(), Some(Fin::LienTombe("le lien est tombé".to_string())));
+        assert!(lien.polls() >= 1, "la réception a continué après le F11 raté");
     }
 
     /// Une boucle complète sur doublures, bornée : un défaut qui la ferait

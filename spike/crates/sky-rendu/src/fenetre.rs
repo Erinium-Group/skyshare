@@ -113,6 +113,17 @@ pub struct Fenetre {
     /// Le placement d'avant le plein écran, pour y revenir. `Some` : la fenêtre
     /// est en plein écran.
     avant_plein_ecran: Option<WINDOWPLACEMENT>,
+    /// Tests seulement : l'étape du plein écran à faire échouer.
+    #[cfg(test)]
+    echec_simule: Option<EtapePleinEcran>,
+}
+
+/// Les deux appels du plein écran qui changent la géométrie, et qu'un test
+/// peut faire échouer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EtapePleinEcran {
+    Aller,
+    Retour,
 }
 
 impl Fenetre {
@@ -382,6 +393,8 @@ impl Fenetre {
             hauteur,
             dernier_etat: None,
             avant_plein_ecran: None,
+            #[cfg(test)]
+            echec_simule: None,
         })
     }
 
@@ -408,9 +421,17 @@ impl Fenetre {
     /// Elle ne MONTRE jamais une fenêtre cachée : aucun drapeau
     /// `SWP_SHOWWINDOW`, et le placement restauré garde l'état caché. C'est ce
     /// qui permet de l'éprouver sur une fenêtre masquée sans rien afficher.
+    ///
+    /// UN ÉCHEC LAISSE LA FENÊTRE DANS SON ÉTAT PRÉCÉDENT (ronde de correction 1
+    /// de la tâche 10). Les deux appels qui changent la géométrie
+    /// (`SetWindowPos` à l'aller, `SetWindowPlacement` au retour) viennent après
+    /// un changement de style : s'ils échouent, le style est remis et l'état
+    /// mémorisé aussi, pour qu'un F11 suivant reparte d'un état cohérent. Sans
+    /// cela, un retour raté laissait une fenêtre sans bordure et sans plus aucun
+    /// moyen d'en sortir.
     pub fn basculer_plein_ecran(&mut self) -> anyhow::Result<()> {
         unsafe {
-            match self.avant_plein_ecran.take() {
+            match self.avant_plein_ecran {
                 None => {
                     let mut placement = WINDOWPLACEMENT {
                         length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
@@ -433,19 +454,27 @@ impl Fenetre {
                         style & !(WS_OVERLAPPEDWINDOW.0 as isize),
                     );
                     let ecran = info.rcMonitor;
-                    SetWindowPos(
-                        self.hwnd,
-                        Some(HWND_TOP),
-                        ecran.left,
-                        ecran.top,
-                        ecran.right - ecran.left,
-                        ecran.bottom - ecran.top,
-                        SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
-                    )
-                    .context("passage en plein écran")?;
+                    let pose = self.etape(EtapePleinEcran::Aller, || {
+                        SetWindowPos(
+                            self.hwnd,
+                            Some(HWND_TOP),
+                            ecran.left,
+                            ecran.top,
+                            ecran.right - ecran.left,
+                            ecran.bottom - ecran.top,
+                            SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                        )
+                    });
+                    if let Err(e) = pose {
+                        // Le cadre revient ; la géométrie n'a pas bougé.
+                        SetWindowLongPtrW(self.hwnd, GWL_STYLE, style);
+                        self.redessiner_le_cadre();
+                        return Err(anyhow::Error::new(e).context("passage en plein écran"));
+                    }
                     self.avant_plein_ecran = Some(placement);
                 }
-                Some(mut placement) => {
+                Some(avant) => {
+                    let mut placement = avant;
                     let style = GetWindowLongPtrW(self.hwnd, GWL_STYLE);
                     SetWindowLongPtrW(self.hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW.0 as isize);
                     // Le placement relu avant le plein écran porte un état
@@ -455,26 +484,65 @@ impl Fenetre {
                     if !IsWindowVisible(self.hwnd).as_bool() {
                         placement.showCmd = SW_HIDE.0 as u32;
                     }
-                    SetWindowPlacement(self.hwnd, &placement).context("retour du plein écran")?;
-                    SetWindowPos(
-                        self.hwnd,
-                        None,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE
-                            | SWP_NOSIZE
-                            | SWP_NOZORDER
-                            | SWP_NOOWNERZORDER
-                            | SWP_NOACTIVATE
-                            | SWP_FRAMECHANGED,
-                    )
-                    .context("cadre de la fenêtre")?;
+                    let pose = self.etape(EtapePleinEcran::Retour, || {
+                        SetWindowPlacement(self.hwnd, &placement)
+                    });
+                    if let Err(e) = pose {
+                        // Toujours en plein écran : sans bordure, et le
+                        // placement d'avant GARDÉ pour le prochain F11.
+                        SetWindowLongPtrW(self.hwnd, GWL_STYLE, style);
+                        self.redessiner_le_cadre();
+                        return Err(anyhow::Error::new(e).context("retour du plein écran"));
+                    }
+                    self.avant_plein_ecran = None;
+                    self.redessiner_le_cadre();
                 }
             }
         }
         Ok(())
+    }
+
+    /// Fait prendre en compte un changement de style au cadre de la fenêtre.
+    /// Sans géométrie : rien ne bouge, rien ne s'affiche. Un échec n'est pas
+    /// rattrapable et ne change rien d'utile — le cadre se redessinera au
+    /// prochain changement de taille —, il est donc ignoré.
+    fn redessiner_le_cadre(&self) {
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE
+                    | SWP_NOSIZE
+                    | SWP_NOZORDER
+                    | SWP_NOOWNERZORDER
+                    | SWP_NOACTIVATE
+                    | SWP_FRAMECHANGED,
+            );
+        }
+    }
+
+    /// Exécute une étape du plein écran — sauf si un test a demandé qu'elle
+    /// échoue, auquel cas l'appel n'a PAS lieu et l'échec est rendu à sa place,
+    /// comme le ferait un appel Win32 refusé. C'est le seul moyen d'éprouver le
+    /// retour arrière : on ne sait pas faire échouer `SetWindowPos` à la demande.
+    fn etape(
+        &self,
+        etape: EtapePleinEcran,
+        appel: impl FnOnce() -> windows::core::Result<()>,
+    ) -> windows::core::Result<()> {
+        #[cfg(test)]
+        if self.echec_simule == Some(etape) {
+            return Err(windows::core::Error::from_hresult(
+                windows::Win32::Foundation::E_FAIL,
+            ));
+        }
+        #[cfg(not(test))]
+        let _ = etape;
+        appel()
     }
 
     /// Recopie la cible dans le tampon arrière et présente.
@@ -989,6 +1057,69 @@ mod tests {
             !unsafe { IsWindowVisible(fenetre.hwnd) }.as_bool(),
             "le retour du plein écran a montré une fenêtre masquée"
         );
+    }
+
+    /// Le style de la fenêtre porte-t-il le cadre ?
+    fn a_son_cadre(fenetre: &Fenetre) -> bool {
+        let style = unsafe { GetWindowLongPtrW(fenetre.hwnd, GWL_STYLE) };
+        let cadre = WS_OVERLAPPEDWINDOW.0 as isize;
+        style & cadre == cadre
+    }
+
+    /// Ronde de correction 1, I-2 : un basculement raté laisse la fenêtre dans
+    /// son état PRÉCÉDENT, à l'aller comme au retour — et un F11 suivant
+    /// fonctionne encore. Fenêtre masquée ; l'échec est simulé AU LIEU de
+    /// l'appel Win32 (`Fenetre::etape`).
+    ///
+    /// Neutralisations : (1) ne pas remettre le style quand l'aller échoue —
+    /// la fenêtre perd son cadre, ce test rougit ; (2) oublier le placement
+    /// mémorisé quand le retour échoue — la fenêtre se croit sortie du plein
+    /// écran, ce test rougit.
+    #[test]
+    fn un_basculement_rate_laisse_la_fenetre_dans_son_etat_precedent() {
+        let mut fenetre = ouvrir_pour_test(320, 200);
+        let avant = fenetre.taille();
+
+        // Aller raté : fenêtre normale, cadre intact, taille inchangée.
+        fenetre.echec_simule = Some(EtapePleinEcran::Aller);
+        assert!(fenetre.basculer_plein_ecran().is_err());
+        let _ = fenetre.pompe_messages();
+        assert!(
+            !fenetre.en_plein_ecran(),
+            "un aller raté ne compte pas comme plein écran"
+        );
+        assert!(
+            a_son_cadre(&fenetre),
+            "un aller raté ne doit pas laisser une fenêtre sans cadre"
+        );
+        assert_eq!(fenetre.taille(), avant);
+
+        // Aller réussi, puis retour raté : toujours en plein écran, sans cadre.
+        fenetre.echec_simule = None;
+        fenetre.basculer_plein_ecran().expect("plein écran");
+        let _ = fenetre.pompe_messages();
+        let ecran = fenetre.taille();
+        fenetre.echec_simule = Some(EtapePleinEcran::Retour);
+        assert!(fenetre.basculer_plein_ecran().is_err());
+        let _ = fenetre.pompe_messages();
+        assert!(
+            fenetre.en_plein_ecran(),
+            "un retour raté laisse la fenêtre en plein écran"
+        );
+        assert!(
+            !a_son_cadre(&fenetre),
+            "en plein écran, la fenêtre reste sans cadre"
+        );
+        assert_eq!(fenetre.taille(), ecran);
+
+        // Et le F11 suivant ramène bien la taille d'avant : rien n'a été perdu.
+        fenetre.echec_simule = None;
+        fenetre.basculer_plein_ecran().expect("retour");
+        let _ = fenetre.pompe_messages();
+        assert!(!fenetre.en_plein_ecran());
+        assert!(a_son_cadre(&fenetre));
+        assert_eq!(fenetre.taille(), avant);
+        assert!(!unsafe { IsWindowVisible(fenetre.hwnd) }.as_bool());
     }
 
     /// L'appareil doit vivre sur la carte NVIDIA quand il y en a une : c'est ce

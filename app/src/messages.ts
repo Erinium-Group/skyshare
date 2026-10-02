@@ -6,8 +6,12 @@ import type { FinVue } from "./types";
  * Les quatre premiers textes sont ceux de la spec §4, et les quatre du
  * décodage ceux de la spec du jalon 2 (§7), au mot près : ce sont des
  * promesses faites à l'utilisateur, pas des étiquettes d'interface. Ils ont
- * chacun leur test dans `messages.test.ts`. Un seul texte n'en vient pas, et le
- * dit : `resolution_trop_grande`.
+ * chacun leur test dans `messages.test.ts`.
+ *
+ * TROIS TEXTES N'EN VIENNENT PAS, tous ajoutés par la tâche 10 du jalon 2 et
+ * signalés comme tels sur leur `case` : `partage_arrete`,
+ * `resolution_trop_grande` et `decodage_interrompu`. Ils sont à valider par le
+ * propriétaire.
  *
  * ARBITRAGE 4 DU CONTRÔLEUR : l'interface ne FABRIQUE aucun message à partir de
  * données brutes. La seule cause qui porte du texte, `autre`, le tient du cœur,
@@ -42,8 +46,9 @@ export function messageDeFin(fin: FinVue): string {
       // menti en silence au premier changement de la constante.
       return `Personne n'a demandé à regarder pendant ${minutes(fin.fenetreS)}.`;
     case "partage_arrete":
-      // Une fin NORMALE, à distinguer de « Partage arrêté. » : ce n'est pas
-      // l'utilisateur qui l'a arrêté, c'est son ami.
+      // TEXTE NOUVEAU, ABSENT DE LA SPEC (tâche 10). Une fin NORMALE, à
+      // distinguer de « Partage arrêté. » : ce n'est pas l'utilisateur qui l'a
+      // arrêté, c'est son ami.
       return "Ton ami a arrêté son partage.";
     // --- Spec du jalon 2, §7 : les quatre textes du décodage, AU MOT PRÈS. ---
     // L'interface se branche sur la CAUSE, jamais sur un texte d'erreur : le
@@ -66,6 +71,14 @@ export function messageDeFin(fin: FinVue): string {
       // annonce — l'écran de l'ami n'est pas encore connu, et le message ne
       // doit donc pas l'accuser.
       return `Le décodeur vidéo de cette carte graphique s'arrête à ${fin.largeurMax}×${fin.hauteurMax} : SkyShare a besoin d'au moins ${fin.largeur}×${fin.hauteur} pour recevoir un écran sur cette machine.`;
+    case "decodage_interrompu":
+      // TEXTE NOUVEAU, ABSENT DE LA SPEC (ronde de correction 1 de la tâche
+      // 10). Le décodeur, ouvert et qui a peut-être déjà montré l'image, a
+      // refusé le flux trop longtemps malgré les demandes d'image clé. Les
+      // textes de la spec §7 décrivent l'OUVERTURE (« n'a pas pu démarrer »,
+      // « cette carte ne prend pas en charge… ») et seraient faux ici. Rien ne
+      // dit de quel côté vient le défaut : le message n'en désigne aucun.
+      return "Le décodage de l'image s'est interrompu en cours de visionnage, malgré les demandes de reprise. Relance le visionnage ; si cela se reproduit, demande à ton ami de relancer son partage.";
     case "autre":
       return fin.message;
   }

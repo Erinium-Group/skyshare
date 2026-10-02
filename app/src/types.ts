@@ -57,6 +57,7 @@ export type FinVue =
       hauteurMax: number;
     }
   | { cause: "image_irreconstituable" }
+  | { cause: "decodage_interrompu" }
   | { cause: "autre"; message: string };
 
 export type PartageVue =
