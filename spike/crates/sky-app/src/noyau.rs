@@ -76,6 +76,12 @@ pub const MESSAGE_AUCUN_FORMAT: &str = "Partage impossible : la carte graphique 
 /// TEXTE NOUVEAU, à valider par le propriétaire (spec §6).
 pub const MESSAGE_AUCUN_FORMAT_COMMUN: &str = "Aucun format vidéo en commun : la carte \
      graphique qui partage n'encode aucun format que celle qui regarde sait décoder.";
+/// Le spectateur n'a aucun moteur de décodage matériel : ni NVDEC en HEVC
+/// 4:4:4, ni Media Foundation en HEVC 4:2:0 ou H.264 (`ErreurDecodeur::AucunDecodeur`).
+/// TEXTE NOUVEAU, à valider par le propriétaire (spec §6).
+pub const MESSAGE_AUCUN_DECODEUR: &str = "Cette machine ne sait décoder en matériel aucun des \
+    formats vidéo de SkyShare (HEVC ou H.264) : elle ne peut pas recevoir d'écran. Le pilote \
+    de la carte graphique est-il à jour ?";
 /// L'écran choisi n'est plus dans la liste relevée à l'instant du clic — il a
 /// été débranché, ou la liste affichée avait vieilli.
 pub const MESSAGE_ECRAN_DISPARU: &str = "Cet écran n'existe plus : choisis-en un autre.";

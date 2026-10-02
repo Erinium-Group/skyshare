@@ -194,12 +194,14 @@ fn fin_de_visionnage(erreur: &ErreurVisionnage) -> FinVue {
             ErreurDecodeur::SessionRefusee(_) | ErreurDecodeur::ContexteCuda(_) => {
                 FinVue::DecodeurRefuse
             }
-            // PROVISOIRE (tâche 4 du sous-jalon « toutes cartes ») : les deux
-            // variantes du moteur Media Foundation n'ont pas encore leur message ;
-            // la tâche 5 le leur donne.
-            ErreurDecodeur::AucunDecodeur | ErreurDecodeur::MediaFoundation(_) => {
-                FinVue::DecodeurRefuse
-            }
+            // Aucun moteur matériel pour aucun format : la machine ne peut pas
+            // recevoir, et le pilote est la seule piste que l'utilisateur tient.
+            ErreurDecodeur::AucunDecodeur => FinVue::Autre {
+                message: crate::noyau::MESSAGE_AUCUN_DECODEUR.to_string(),
+            },
+            // Un décodeur existe mais n'a pas démarré : même message honnête que
+            // `SessionRefusee`. Le détail (HRESULT, texte localisé) ne traverse pas.
+            ErreurDecodeur::MediaFoundation(_) => FinVue::DecodeurRefuse,
             ErreurDecodeur::ResolutionTropGrande { largeur, hauteur, maximum } => {
                 FinVue::ResolutionTropGrande {
                     largeur: *largeur,
@@ -546,6 +548,28 @@ mod tests {
     }
 
     #[test]
+    fn une_machine_sans_aucun_decodeur_le_dit() {
+        // Tâche 5 du sous-jalon « toutes cartes ». Neutralisation : faire
+        // rendre `FinVue::DecodeurRefuse` à `AucunDecodeur` — ce test rougit.
+        assert_eq!(
+            fin_vue(&erreur_d_ouverture(ErreurDecodeur::AucunDecodeur)),
+            FinVue::Autre { message: crate::noyau::MESSAGE_AUCUN_DECODEUR.to_string() }
+        );
+    }
+
+    #[test]
+    fn un_echec_media_foundation_a_l_ouverture_est_un_decodeur_refuse() {
+        // Le détail technique (code HRESULT, texte localisé de Windows) ne
+        // traverse pas : même règle que `AucuneCarteNvidia`.
+        assert_eq!(
+            fin_vue(&erreur_d_ouverture(ErreurDecodeur::MediaFoundation(
+                "ProcessInput : 0xC00D6D61".into()
+            ))),
+            FinVue::DecodeurRefuse
+        );
+    }
+
+    #[test]
     fn une_resolution_trop_grande_porte_ses_chiffres() {
         // Les chiffres viennent de l'erreur, jamais d'un littéral de
         // l'interface (même règle que `AucuneDemande { fenetre_s }`).
@@ -580,6 +604,10 @@ mod tests {
             ErreurDecodeur::ContexteCuda("perdu".into()),
             ErreurDecodeur::AucuneCarteNvidia("détail".into()),
             ErreurDecodeur::ResolutionTropGrande { largeur: 1, hauteur: 1, maximum: (1, 1) },
+            // Les deux variantes Media Foundation : `MediaFoundation` naît
+            // aussi pendant le flux (`DecodeurMf::decoder`).
+            ErreurDecodeur::AucunDecodeur,
+            ErreurDecodeur::MediaFoundation("ProcessOutput : échec".into()),
         ] {
             assert_eq!(
                 fin_vue(&Err(ErreurPartage::Visionnage(ErreurVisionnage::DecodageInterrompu(

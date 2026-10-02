@@ -10,10 +10,12 @@ mod image;
 mod media_foundation;
 mod nvcuvid_sys;
 mod sonde;
+mod source;
 
 pub use appareil::creer_appareil_video;
 pub use capacites::{sonder_materiel, Capacites, ErreurDecodeur};
 pub use decodeur::Decodeur;
 pub use image::{ImageDecodee, SurfaceCuda};
-pub use media_foundation::{mf_sait_decoder, CodecMf, DecodeurMf};
+pub use media_foundation::{mf_sait_decoder, CodecMf, DecodeurMf, ImageMf};
 pub use sonde::{sonder_decodage, Decodables};
+pub use source::SourceImage;

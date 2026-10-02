@@ -12,15 +12,17 @@
 //! - l'image sort dans une tranche d'un TABLEAU de textures NV12 lié au seul
 //!   décodeur : non lisible par un nuanceur, elle se copie (`sky-rendu`).
 //!
-//! Cette tâche n'écrit que l'OUVERTURE du décodeur ([`DecodeurMf::nouveau`]) :
-//! la sonde de décodage s'en sert, et il n'en existe qu'une. Le décodage
-//! lui-même (`decoder`) vient à la tâche suivante.
+//! L'ouverture ([`DecodeurMf::nouveau`]) sert aussi à la sonde de décodage, et
+//! il n'en existe qu'une. Le décodage ([`DecodeurMf::decoder`]) rend une
+//! [`ImageMf`] par unité d'accès poussée, au même appel.
 
 use std::mem::ManuallyDrop;
 
 use windows::core::{Interface, GUID};
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11VideoDevice, D3D11_VIDEO_DECODER_DESC,
+    ID3D11Device, ID3D11Texture2D, ID3D11VideoDevice, D3D11_BOX, D3D11_CPU_ACCESS_READ,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    D3D11_VIDEO_DECODER_DESC,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 use windows::Win32::Media::MediaFoundation::*;
@@ -188,21 +190,29 @@ pub struct DecodeurMf {
     transformation: ManuallyDrop<IMFTransform>,
     activation: IMFActivate,
     _gestionnaire: IMFDXGIDeviceManager,
-    #[allow(dead_code)] // lu par `decoder` (tâche 5)
+    /// Le flux de sortie tel que déclaré au dernier type choisi : relu à chaque
+    /// changement de flux, et `tirer` y vérifie que le décodeur fournit
+    /// toujours ses images (D5).
     info: MFT_OUTPUT_STREAM_INFO,
-    #[allow(dead_code)] // lu par `decoder` (tâche 5)
+    /// Taille d'AFFICHAGE du type de sortie courant, jamais nulle
+    /// (`taille_d_affichage`).
     largeur: u32,
-    #[allow(dead_code)] // lu par `decoder` (tâche 5)
     hauteur: u32,
+    /// `MFT_MESSAGE_NOTIFY_BEGIN_STREAMING` a-t-il été accepté ? `Drop`
+    /// n'envoie la fin de diffusion qu'alors, comme la sonde : un décodeur
+    /// tombé à mi-ouverture n'a rien commencé.
+    diffusion_commencee: bool,
     _plateforme: Plateforme,
 }
 
 impl Drop for DecodeurMf {
     fn drop(&mut self) {
         unsafe {
-            let _ = self
-                .transformation
-                .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            if self.diffusion_commencee {
+                let _ = self
+                    .transformation
+                    .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            }
             ManuallyDrop::drop(&mut self.transformation);
             let _ = self.activation.ShutdownObject();
         }
@@ -265,6 +275,7 @@ impl DecodeurMf {
             info: MFT_OUTPUT_STREAM_INFO::default(),
             largeur: 0,
             hauteur: 0,
+            diffusion_commencee: false,
             _plateforme: plateforme,
         };
         let t: &IMFTransform = &decodeur.transformation;
@@ -281,6 +292,8 @@ impl DecodeurMf {
         }
         // Faible latence : c'est elle qui retient au plus une image (spec D5).
         // Sûre sur le chemin matériel seulement ; le logiciel est refusé plus bas.
+        // Porteuse, mesuré (RTX 4060, tâche 5) : à 0, l'unité 0 ne rend aucune
+        // image au même appel, en HEVC comme en H.264.
         unsafe { attributs.SetUINT32(&MF_LOW_LATENCY, 1) }
             .map_err(|e| mf("MF_LOW_LATENCY = 1", e))?;
 
@@ -332,16 +345,269 @@ impl DecodeurMf {
             ));
         }
 
+        unsafe { t.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0) }
+            .map_err(|e| mf("NOTIFY_BEGIN_STREAMING", e))?;
+        decodeur.diffusion_commencee = true;
         unsafe {
-            t.ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-                .map_err(|e| mf("NOTIFY_BEGIN_STREAMING", e))?;
-            t.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-                .map_err(|e| mf("NOTIFY_START_OF_STREAM", e))?;
+            decodeur
+                .transformation
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
         }
+        .map_err(|e| mf("NOTIFY_START_OF_STREAM", e))?;
         decodeur.info = info;
         decodeur.largeur = largeur;
         decodeur.hauteur = hauteur;
         Ok(decodeur)
+    }
+
+    /// Pousse UNE unité d'accès entière et rend l'image de CETTE unité, au même
+    /// appel — le contrat de `sky-partage/src/doublure.rs::DecodeurFactice`, dont
+    /// dépend la garde d'affichage. Mesuré sur le chemin matériel : au plus une
+    /// image retenue (sonde) ; prouvé ici par
+    /// `tests/media_foundation.rs::*_chaque_unite_rend_sa_propre_image_a_sa_taille`.
+    /// `Ok(None)` : l'unité n'a rendu aucune image (en-têtes seuls).
+    pub fn decoder(
+        &mut self,
+        unite: &[u8],
+        horodatage_ms: u64,
+    ) -> Result<Option<ImageMf>, ErreurDecodeur> {
+        let echantillon = echantillon_de(unite, horodatage_ms)?;
+        let mut refus = 0;
+        loop {
+            match unsafe { self.transformation.ProcessInput(0, &echantillon, 0) } {
+                Ok(()) => break,
+                Err(e) if e.code() == MF_E_NOTACCEPTING => {
+                    // Une sortie attend : la vider (elle appartient à une unité
+                    // précédente, on ne la rend pas) puis réessayer.
+                    refus += 1;
+                    if refus > 16 {
+                        return Err(mf("ProcessInput refuse toujours l'entrée", e));
+                    }
+                    while self.tirer()?.is_some() {}
+                }
+                Err(e) => return Err(mf("ProcessInput", e)),
+            }
+        }
+        let mut derniere = None;
+        while let Some(image) = self.tirer()? {
+            derniere = Some(image);
+        }
+        Ok(derniere)
+    }
+
+    /// Tire une sortie du décodeur. `Ok(None)` : il demande plus d'entrée.
+    fn tirer(&mut self) -> Result<Option<ImageMf>, ErreurDecodeur> {
+        // Au plus 4 changements de flux de suite : un décodeur qui en annonce
+        // sans fin bouclerait ici pour toujours.
+        let mut changements = 0;
+        loop {
+            // D5 : `nouveau` l'a exigé, mais un changement de flux relit ces
+            // drapeaux ; un décodeur qui cesserait de fournir ses images
+            // travaillerait en mémoire centrale.
+            if self.info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 == 0 {
+                return Err(ErreurDecodeur::MediaFoundation(
+                    "le décodeur ne fournit plus ses images : pas de décodage matériel".into(),
+                ));
+            }
+            let mut tampon = MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: 0,
+                // Le décodeur fournit ses échantillons (exigé par `nouveau`).
+                pSample: ManuallyDrop::new(None),
+                dwStatus: 0,
+                pEvents: ManuallyDrop::new(None),
+            };
+            let mut statut = 0u32;
+            let resultat = unsafe {
+                self.transformation
+                    .ProcessOutput(0, std::slice::from_mut(&mut tampon), &mut statut)
+            };
+            // Reprendre les deux références AVANT tout retour : sans ce `take`,
+            // l'échantillon et la collection d'événements fuiraient (COM).
+            let sortie = unsafe { ManuallyDrop::take(&mut tampon.pSample) };
+            drop(unsafe { ManuallyDrop::take(&mut tampon.pEvents) });
+            match resultat {
+                Ok(()) => {
+                    let echantillon = sortie.ok_or_else(|| {
+                        ErreurDecodeur::MediaFoundation(
+                            "ProcessOutput a réussi sans rendre d'échantillon".into(),
+                        )
+                    })?;
+                    return self.image_de(echantillon).map(Some);
+                }
+                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                    changements += 1;
+                    if changements > 4 {
+                        return Err(mf("changements de flux sans fin", e));
+                    }
+                    (self.largeur, self.hauteur) = choisir_sortie(&self.transformation)?;
+                    self.info = unsafe { self.transformation.GetOutputStreamInfo(0) }
+                        .map_err(|e| mf("GetOutputStreamInfo", e))?;
+                }
+                Err(e) => return Err(mf("ProcessOutput", e)),
+            }
+        }
+    }
+
+    fn image_de(&self, echantillon: IMFSample) -> Result<ImageMf, ErreurDecodeur> {
+        let tampon =
+            unsafe { echantillon.GetBufferByIndex(0) }.map_err(|e| mf("GetBufferByIndex", e))?;
+        // D5 : une image hors GPU signe un repli logiciel, jamais affiché.
+        let dxgi: IMFDXGIBuffer = tampon.cast().map_err(|_| {
+            ErreurDecodeur::MediaFoundation(
+                "image rendue en mémoire centrale : décodage logiciel refusé".into(),
+            )
+        })?;
+        let mut brut: *mut core::ffi::c_void = std::ptr::null_mut();
+        unsafe { dxgi.GetResource(&ID3D11Texture2D::IID, &mut brut) }
+            .map_err(|e| mf("IMFDXGIBuffer::GetResource", e))?;
+        // `GetResource` a réussi : `brut` porte une référence qui nous revient.
+        let texture = unsafe { ID3D11Texture2D::from_raw(brut) };
+        let tranche =
+            unsafe { dxgi.GetSubresourceIndex() }.map_err(|e| mf("GetSubresourceIndex", e))?;
+        let temps = unsafe { echantillon.GetSampleTime() }.map_err(|e| mf("GetSampleTime", e))?;
+        Ok(ImageMf {
+            largeur: self.largeur,
+            hauteur: self.hauteur,
+            // Unités de 100 ns, arrondies à la milliseconde la plus proche.
+            horodatage_ms: (temps.max(0) as u64 + 5_000) / 10_000,
+            texture,
+            tranche,
+            _echantillon: echantillon,
+        })
+    }
+}
+
+/// L'échantillon d'entrée d'une unité d'accès : une copie en mémoire centrale
+/// (le flux arrive du réseau), horodatée en unités de 100 ns.
+fn echantillon_de(unite: &[u8], horodatage_ms: u64) -> Result<IMFSample, ErreurDecodeur> {
+    let longueur = u32::try_from(unite.len()).map_err(|_| {
+        ErreurDecodeur::MediaFoundation(format!("unité d'accès démesurée ({} octets)", unite.len()))
+    })?;
+    unsafe {
+        let tampon = MFCreateMemoryBuffer(longueur).map_err(|e| mf("MFCreateMemoryBuffer", e))?;
+        let mut p: *mut u8 = std::ptr::null_mut();
+        tampon
+            .Lock(&mut p, None, None)
+            .map_err(|e| mf("IMFMediaBuffer::Lock", e))?;
+        std::ptr::copy_nonoverlapping(unite.as_ptr(), p, unite.len());
+        tampon
+            .Unlock()
+            .map_err(|e| mf("IMFMediaBuffer::Unlock", e))?;
+        tampon
+            .SetCurrentLength(longueur)
+            .map_err(|e| mf("SetCurrentLength", e))?;
+        let echantillon = MFCreateSample().map_err(|e| mf("MFCreateSample", e))?;
+        echantillon
+            .AddBuffer(&tampon)
+            .map_err(|e| mf("IMFSample::AddBuffer", e))?;
+        echantillon
+            .SetSampleTime(horodatage_ms as i64 * 10_000)
+            .map_err(|e| mf("SetSampleTime", e))?;
+        // Une image à 60 im/s : la durée n'est qu'indicative pour le décodeur.
+        echantillon
+            .SetSampleDuration(166_667)
+            .map_err(|e| mf("SetSampleDuration", e))?;
+        Ok(echantillon)
+    }
+}
+
+/// Une image décodée par Media Foundation : une tranche d'un tableau de
+/// textures NV12 lié au décodeur.
+pub struct ImageMf {
+    /// Taille d'AFFICHAGE (1080 lignes pour un flux codé sur 1088), jamais nulle.
+    pub largeur: u32,
+    pub hauteur: u32,
+    pub horodatage_ms: u64,
+    texture: ID3D11Texture2D,
+    tranche: u32,
+    /// Tant que l'échantillon vit, le décodeur ne réattribue pas la tranche.
+    _echantillon: IMFSample,
+}
+
+impl ImageMf {
+    /// Le tableau de textures NV12 du décodeur, dont l'image occupe
+    /// [`ImageMf::tranche`]. Non lisible par un nuanceur : à copier.
+    pub fn texture(&self) -> &ID3D11Texture2D {
+        &self.texture
+    }
+
+    pub fn tranche(&self) -> u32 {
+        self.tranche
+    }
+
+    /// RÉSERVÉ AUX TESTS ET AUX MESURES : copie le plan de luminance (Y) de
+    /// l'image en mémoire centrale, `largeur × hauteur` octets, ligne à ligne.
+    /// Bloque jusqu'à la fin de la copie GPU.
+    pub fn copier_luminance(&self) -> anyhow::Result<Vec<u8>> {
+        use anyhow::Context;
+        let mut source = D3D11_TEXTURE2D_DESC::default();
+        unsafe { self.texture.GetDesc(&mut source) };
+        // Une boîte qui déborde de la source fait ignorer la copie SANS erreur
+        // (Direct3D 11) : on le refuse ici plutôt que de lire des zéros.
+        anyhow::ensure!(
+            self.largeur <= source.Width && self.hauteur <= source.Height,
+            "image {}×{} plus grande que sa texture {}×{}",
+            self.largeur,
+            self.hauteur,
+            source.Width,
+            source.Height
+        );
+        let appareil = unsafe { self.texture.GetDevice() }.context("GetDevice")?;
+        let contexte = unsafe { appareil.GetImmediateContext() }.context("GetImmediateContext")?;
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: self.largeur,
+            Height: self.hauteur,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: source.Format,
+            SampleDesc: source.SampleDesc,
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            MiscFlags: 0,
+        };
+        let mut lecture: Option<ID3D11Texture2D> = None;
+        unsafe { appareil.CreateTexture2D(&desc, None, Some(&mut lecture)) }
+            .context("CreateTexture2D (lecture)")?;
+        let lecture = lecture.context("texture de lecture nulle")?;
+        let boite = D3D11_BOX {
+            left: 0,
+            top: 0,
+            front: 0,
+            right: self.largeur,
+            bottom: self.hauteur,
+            back: 1,
+        };
+        let mut carte = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            contexte.CopySubresourceRegion(
+                &lecture,
+                0,
+                0,
+                0,
+                0,
+                &self.texture,
+                self.tranche,
+                Some(&boite),
+            );
+            contexte
+                .Map(&lecture, 0, D3D11_MAP_READ, 0, Some(&mut carte))
+                .context("Map (lecture)")?;
+        }
+        let (l, h) = (self.largeur as usize, self.hauteur as usize);
+        let mut y = vec![0u8; l * h];
+        for j in 0..h {
+            let ligne = unsafe {
+                std::slice::from_raw_parts(
+                    (carte.pData as *const u8).add(j * carte.RowPitch as usize),
+                    l,
+                )
+            };
+            y[j * l..(j + 1) * l].copy_from_slice(ligne);
+        }
+        unsafe { contexte.Unmap(&lecture, 0) };
+        Ok(y)
     }
 }
 
@@ -349,6 +615,13 @@ impl DecodeurMf {
 ///
 /// Fonction libre et non méthode : pendant `nouveau`, le décodeur est encore en
 /// construction.
+///
+/// Un type qui ne dit pas sa taille est une ERREUR, pas un repli : la sonde
+/// repliait sur la taille annoncée, mais après un changement de flux la
+/// dernière taille connue est précisément celle que le flux vient de
+/// contredire. Une image de taille inventée se copierait mal (ou pas du tout :
+/// une boîte qui déborde est ignorée par Direct3D 11 sans erreur). Aucun
+/// relevé ne montre un tel type : le cas est supposé rare, jamais observé.
 fn choisir_sortie(t: &IMFTransform) -> Result<(u32, u32), ErreurDecodeur> {
     let mut vus = Vec::new();
     for i in 0.. {
@@ -358,7 +631,11 @@ fn choisir_sortie(t: &IMFTransform) -> Result<(u32, u32), ErreurDecodeur> {
         let sous_type = unsafe { ty.GetGUID(&MF_MT_SUBTYPE) }.unwrap_or_default();
         if sous_type == MFVideoFormat_NV12 {
             unsafe { t.SetOutputType(0, &ty, 0) }.map_err(|e| mf("SetOutputType(NV12)", e))?;
-            return Ok(taille_d_affichage(&ty));
+            return taille_d_affichage(&ty).ok_or_else(|| {
+                ErreurDecodeur::MediaFoundation(
+                    "le type de sortie NV12 ne porte aucune taille d'image".into(),
+                )
+            });
         }
         vus.push(format!("{sous_type:?}"));
     }
@@ -369,8 +646,9 @@ fn choisir_sortie(t: &IMFTransform) -> Result<(u32, u32), ErreurDecodeur> {
 }
 
 /// La taille d'AFFICHAGE : l'ouverture minimale si le type la porte (un flux
-/// 1080 lignes est codé sur 1088), sinon la taille de l'image.
-fn taille_d_affichage(ty: &IMFMediaType) -> (u32, u32) {
+/// 1080 lignes est codé sur 1088), sinon la taille de l'image. `None` si le
+/// type ne porte ni l'une ni l'autre (ou une taille nulle).
+fn taille_d_affichage(ty: &IMFMediaType) -> Option<(u32, u32)> {
     let mut zone = MFVideoArea::default();
     let octets = unsafe {
         std::slice::from_raw_parts_mut(
@@ -384,10 +662,11 @@ fn taille_d_affichage(ty: &IMFMediaType) -> (u32, u32) {
         && zone.Area.cx > 0
         && zone.Area.cy > 0
     {
-        return (zone.Area.cx as u32, zone.Area.cy as u32);
+        return Some((zone.Area.cx as u32, zone.Area.cy as u32));
     }
-    let taille = unsafe { ty.GetUINT64(&MF_MT_FRAME_SIZE) }.unwrap_or(0);
-    ((taille >> 32) as u32, taille as u32)
+    let taille = unsafe { ty.GetUINT64(&MF_MT_FRAME_SIZE) }.ok()?;
+    let (largeur, hauteur) = ((taille >> 32) as u32, taille as u32);
+    (largeur > 0 && hauteur > 0).then_some((largeur, hauteur))
 }
 
 #[cfg(test)]
@@ -427,6 +706,26 @@ mod tests {
         assert!(
             !mf_sait_decoder(&appareil, CodecMf::Hevc, 16384, 16384),
             "HEVC 16384×16384"
+        );
+    }
+
+    /// Constat 2 de la revue de la tâche 4 : jamais une taille nulle. Un type
+    /// qui ne porte aucune taille, ou une taille nulle, n'en donne aucune —
+    /// `choisir_sortie` en fait une erreur. Neutralisation (mesurée) : rendre
+    /// `Some((largeur, hauteur))` sans la garde `> 0` — « hauteur nulle »
+    /// rougit sur `Some((1920, 0))`.
+    #[test]
+    fn un_type_sans_taille_ne_donne_aucune_taille() {
+        let _plateforme = Plateforme::demarrer().expect("Media Foundation");
+        let ty = unsafe { MFCreateMediaType() }.expect("type");
+        assert_eq!(taille_d_affichage(&ty), None, "type sans aucune taille");
+        unsafe { ty.SetUINT64(&MF_MT_FRAME_SIZE, 1920u64 << 32) }.expect("taille");
+        assert_eq!(taille_d_affichage(&ty), None, "hauteur nulle");
+        unsafe { ty.SetUINT64(&MF_MT_FRAME_SIZE, (1920u64 << 32) | 1088) }.expect("taille");
+        assert_eq!(
+            taille_d_affichage(&ty),
+            Some((1920, 1088)),
+            "contrôle positif"
         );
     }
 
