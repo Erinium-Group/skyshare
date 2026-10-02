@@ -81,7 +81,9 @@ fn lignes_spectateur(evenement: &Evenement, sortie: &str) -> Vec<String> {
             format!("Écriture du flux reçu dans {sortie}, dès le premier paquet.\n"),
         ],
         Evenement::Mesures(Mesures::Reception(m)) => vec![format!(
-            "  {:.1} Mbps | {:.0} images/s | gigue {:.2} ms | décodage {:.2} ms | {} images écartées",
+            // « reçues » : le compte inclut les images écartées faute d'image
+            // clé, ce n'est pas une cadence d'affichage (mineur 49).
+            "  {:.1} Mbps | {:.0} images reçues/s | gigue {:.2} ms | décodage {:.2} ms | {} images écartées",
             f64::from(m.debit_kbps) / 1000.0,
             m.images_par_seconde,
             m.gigue_ms,

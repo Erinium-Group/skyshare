@@ -126,8 +126,11 @@ export function PanneauPartage({ instantane }: { instantane: Instantane }) {
           <dl className="flex gap-8">
             <Mesure libelle="Débit reçu" valeur={`${decimale(partage.debitMbps)} Mbps`} />
             {/* `imagesParS` est un entier côté cœur (`images_par_s: u64`) : pas
-                de décimale à séparer. */}
-            <Mesure libelle="Cadence" valeur={`${partage.imagesParS} images/s`} />
+                de décimale à séparer. Il compte les images REÇUES, y compris
+                celles écartées faute d'image clé — pas les images affichées.
+                Le libellé « Cadence » laissait lire une cadence d'affichage
+                (mineur 49 de la tâche 9). */}
+            <Mesure libelle="Images reçues" valeur={`${partage.imagesParS}/s`} />
             <Mesure libelle="Gigue" valeur={`${decimale(partage.gigueMs)} ms`} />
             {/* Spec du jalon 2, §8 : la latence de décodage et les images
                 abandonnées remontent jusqu'ici. */}

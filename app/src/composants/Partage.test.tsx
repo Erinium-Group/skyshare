@@ -191,7 +191,12 @@ describe("panneau de partage", () => {
     expect(screen.getByText("Connecté en 0,6 s · connexion directe, sans relais")).toBeInTheDocument();
     expect(screen.getByText(/L'image s'affiche dans la fenêtre « SkyShare — écran de Bob »/)).toBeInTheDocument();
     expect(screen.queryByText(/pas encore affichée/)).toBeNull();
-    expect(screen.getByText("107 images/s")).toBeInTheDocument();
+    // Mineur 49 : la valeur compte les images REÇUES, écartées comprises. Le
+    // libellé le dit ; « Cadence » laissait lire des images affichées.
+    // Neutralisation : remettre le libellé « Cadence » — ce test rougit.
+    expect(screen.getByText("Images reçues")).toBeInTheDocument();
+    expect(screen.queryByText("Cadence")).toBeNull();
+    expect(screen.getByText("107/s")).toBeInTheDocument();
   });
 
   it("la latence de décodage et les images écartées atteignent le panneau", () => {
@@ -244,8 +249,9 @@ describe("panneau de partage", () => {
     );
     expect(screen.getByText("12,4 Mbps")).toBeInTheDocument();
     expect(screen.getByText("5,0 ms")).toBeInTheDocument();
-    // La cadence est un entier côté cœur : aucune décimale à séparer.
-    expect(screen.getByText("107 images/s")).toBeInTheDocument();
+    // Les images reçues par seconde sont un entier côté cœur : aucune
+    // décimale à séparer.
+    expect(screen.getByText("107/s")).toBeInTheDocument();
   });
 
   it("un refus d'`arreter` s'affiche DANS LE PANNEAU, en état regarde", async () => {
