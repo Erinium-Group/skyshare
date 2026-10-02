@@ -42,9 +42,12 @@ const DEBIT_BPS: u32 = 80_000_000;
 /// décodeur de référence qui lit la même surface, donc seul l'arrondi les
 /// sépare ; celui-ci compare à la couleur SOURCE, avant encodage, et porte donc
 /// la perte de compression (et l'arrondi de la conversion RVB → YUV de NVENC).
-/// Au centre d'un quadrant uni, loin de toute frontière, cette perte est petite ;
-/// une matrice fausse (BT.709 au lieu de BT.601) ou U et V échangés déplacent
-/// un rouge ou un bleu saturé de plusieurs dizaines de niveaux.
+/// Au centre d'un quadrant uni, loin de toute frontière, cette perte est petite
+/// (relevé RTX 4060 : 1 niveau au plus). Une matrice BT.709 appliquée à ce YUV
+/// BT.601 déplacerait le canal vert d'environ 25 niveaux sur le rouge, 15 sur
+/// le bleu et 39 sur le vert — DÉDUIT par le calcul des deux matrices, non
+/// mesuré. U et V échangés, eux, sont mesurés (neutralisation N1 de la
+/// tâche 6) : le rouge devient [16, 63, 255].
 const ECART_MAX: i32 = 8;
 
 /// Les quatre couleurs, en RVB.

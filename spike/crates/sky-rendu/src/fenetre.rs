@@ -268,8 +268,11 @@ impl Fenetre {
             // Détacher autant de vues qu'on en a lié : la prochaine image réécrit
             // ces textures (par CUDA ou par une copie Direct3D), et Direct3D
             // refuse de prêter une ressource encore liée en lecture au nuanceur.
-            let detachees: Vec<Option<ID3D11ShaderResourceView>> = vec![None; vues.len()];
-            self.contexte.PSSetShaderResources(0, Some(&detachees));
+            // Un tableau fixe, découpé : aucune allocation par image. Trois
+            // places, le plus grand nombre de vues liées (le 4:4:4).
+            const DETACHEES: [Option<ID3D11ShaderResourceView>; 3] = [None, None, None];
+            self.contexte
+                .PSSetShaderResources(0, Some(&DETACHEES[..vues.len()]));
             self.contexte.OMSetRenderTargets(None, None);
         }
     }

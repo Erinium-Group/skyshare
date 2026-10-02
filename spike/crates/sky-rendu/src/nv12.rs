@@ -96,8 +96,8 @@ impl PontNv12 {
     /// `tests/couleur.rs::le_pont_nv12_suit_la_taille_de_l_image` affiche la
     /// couleur de l'image d'avant). Seul, ce refus n'est atteint par aucun test :
     /// `afficher` recrée la texture à chaque changement de taille, il ne sert
-    /// que si cette recréation casse. Le refus de la tranche n'est éprouvé par
-    /// aucun test.
+    /// que si cette recréation casse. Les deux refus ont chacun leur test
+    /// unitaire ci-dessous (ronde de correction 1).
     pub(crate) fn televerser(
         &self,
         contexte: &ID3D11DeviceContext,
@@ -174,4 +174,71 @@ fn creer_vue(
     unsafe { appareil.CreateShaderResourceView(texture, Some(&desc), Some(&mut vue)) }
         .context("CreateShaderResourceView")?;
     vue.ok_or_else(|| anyhow!("vue NV12 nulle"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image_de_test::image_de_test_nv12;
+    use crate::interop::ImageAAfficher;
+    use sky_decode::SourceImage;
+
+    /// Le périphérique de SkyShare et une image NV12 unie de test, sur lui.
+    /// Panique sans périphérique Direct3D 11 matériel : ces tests ne se
+    /// sautent pas.
+    fn texture_de_test(
+        appareil: &ID3D11Device,
+        largeur: u32,
+        hauteur: u32,
+    ) -> crate::image_de_test::ImageNv12DeTest {
+        image_de_test_nv12(appareil, largeur, hauteur, [76, 85, 255]).expect("image NV12 de test")
+    }
+
+    fn texture_de(image: &crate::image_de_test::ImageNv12DeTest) -> ID3D11Texture2D {
+        match image.source() {
+            SourceImage::Nv12 { texture, .. } => texture.clone(),
+            SourceImage::Cuda444(_) => panic!("une image NV12 de test doit être NV12"),
+        }
+    }
+
+    /// Une copie plus grande que la source est refusée : Direct3D 11 l'ignorerait
+    /// sans erreur, et l'image précédente resterait affichée (mesuré, N2b).
+    /// Neutralisation : le refus de taille retiré — ce test rougit seul.
+    #[test]
+    fn une_source_plus_petite_que_la_copie_est_refusee() {
+        let (appareil, contexte) =
+            sky_decode::creer_appareil_video().expect("périphérique Direct3D 11 matériel");
+        let pont = PontNv12::nouveau(&appareil, 128, 64).expect("texture NV12 lisible");
+        let image = texture_de_test(&appareil, 64, 64);
+        let erreur = pont
+            .televerser(&contexte, &texture_de(&image), 0)
+            .expect_err("une copie 128×64 depuis une source 64×64 doit être refusée");
+        assert!(
+            erreur
+                .to_string()
+                .contains("plus grande que la texture source"),
+            "refus attendu pour la taille, obtenu : {erreur:#}"
+        );
+    }
+
+    /// Une tranche hors du tableau source est refusée, au lieu d'une copie
+    /// d'une sous-ressource qui n'existe pas.
+    /// Neutralisation : le refus de tranche retiré — ce test rougit seul.
+    #[test]
+    fn une_tranche_hors_du_tableau_est_refusee() {
+        let (appareil, contexte) =
+            sky_decode::creer_appareil_video().expect("périphérique Direct3D 11 matériel");
+        let pont = PontNv12::nouveau(&appareil, 64, 64).expect("texture NV12 lisible");
+        let image = texture_de_test(&appareil, 64, 64);
+        let texture = texture_de(&image);
+        pont.televerser(&contexte, &texture, 0)
+            .expect("la tranche 0 d'une texture d'une tranche est valide");
+        let erreur = pont
+            .televerser(&contexte, &texture, 1)
+            .expect_err("la tranche 1 d'une texture d'une seule tranche doit être refusée");
+        assert!(
+            erreur.to_string().contains("hors d'un tableau de 1"),
+            "refus attendu pour la tranche, obtenu : {erreur:#}"
+        );
+    }
 }

@@ -32,9 +32,11 @@ pub use interop::ImageAAfficher;
 
 /// Le nombre de cartes que le pilote CUDA voit, ou 0 s'il n'est pas là.
 ///
-/// Sert aux tests à distinguer deux situations qu'un simple échec confondrait :
-/// une machine sans carte NVIDIA, où il n'y a rien à éprouver, et une machine qui
-/// en a une mais dont le chemin GPU est cassé, qui doit rougir. Recoupement utile
+/// Sert aux tests du chemin 4:4:4 (CUDA) à distinguer deux situations qu'un
+/// simple échec confondrait : une machine sans carte NVIDIA, où ce chemin
+/// n'existe pas — elle reçoit en NV12, chemin qui ne dépend pas de CUDA et dont
+/// les tests ne consultent pas cette fonction —, et une machine qui en a une
+/// mais dont le chemin CUDA est cassé, qui doit rougir. Recoupement utile
 /// aussi côté DXGI : le pilote CUDA est une source indépendante de l'énumération
 /// des adaptateurs.
 pub fn cartes_cuda_disponibles() -> i32 {
