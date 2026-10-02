@@ -820,8 +820,11 @@ impl EnvoiVideo {
     ///
     /// **Sauf si une image clé est due.** Le drapeau de NVENC ne retombe qu'à un
     /// encodage réel : sauter la capture ne perd pas l'IDR, elle le REPORTE — et
-    /// pendant ce report le spectateur continue d'afficher du faux sans le
-    /// savoir, ce que la demande existe justement pour clore.
+    /// pendant ce report le spectateur reste sur « En attente de l'image… » (sa
+    /// garde refuse d'afficher sans image clé), ce que la demande existe
+    /// justement pour clore. Ce commentaire disait « continue d'afficher du
+    /// faux » : c'est ce que la garde empêche, et la fausseté elle-même est
+    /// déduite, non mesurée.
     ///
     /// Ce report n'est probablement pas rare, et c'est une DÉDUCTION, pas une
     /// mesure : l'encodeur est configuré au plafond et jamais reconfiguré
@@ -967,8 +970,9 @@ mod tests {
 
     #[test]
     fn une_demande_d_image_cle_force_un_idr() {
-        // C'est la seule sortie de secours d'un spectateur qui affiche du faux
-        // sans le savoir : sous GOP infini, le décodeur ne signale RIEN.
+        // C'est la seule sortie de secours d'un spectateur privé d'image clé :
+        // sous GOP infini, le décodeur ne signale RIEN (mesuré), et la garde du
+        // spectateur le laisse « En attente » tant qu'elle n'arrive pas.
         let mut lien = LienFactice::nouveau();
         let mut encodeur = RepriseFactice::avec_entetes(entetes_factices());
         let mut envoi = EnvoiVideo::nouveau();
@@ -1067,8 +1071,8 @@ mod tests {
         //
         // Sauter la capture ne perd pas l'IDR, elle le REPORTE (le drapeau de
         // NVENC ne retombe qu'à un encodage réel) — et pendant ce report le
-        // spectateur affiche du faux sans le savoir : le budget ne doit donc pas
-        // pouvoir retarder l'image clé.
+        // spectateur reste « En attente » : le budget ne doit donc pas pouvoir
+        // retarder l'image clé.
         //
         // Et la dette doit s'éteindre quand l'image part : sans cela le budget
         // serait désactivé à vie et CHAQUE image deviendrait un IDR, ce qui

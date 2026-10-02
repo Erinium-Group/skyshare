@@ -193,13 +193,19 @@ pub enum Suite {
 ///
 /// # Quand a-t-on le droit d'afficher
 ///
-/// **Jamais avant une image clé, et plus du tout après un trou.** Ce n'est pas
-/// une précaution théorique : le flux est en rafraîchissement intra progressif
-/// (GOP et `idrPeriod` infinis, période de 2 s), et dans ce régime un
-/// spectateur qui n'a pas reçu d'image clé obtient **des images, mais fausses,
-/// sans que le décodeur signale la moindre erreur**. Le défaut ne se dénonce
-/// pas : il n'y a pas « rien à l'écran », il y a une image plausible et
-/// mensongère. Mesuré pendant ce jalon.
+/// **Jamais avant une image clé, et plus du tout après un trou.** Le flux est
+/// en rafraîchissement intra progressif (GOP et `idrPeriod` infinis, période de
+/// 2 s), et dans ce régime un spectateur qui n'a pas reçu d'image clé obtient
+/// **des images, sans que le décodeur signale la moindre erreur** — cela, c'est
+/// MESURÉ (`sky-decode/tests/aller_retour.rs` : NVDEC rend des images d'un flux
+/// privé de son point d'accès). Que ces images soient **fausses** est DÉDUIT de
+/// la structure du flux, pas mesuré : leurs références manquent, mais leur
+/// justesse n'a jamais été comparée à une référence (mineur 41). Sous
+/// rafraîchissement intra, elles devraient même converger au bout d'une période
+/// — supposé, non mesuré. Le défaut ne se dénoncerait pas : il n'y aurait pas
+/// « rien à l'écran », mais une image plausible et peut-être mensongère. La
+/// garde reste juste dans les deux cas ; cette note disait « mesuré pendant ce
+/// jalon » pour l'ensemble, ce qui n'était vrai que de la production.
 ///
 /// La règle est donc : on n'affiche qu'une image dont toute la chaîne de
 /// références est arrivée. Concrètement `cle_vue` s'allume sur une image clé et
@@ -457,9 +463,10 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
         self.images_decodees_fenetre += 1;
 
         if !self.cle_vue {
-            // Décodée sans erreur, et pourtant fausse : voir la note de
-            // `Visionnage`. C'est ici, et nulle part ailleurs, que le spectateur
-            // refuse d'afficher du faux sans le savoir.
+            // Décodée sans erreur (mesuré), et dont rien ne garantit la
+            // justesse (déduit, voir la note de `Visionnage`). C'est ici, et
+            // nulle part ailleurs, que le spectateur refuse d'afficher une image
+            // qu'il ne peut pas tenir pour juste.
             return Ok(self.abandonner(lien, maintenant)?);
         }
         self.afficheur.afficher(&image)?;
@@ -904,8 +911,9 @@ mod tests {
     #[test]
     fn aucune_image_ne_s_affiche_avant_une_image_cle() {
         // LE test de ce jalon. Sous rafraîchissement intra progressif, une image
-        // décodée sans sa chaîne de références est FAUSSE et le décodeur ne dit
-        // rien : le décodeur rend ici `Ok(Some(image))`, tout va bien de son
+        // décodée sans sa chaîne de références n'est pas tenue pour juste
+        // (déduit, non mesuré) et le décodeur ne dit rien (mesuré) : le
+        // décodeur rend ici `Ok(Some(image))`, tout va bien de son
         // point de vue, et c'est pourtant exactement ce qu'il ne faut pas
         // montrer. Neutralisation : retirer la garde `cle_vue` de `sur_image`.
         let t0 = Instant::now();
@@ -1168,7 +1176,8 @@ mod tests {
 
     #[test]
     fn sans_image_cle_malgre_les_demandes_le_visionnage_renonce() {
-        // I2. Le décodeur ne refuse rien — il rend des images, fausses — mais
+        // I2. Le décodeur ne refuse rien — il rend des images, dont la
+        // justesse n'est pas assurée (déduit) — mais
         // l'image clé demandée n'arrive jamais. Au-delà d'`ATTENTE_IMAGE_CLE_MAX`,
         // on renonce avec la cause de la spec §7. Le dernier événement est un
         // `Idle` : le délai court même quand l'hôte ne dit plus rien.
