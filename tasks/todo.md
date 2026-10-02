@@ -459,6 +459,22 @@ Chaque correction a son test et sa neutralisation, appliquée seule.
 - **`transit_ms` compare deux horloges d'origines différentes** (hérité, documenté) : ce n'est pas
   une latence de bout en bout. **Aucun instrument du dépôt ne mesure la latence capture → pixel.**
 
+### ⚠️ Décision du 03/10/2026 : le jalon « toutes cartes graphiques » passe avant l'essai
+
+- **La branche `jalon-2-premier-pixel` n'est PAS fusionnée.** Elle est poussée et propre. La
+  fusion était prévue après l'essai local, qui est **mis de côté** sur décision du propriétaire.
+- **Le portable du propriétaire n'a pas de carte NVIDIA**, seulement la puce graphique intégrée
+  de son processeur AMD. Sans repli logiciel, il **ne peut ni partager ni recevoir** depuis le
+  jalon 2 : il refuserait à l'ouverture avec « Cette machine n'a pas de carte graphique
+  NVIDIA ». Au C2, il recevait le flux sans le décoder, ce qui suffisait.
+- **Conséquence** : l'essai à deux machines sur deux réseaux, seul capable de clore l'écart 7,
+  ne peut plus se faire avec ce portable tel quel. Deux voies : un **mode « mesure seule »** du
+  spectateur, qui reçoit et mesure sans décoder (l'écart 7 est une question de réseau, pas de
+  couleur), ou le jalon « toutes cartes graphiques ».
+- **Le propriétaire a choisi d'ouvrir ce jalon d'abord.** Le blocage noté le 23/08 (« aucune
+  carte non-NVIDIA disponible ») est levé : le portable fournit une puce AMD réelle pour la
+  sonde.
+
 ### Laissé ouvert par la revue finale et sa vague de correction (03/10/2026)
 
 La vague de correction finale a réglé le critique et les quatre importants de la revue de
