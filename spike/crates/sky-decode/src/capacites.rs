@@ -57,6 +57,19 @@ pub enum ErreurDecodeur {
          Détail technique : {0}"
     )]
     ContexteCuda(String),
+
+    /// Aucun moteur ne sait décoder un format que SkyShare transporte : ni NVDEC
+    /// en HEVC 4:4:4, ni Media Foundation en matériel (HEVC 4:2:0 ou H.264).
+    #[error(
+        "cette machine ne sait décoder en matériel aucun des formats vidéo de SkyShare \
+         (HEVC ou H.264) : elle ne peut pas recevoir d'écran."
+    )]
+    AucunDecodeur,
+
+    /// Un appel Media Foundation a échoué, ou une image est sortie en mémoire
+    /// centrale (repli logiciel, refusé : spec D5).
+    #[error("le décodeur Media Foundation a échoué : {0}")]
+    MediaFoundation(String),
 }
 
 impl Capacites {

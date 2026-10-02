@@ -194,6 +194,12 @@ fn fin_de_visionnage(erreur: &ErreurVisionnage) -> FinVue {
             ErreurDecodeur::SessionRefusee(_) | ErreurDecodeur::ContexteCuda(_) => {
                 FinVue::DecodeurRefuse
             }
+            // PROVISOIRE (tâche 4 du sous-jalon « toutes cartes ») : les deux
+            // variantes du moteur Media Foundation n'ont pas encore leur message ;
+            // la tâche 5 le leur donne.
+            ErreurDecodeur::AucunDecodeur | ErreurDecodeur::MediaFoundation(_) => {
+                FinVue::DecodeurRefuse
+            }
             ErreurDecodeur::ResolutionTropGrande { largeur, hauteur, maximum } => {
                 FinVue::ResolutionTropGrande {
                     largeur: *largeur,

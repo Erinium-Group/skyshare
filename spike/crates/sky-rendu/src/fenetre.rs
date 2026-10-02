@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use anyhow::{anyhow, Context};
 use windows::core::{w, Interface, HSTRING};
 use windows::Win32::Foundation::{
-    GetLastError, ERROR_CLASS_ALREADY_EXISTS, HMODULE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+    GetLastError, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
@@ -21,14 +21,10 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
     D2D1_RENDER_TARGET_USAGE_NONE,
 };
-use windows::Win32::Graphics::Direct3D::{
-    D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN,
-    D3D_FEATURE_LEVEL_11_0,
-};
+use windows::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
-    D3D11_BIND_RENDER_TARGET, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
+    ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
+    D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -37,9 +33,9 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIFactory2,
-    IDXGISurface, IDXGISwapChain1, DXGI_ERROR_NOT_FOUND, DXGI_PRESENT, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGIDevice, IDXGIFactory2, IDXGISurface, IDXGISwapChain1, DXGI_PRESENT,
+    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT,
 };
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -281,7 +277,10 @@ impl Fenetre {
         if largeur == 0 || hauteur == 0 {
             return Err(anyhow!("taille de fenêtre nulle : {largeur}×{hauteur}"));
         }
-        let (appareil, contexte) = creer_appareil()?;
+        // Le périphérique unique de SkyShare (adaptateur NVIDIA d'abord, API
+        // vidéo, protection multi-fil) : c'est sur lui que décodent NVDEC, par
+        // l'interopérabilité CUDA, et Media Foundation.
+        let (appareil, contexte) = sky_decode::creer_appareil_video()?;
         let boite = Box::into_raw(Box::new(RefCell::new(Boite::default())));
         let hwnd = match creer_hwnd(titre, largeur, hauteur, boite) {
             Ok(hwnd) => hwnd,
@@ -660,94 +659,6 @@ impl Drop for Fenetre {
     }
 }
 
-/// Identifiant de fabricant PCI de NVIDIA.
-const FABRICANT_NVIDIA: u32 = 0x10DE;
-
-/// Le premier adaptateur DXGI de NVIDIA, s'il y en a un.
-fn adaptateur_nvidia() -> anyhow::Result<Option<IDXGIAdapter1>> {
-    let fabrique: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.context("fabrique DXGI")?;
-    // `EnumAdapters1` échoue avec DXGI_ERROR_NOT_FOUND une fois la liste épuisée.
-    // On ne traite QUE ce code comme une fin de liste : n'importe quelle autre
-    // erreur doit remonter. Sans ce filtre, une énumération réellement cassée
-    // rendrait `None`, ferait replier l'appareil sur l'adaptateur par défaut —
-    // possiblement l'Intel intégré — et l'interopérabilité CUDA casserait sans que
-    // rien ne le dise.
-    for indice in 0.. {
-        let adaptateur = match unsafe { fabrique.EnumAdapters1(indice) } {
-            Ok(adaptateur) => adaptateur,
-            Err(e) if e.code() == DXGI_ERROR_NOT_FOUND => break,
-            Err(e) => return Err(anyhow::Error::new(e).context("énumération des adaptateurs DXGI")),
-        };
-        let desc = unsafe { adaptateur.GetDesc1() }.context("description de l'adaptateur")?;
-        if desc.VendorId == FABRICANT_NVIDIA {
-            return Ok(Some(adaptateur));
-        }
-    }
-    Ok(None)
-}
-
-fn creer_appareil() -> anyhow::Result<(ID3D11Device, ID3D11DeviceContext)> {
-    // Pourquoi on choisit l'adaptateur au lieu de passer `None` : sur un portable
-    // à deux cartes graphiques, l'adaptateur par défaut peut être l'Intel
-    // intégré. Or l'interopérabilité CUDA exige que la texture Direct3D et la
-    // surface NVDEC vivent sur LA MÊME carte, celle de NVIDIA : sur l'Intel, la
-    // copie de périphérique à périphérique échouerait. Ne pas simplifier en `None`.
-    //
-    // Repli sur l'adaptateur par défaut quand aucune carte NVIDIA n'existe : la
-    // spec assume qu'une telle machine ne peut pas recevoir. Ce repli ne sert
-    // qu'à laisser la fenêtre s'ouvrir pour afficher un état, pas à décoder.
-    let nvidia = adaptateur_nvidia()?;
-    let (adaptateur, pilote): (Option<IDXGIAdapter>, _) = match &nvidia {
-        // Avec un adaptateur explicite, Direct3D exige le type de pilote UNKNOWN.
-        Some(a) => (Some(a.cast()?), D3D_DRIVER_TYPE_UNKNOWN),
-        None => (None, D3D_DRIVER_TYPE_HARDWARE),
-    };
-    //
-    // `ID3D10Multithread::SetMultithreadProtected` : DÉLIBÉRÉMENT PAS ACTIVÉ.
-    // Ce réglage sérialise les appels au contexte immédiat entre plusieurs fils.
-    // Il n'y a ici qu'un fil, et ce n'est pas une convention mais une propriété
-    // des types, vérifiée en demandant `Send` au compilateur, qui l'a refusé sur
-    // quatre motifs distincts : `Fenetre` porte un `HWND` (`*mut c_void`), un
-    // `*mut RefCell<Boite>` et, via `Pont`, un `*mut CUgraphicsResource_st` ;
-    // `ImageDecodee` porte un `Rc<SessionNvdec>`. Ni l'image ni la fenêtre ne
-    // peuvent donc atteindre un second fil, et la pompe de messages doit de toute
-    // façon tourner sur le fil qui a créé la fenêtre. Le verrou protégerait d'un
-    // accès concurrent que rien ne peut produire, au prix d'une prise de verrou
-    // par appel de contexte.
-    //
-    // Et il n'y a pas de contrepartie de sûreté à aller chercher : ce réglage ne
-    // sérialise que les appels à Direct3D. Le vrai risque de l'interopérabilité
-    // est ailleurs — le contexte CUDA doit être courant sur le fil appelant, ce
-    // qu'aucun verrou Direct3D ne fournit (c'est `bind_to_thread` qui s'en charge,
-    // voir `Pont::televerser`).
-    //
-    // Si un jour le décodage part sur son propre fil, ce sont ces types qui
-    // casseront d'abord, à la compilation : c'est à ce moment-là qu'on revient
-    // l'activer, pas avant.
-    let mut appareil = None;
-    let mut contexte = None;
-    unsafe {
-        D3D11CreateDevice(
-            adaptateur.as_ref(),
-            pilote,
-            HMODULE::default(),
-            // BGRA : exigé pour que Direct2D dessine sur nos textures. Pas de
-            // couche de débogage.
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&[D3D_FEATURE_LEVEL_11_0]),
-            D3D11_SDK_VERSION,
-            Some(&mut appareil),
-            None,
-            Some(&mut contexte),
-        )
-    }
-    .context("création de l'appareil Direct3D 11")?;
-    Ok((
-        appareil.ok_or_else(|| anyhow!("appareil Direct3D 11 nul"))?,
-        contexte.ok_or_else(|| anyhow!("contexte Direct3D 11 nul"))?,
-    ))
-}
-
 fn creer_cible(
     appareil: &ID3D11Device,
     fabrique_d2d: &ID2D1Factory,
@@ -907,7 +818,6 @@ unsafe extern "system" fn procedure(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::Graphics::Dxgi::IDXGIAdapter;
     use windows::Win32::UI::WindowsAndMessaging::{
         IsWindowVisible, SetWindowPos, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
     };
@@ -1131,36 +1041,5 @@ mod tests {
         assert!(a_son_cadre(&fenetre));
         assert_eq!(fenetre.taille(), avant);
         assert!(!unsafe { IsWindowVisible(fenetre.hwnd) }.as_bool());
-    }
-
-    /// L'appareil doit vivre sur la carte NVIDIA quand il y en a une : c'est ce
-    /// qui rend possible l'interopérabilité CUDA de la tâche suivante.
-    #[test]
-    fn l_appareil_vit_sur_la_carte_nvidia_quand_il_y_en_a_une() {
-        let nvidia = adaptateur_nvidia().expect("énumération DXGI");
-        // Recoupement par une source indépendante de DXGI : le pilote CUDA. Sans
-        // lui, un `None` venu d'une énumération cassée ferait sortir ce test en
-        // silence — c'est-à-dire exactement dans le cas qu'il doit attraper. Les
-        // deux sources doivent s'accorder.
-        let cartes_cuda = crate::cartes_cuda_disponibles();
-        assert_eq!(
-            nvidia.is_some(),
-            cartes_cuda > 0,
-            "DXGI et le pilote CUDA ne s'accordent pas sur la présence d'une carte NVIDIA \
-             (DXGI : {:?}, cartes CUDA : {cartes_cuda})",
-            nvidia.is_some()
-        );
-        if nvidia.is_none() {
-            println!("pas de carte NVIDIA sur cette machine : repli légitime, rien à prouver");
-            return;
-        }
-        let fenetre = ouvrir_pour_test(320, 200);
-        let dxgi: IDXGIDevice = fenetre.appareil().cast().expect("IDXGIDevice");
-        let adaptateur: IDXGIAdapter = unsafe { dxgi.GetAdapter() }.expect("adaptateur");
-        let desc = unsafe { adaptateur.GetDesc() }.expect("description");
-        assert_eq!(
-            desc.VendorId, FABRICANT_NVIDIA,
-            "l'appareil n'est pas sur la carte NVIDIA"
-        );
     }
 }
