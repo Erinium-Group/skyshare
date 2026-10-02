@@ -124,7 +124,7 @@ jalon ; le sixième sur une recherche documentaire, sans matériel de test.
 |---|-------|------|
 | 0 | Faisabilité (capture + encode + P2P) | ✅ **TERMINÉ — GO ferme. 6/6 questions closes, M4 et M1 mesurées le 23/08 sur réseaux réels** |
 | 1 | Fondations (Discord, amis, listes) | à faire — porte la décision **D2** (annuaire de clés) |
-| 2 | Premier pixel (partage 1-à-1) | à faire — doit traiter les écarts **3** et **5**, et porte la décision **D1** |
+| 2 | Premier pixel (partage 1-à-1) | **implémenté** (tâches 1 à 10, branche `jalon-2-premier-pixel`) — essai local, mesure du décodage pendant un encodage et essai à deux machines **dus**. Écart **3** traité ; écart **5** reporté au jalon 3 ; D1 hors périmètre (voir section « Jalon 2 ») |
 | 3 | Qualité (simulcast, profils) | à faire — bloqué sur l'écart **5** (reconfiguration de débit à chaud) |
 | 4 | Lecteur (multi-flux, zoom, audio) | à faire |
 | 5 | Public (liens, salle d'attente) | à faire |
@@ -147,8 +147,11 @@ Capture à **164,3 im/s** (rapport 0,99 au taux d'écran), CPU de la chaîne à 
   (2611/16349). Le canal de données est conçu pour des messages, pas pour un flux temps
   réel. Comparer aux **pistes média** de WebRTC — ce qui rouvre la décision de
   bibliothèque, `str0m` contre `webrtc-rs` (spec §2, décision 3).
-- **Repli logiciel x264** — le spike n'implémente que NVENC. Une machine sans carte
-  NVIDIA ne peut pas émettre, seulement recevoir. Constaté en conditions réelles.
+- **Repli logiciel x264** — le spike n'implémente que NVENC. ~~Une machine sans carte
+  NVIDIA ne peut pas émettre, seulement recevoir.~~ *Corrigé le 02/10/2026 : faux depuis le
+  jalon 2, qui décode par NVDEC sans aucun repli logiciel. Sans carte NVIDIA, une machine ne
+  peut **ni émettre ni recevoir** ; une NVIDIA antérieure à Turing peut émettre, pas recevoir
+  (spec du jalon 2, §7). Même phrase que celle corrigée dans `CLAUDE.md` le 30/09.*
 
 ---
 
@@ -251,7 +254,8 @@ arbitrage : `.superpowers/sdd/2026-09-19-jalon-1-application/progress.md` (hors 
 
 ### Limites connues, assumées
 - **Aucune image** : « Regarder » montre la connexion et ses mesures, le flux est mesuré puis jeté (spec D2).
-  L'image arrive au jalon 2, avec le transport corrigé (écart 7).
+  L'image arrive au jalon 2, avec le transport corrigé (écart 7). *Vrai au jalon 1 ; **faux depuis le jalon 2**,
+  dont le spectateur décode et affiche dans une fenêtre native.*
 - **Application non signée** : avertissement « éditeur inconnu » à l'installation (signature : jalon 6).
 - **`sky-probe` en profil `debug` ouvre un coffre vide** : le lancer en `--release` pour retrouver l'identité
   réelle, sinon il enregistrerait un second appareil sur le compte.
@@ -278,18 +282,273 @@ arbitrage : `.superpowers/sdd/2026-09-19-jalon-1-application/progress.md` (hors 
 
 ---
 
-## Jalon 2 — le premier pixel — en cadrage
+## Jalon 2 — le premier pixel — implémenté, essais dus
 
-Afficher réellement l'image chez le spectateur. Deux sondes de faisabilité ont été lancées **avant**
-d'écrire la spec, parce que deux des trois inconnues du jalon ne reposaient sur aucune mesure.
-Résultats complets, avec ce qui est mesuré et ce qui ne l'est pas :
+Branche `jalon-2-premier-pixel`, **non fusionnée**. Spec :
+`docs/superpowers/specs/2026-09-30-jalon-2-premier-pixel-design.md` (corrigée le 02/10, neuf points
+signalés sur place). Plan : `docs/superpowers/plans/2026-09-30-jalon-2-premier-pixel.md` (12 tâches).
+Journal détaillé : `.superpowers/sdd/2026-09-30-jalon-2-premier-pixel/progress.md` — **ignoré par
+git** ; tout ce qui doit survivre à la fusion est recopié ci-dessous. Fiche d'essai pour le
+propriétaire : `spike/docs/essai-jalon-2.md`.
+
+### ⚠️ À lire avant l'essai
+
+**1. Trois textes affichés à l'utilisateur ne viennent pas de la spec — à valider par le propriétaire**
+(`app/src/messages.ts`, chacun marqué « TEXTE NOUVEAU » sur son `case`). Jugés honnêtes par la
+re-revue de la tâche 10 : aucun ne désigne une fausse cause.
+- `partage_arrete` : « Ton ami a arrêté son partage. »
+- `resolution_trop_grande` : « Le décodeur vidéo de cette carte graphique s'arrête à
+  ${largeurMax}×${hauteurMax} : SkyShare a besoin d'au moins ${largeur}×${hauteur} pour recevoir
+  un écran sur cette machine. »
+- `decodage_interrompu` : « Le décodage de l'image s'est interrompu en cours de visionnage, malgré
+  les demandes de reprise. Relance le visionnage ; si cela se reproduit, demande à ton ami de
+  relancer son partage. » — réserve de la re-revue : les demandes de reprise sont espacées d'une
+  seconde, donc sur un enchaînement rapide de refus il y en a peu.
+- Également signalé : l'interface **tutoie**, la spec §7 **vouvoie** (c'est la spec qui détonne).
+
+**2. Le régulateur est bloqué au plafond sur le chemin nominal.** Depuis la migration vers la piste
+média, l'hôte n'a **plus aucune mesure de RTT** : il passe un zéro en dur au `Pacer`
+(`sky-partage/src/hote.rs:434`), l'écho du canal de données ayant disparu et RTCP n'étant lu par
+personne. La perte n'est plus visible qu'à travers les **refus de la file de paquetisation** — 0 sur
+21552 écritures mesurées à 100 Mbps. Sur ce chemin nominal mesuré, `congestionne` reste faux et le
+débit monte de 8 % par tic jusqu'au plafond, **et n'en redescend pas**. **Ce n'est pas structurel** :
+`SEUIL_PERTE` valant 2 %, un seul refus dans une fenêtre de moins de cinquante images suffit à
+faire détecter une congestion. **C'est la première chose à regarder si l'image se dégrade pendant
+l'essai à deux machines.** Corollaire visible au terminal : la colonne « RTT » des lignes de mesure
+de `sky-probe host` affiche **0,0 ms en dur**, ce n'est pas une mesure.
+
+**3. Dette de vérifiabilité : la preuve du décodage n'est rejouable que sur la machine du
+propriétaire.** Les tests de `sky-decode` lisent `spike/cmp-hevc-444.h265` (17,5 Mo) jusqu'à
+l'image 120, et ce fichier est **exclu par `spike/.gitignore`**. Un extrait ne suffirait pas (il
+faudrait plusieurs mégaoctets). Le test de transport de la tâche 6, lui, versionne son extrait de
+63 003 octets (`.gitattributes -text`, vérifié).
+
+**4. L'essai à deux machines sur deux réseaux reste dû.** Seul lui peut clore l'**écart 7** : le RTT
+ne se mesure pas en boucle locale. Il exige désormais une **NVIDIA Turing ou plus récente des deux
+côtés** — sans NVDEC, une machine ne peut plus regarder (le mode d'emploi du C2,
+`spike/docs/essai-reel-c2.md`, dit encore « n'importe laquelle » pour le spectateur : vrai au C2,
+faux pour le jalon 2).
+
+### Ce qui est fait — tâches 1 à 10, chacune relue et corrigée jusqu'à revue propre
+
+Au terme de la tâche 10 : `cargo test --workspace --no-fail-fast` **420 réussis, 0 échec**, Vitest
+**97**, clippy et `tsc` propres, `tauri build` réussi (manifeste `PerMonitorV2` vérifié présent dans
+`sky-app.exe`). Tout est poussé sur la branche (dernier : `516685b`).
+
+- [x] **T1 — sonde matérielle du décodeur** (`sky-decode`, `bd37dd2..af59c2f`) : verdict des
+  capacités testable sans GPU ; absence de pilote vérifiée par `nvcuda.dll` **avant** `cudarc`, sans
+  `catch_unwind`.
+- [x] **T2 — décodage NVDEC** (`af59c2f..f164832`, 3 rondes) : **85,50 dB** contre la référence,
+  écart maximal 1 niveau ; neutralisations BT.709 → 36,13 dB, 4:2:0 → 15,06 dB. Aller-retour
+  encodage → décodage en 1920×1080 : **0 pixel mal classé sur 2 073 600** — la surface mappée suit
+  `ulTargetHeight`, pas `coded_height` (une revue avait conclu l'inverse ; la mesure l'a réfuté).
+- [x] **T3 — fenêtre native** (`sky-rendu`, `f164832..99d0b70`) : trois états sans image aux fonds
+  distincts, adaptateur NVIDIA (`0x10DE`) choisi explicitement.
+- [x] **T4 — affichage GPU** (`99d0b70..276527e`, 2 rondes) : interopérabilité CUDA–D3D11, BT.601
+  pleine échelle, couleurs à 1 niveau près ; test sur une vraie surface NVDEC.
+- [x] **T5 — canal de données réduit au contrôle** (`sky-net`, `276527e..797e388`, 2 rondes) :
+  `MessageControle`, canal passé en `Reliability::Reliable`.
+- [x] **T6 — piste média HEVC** (`797e388..7d5793d`, 2 rondes) : profil **Main 4:4:4** annoncé et
+  prouvé par la réponse SDP (le transport, lui, passe intact sous un profil menteur) ;
+  `WriteWithoutPoll` traité comme récupérable ; `sans_perte` exposé.
+- [x] **T7 — en-têtes de séquence et image clé forcée** (`sky-encode`, `7d5793d..f5a79b4`, 2 rondes) :
+  NVDEC consomme les en-têtes de `nvEncGetSequenceParams` (0 image sur 9 paquets sans eux, au moins
+  une avec — HEVC 4:4:4, 1080p, RTX 4060 seulement).
+- [x] **T8 — hôte sur la piste média** (`f5a79b4..67765fc`, **4 rondes**) : en-têtes joints au premier
+  envoi, image clé à la demande non reportable par le budget, annonce de l'arrêt couverte par
+  construction (`en_annoncant_l_arret`), API transitoire `envoyer_octets_bruts` retirée.
+- [x] **T9 — le spectateur décode et affiche** (`67765fc..5618c16`, 1 ronde) : n'affiche jamais avant
+  une image clé, reprise après perte, demandes d'image clé limitées à une par seconde, pause sur
+  inactivité (la boucle active brûlait un cœur).
+- [x] **T10 — fenêtre dans l'application, messages du décodage** (`5618c16..516685b`, 1 ronde) :
+  `Fin::PartageArrete` (un arrêt annoncé n'est plus un « ÉCHEC »), `DecodageInterrompu` distinct des
+  erreurs d'ouverture, F11 transactionnel (un échec ne coupe plus le visionnage), conscience DPI par
+  manifeste.
+
+### Ce qui reste dû
+- [ ] **Tâche 11 — essai local** : premier regard humain sur l'image. **Premier geste : lancer
+  l'application empaquetée, qui n'a jamais démarré avec son nouveau manifeste** (un manifeste
+  invalide bloquerait le démarrage). Puis couleur, netteté à 150 %, trois états, F11.
+  **Obstacle relevé à la tâche 12, déduit du code et jamais essayé** : la commande du plan
+  `view <nom-de-l-appareil>` ne peut pas marcher — `view` ne regarde qu'un **ami**
+  (`sky-compte/src/annuaire.rs:781`) et une build `--release` n'a qu'une identité par machine.
+  Hôte et spectateur sur une même machine exigent une seconde identité, donc le coffre `debug` avec
+  le second compte Discord : montage proposé dans la fiche, **à accepter par le propriétaire**.
+- [ ] **Tâche 12, volet mesure — décodage pendant un encodage** (hôte et spectateur simultanés sur
+  la même machine, 60 s, `nvidia-smi dmon`). Si cela ne tient pas, l'écrire dans les limites ici
+  **et** dans `CLAUDE.md`.
+- [ ] Écrire les deux résultats dans `spike/docs/mesures-jalon-2.md` (fichier prévu par le plan,
+  pas encore créé).
+- [ ] **Essai à deux machines sur deux réseaux** — clôt l'écart 7 (voir ci-dessus).
+- [ ] Revue finale de branche, puis fusion sur décision du propriétaire.
+- [ ] Le plan n'a **pas** été corrigé (la spec et la note l'ont été) : il porte encore `npx tauri
+  build`, `Encodeur`/`encoder`, `LinkEvent::Disconnected`, le chiffre « 19–20 dB » et une
+  neutralisation inopérante (amputer le **premier** octet d'une unité d'accès ne discrimine pas :
+  `next_start_code` accepte trois ou quatre octets, `str0m` `h265.rs:331-334`). Document
+  historique ; à corriger ou à marquer comme tel.
+- [ ] **Double non corrigé du chiffre « 19–20 dB », dans du code** : l'en-tête de
+  `spike/crates/sky-decode/tests/reference.rs:3-4` affirme encore qu'« une conversion 4:2:0
+  parasite fait perdre 19 à 20 dB ». Trouvé en cherchant les doubles à la tâche 12, qui ne touche
+  pas au code : à corriger (15,06 dB absolus mesurés, voir la spec §2).
+
+### Limites connues, écrites d'avance
+- **Un seul spectateur, un écran, pas de son** ; déchirement possible (présentation sans attente de
+  synchronisation verticale, D7).
+- **Sans NVIDIA : ni diffusion ni réception.** NVIDIA antérieure à Turing : diffusion seulement.
+- **Un spectateur sans image clé verrait une image faussement plausible**, sans erreur du décodeur
+  (rafraîchissement intra progressif). Le garde-fou est applicatif, dans `spectateur.rs`.
+- **L'aller-retour décodage n'est éprouvé qu'en 1440 et 1080**, deux multiples de 8 ; l'en-tête
+  n'exige qu'un alignement sur 2, donc une hauteur comme 1050 n'est couverte ni par la mesure ni par
+  la documentation.
+- **Consigne absolue pendant tout essai : jamais `RUST_LOG="str0m=debug"`** (adresses en clair).
+- Constantes **choisies, non mesurées** : `ATTENTE_IMAGE_CLE_MAX` = 10 s,
+  `ECHECS_DECODAGE_AVANT_ABANDON` = 120, `DRAINAGE_ARRET` = 50 ms ; effet de la pause sur inactivité
+  (1 ms demandée, ~15 ms réelles sous Windows) sur la latence : non mesuré.
+- **`transit_ms` compare deux horloges d'origines différentes** (hérité, documenté) : ce n'est pas
+  une latence de bout en bout. **Aucun instrument du dépôt ne mesure la latence capture → pixel.**
+
+### Mineurs reportés, recopiés du journal (62 constats, tâche par tâche)
+
+Recopiés parce que le journal est ignoré par git. « Soldé » signifie qu'une tâche ultérieure l'a
+traité selon le journal ou le code ; tous les autres sont **ouverts**.
+
+**Tâche 1 — `sky-decode`, sonde matérielle**
+1. `#[allow(dead_code)]` posé sur tout `nvcuvid_sys.rs` au lieu des seuls éléments concernés.
+2. `Capacites` dérive `Clone` sans en avoir besoin (seul `Debug` est exigé par `expect_err`).
+3. Le test de sonde matérielle accepte toute erreur, `SessionRefusee` comprise : une régression du
+   matériel ou du pilote resterait verte.
+4. Le message de `SessionRefusee` parle d'une « session » alors qu'il peut naître d'un simple appel
+   de capacités (`cuvidGetDecoderCaps`).
+5. Les pointeurs de fonction FFI rendent l'énumération Rust `CUresult` : un code inconnu renvoyé par
+   le pilote serait un comportement indéfini.
+6. `depuis_brut` ignore `eCodecType`, `eChromaFormat` et `nBitDepthMinus8` : les lignes de fixture
+   correspondantes ne testent rien.
+7. `anyhow` et `windows` sont déclarés dans `sky-decode` sans être utilisés (prescrits par le brief).
+8. `le_pilote_cuda_se_charge_sur_cette_machine` échoue sur une machine sans NVIDIA — voulu, à revoir
+   si une intégration continue sans GPU apparaît.
+9. Le message d'`AucuneCarteNvidia` incorpore un texte de `libloading` possiblement traduit par
+   Windows. **Soldé** : l'interface se branche sur la variante, jamais sur le texte (`messages.ts`).
+
+**Tâche 2 — `sky-decode`, décodage**
+10. Aucun vidage `CUVID_PKT_ENDOFSTREAM` : les dernières images d'un flux borné peuvent rester dans
+    le décodeur. Sans effet sur un flux vivant.
+11. `unites_acces` découpe des NAL, pas des unités d'accès : nom trompeur.
+12. Le test de référence retient 1,34 Go en mémoire.
+13. Le `allow(dead_code)` de `nvcuvid_sys.rs` est devenu obsolète.
+14. `ulErrorThreshold = 0` rend une corruption indiscernable d'un en-tête — à reprendre avec
+    l'écart 7.
+15. `display_area` est rétréci en `i16`.
+16. La saturation des quatre surfaces de sortie n'est pas exercée ; son issue documentée inclut un
+    **blocage du fil appelant**, et un test qui peut figer la suite a été refusé à raison.
+17. `cargo fmt --all --check` échoue sur du code **préexistant** (`sky-app`, `sky-encode`) : dette
+    d'outillage hors jalon, à signaler à la revue finale.
+18. Le test d'aller-retour dépend du `coded_height` choisi par NVENC ; sa garde de pertinence doit
+    le signaler si NVENC change d'avis.
+
+**Tâche 3 — `sky-rendu`, fenêtre**
+19. Un échec de `redimensionner` est avalé sans commentaire (`fenetre.rs:391` à l'époque).
+20. Le commentaire « échec = intact » est faux pour la chaîne d'échange (`fenetre.rs:532` à l'époque).
+21. L'image est étirée pendant le glissement du bord, la boucle de redimensionnement de Windows étant
+    modale (`fenetre.rs:381` à l'époque).
+22. `ouvrir` montre une fenêtre vide avant le premier `afficher_etat` (`fenetre.rs:431` à l'époque).
+23. Aucune assertion sur `IsWindowVisible == false` pour la fenêtre masquée des tests.
+24. Le `Drop` de la fenêtre n'appelle ni `ClearState` ni `Flush`.
+25. `let Ok(..) else { break }` sur `EnumAdapters1` traitait toute erreur comme une fin de liste
+    (repli silencieux possible sur l'Intel). **Soldé** à la tâche 4.
+26. Le test d'adaptateur sortait en silence si `adaptateur_nvidia()` rendait `None` à tort. **Soldé**
+    à la tâche 4.
+
+**Tâche 4 — `sky-rendu`, interopérabilité CUDA–D3D11**
+27. `desenregistrer` ignore en silence l'échec de `bind_to_thread` (hérité, documenté).
+28. Le test du descripteur de copie n'assertait pas l'absence de `srcArray`/`dstDevice`. **Soldé** à
+    la ronde 2 (et mesuré : le pilote ignore ces champs).
+29. `D3DCompile` est appelé à chaque ouverture de fenêtre.
+30. Le filtrage linéaire a été choisi sans mesure de qualité perçue.
+31. Le périphérique CUDA 0 est codé en dur — comme dans `sky-decode` : à traiter dans les deux crates
+    ou dans aucun.
+
+**Tâche 5 — `sky-net`, canal de contrôle**
+32. Un échec non reproduit : deux tests ont dépassé 10 s à l'ouverture du canal, une fois. Attribué
+    sans preuve à un démarrage à froid, hypothèse ensuite écartée. Si cela revient, c'est un test
+    instable, pas du bruit.
+33. `messages_illisibles()` n'a toujours aucun appelant de production (tests seulement) ;
+    `envoyer_controle`, lui, est désormais branché par l'hôte et le spectateur.
+34. Stabilité sous charge non exercée ; délai de retransmission SCTP de `str0m` ni mesuré ni lu.
+35. **À surveiller** : une exécution sur cinq a pris 4,5 s au lieu de 0,5 s en réussissant ; le
+    `sleep` d'1 ms n'est pas prouvé être le remède. Les helpers `pomper_*` n'ont que 5 s de marge
+    contre 10 s pour `paire_connectee` : si l'instabilité revient, c'est là qu'elle frappera, et il
+    faudra instrumenter le temps d'ouverture du canal avant de régler quoi que ce soit.
+
+**Tâche 6 — `sky-net`, piste média**
+36. Un `to_vec()` par image reçue.
+37. Le nom `PROFIL_MAIN_444` face à l'appellation officielle *Format Range Extensions*.
+38. Désalignement entre `wallclock` et `rtp_time` (`link.rs:783` à l'époque).
+39. Le test de `sans_perte` a une assertion faible : rien ne se perd en boucle locale, il vérifie le
+    **câblage**, pas la **détection**. La détection réelle ne se prouvera qu'à l'essai à deux machines.
+
+**Tâche 7 — `sky-encode`, en-têtes et image clé**
+40. Sans NVIDIA, les trois tests de `sky-decode` **paniquent** là où ceux de `sky-encode` sortent en
+    silence : asymétrie à trancher si une intégration continue sans GPU apparaît.
+41. La **justesse** de l'image rendue après une image P orpheline n'est pas mesurée : les tests
+    mesurent la production d'images, pas leur exactitude. Mesure suggérée : image rendue après IDR
+    forcé contre après P orphelin.
+
+**Tâche 8 — `sky-partage`, hôte**
+42. En-têtes doublés sur le premier paquet (licite : le premier paquet est un IDR qui porte déjà les
+    siens).
+43. Le signal `arret` n'est pas consulté pendant la relance d'une écriture refusée ni pendant le
+    drainage.
+44. La documentation d'`entetes_a_joindre` décrit un cas impossible.
+45. La fenêtre du `Pacer` est modifiée de l'extérieur.
+46. Les 50 ms de `DRAINAGE_ARRET` ne sont pas vérifiées ; l'abrègement du drainage n'est prouvé que
+    sur doublure, et sur un vrai lien l'événement de déconnexion est déjà consommé quand l'annonce
+    démarre.
+47. Une sortie d'`etablir` en `Fin::Arrete` avant `diffuser` n'annonce rien : jugé non-problème (canal
+    pas encore ouvert, rien d'affiché chez le spectateur), à documenter seulement.
+48. L'enveloppe `en_annoncant_l_arret` ne couvre ni une panique ni un `return` qu'on ajouterait
+    **avant** elle : « structurellement difficile à oublier », pas « impossible ».
+
+**Tâche 9 — `sky-partage`, spectateur**
+49. `images_par_seconde` compte les images **reçues**, pas les images affichées — la valeur
+    « images/s » de `sky-probe view` est donc celle des arrivées.
+50. `latence_decodage_ms` n'est pas testée (c'est une **moyenne** par relevé, pas une médiane).
+51. Le `flush` du fichier de sortie est sauté sur les sorties par `?`.
+52. Des accesseurs publics ne servent qu'aux tests.
+53. Le test d'absence d'adresse cherche la sous-chaîne « ip » : source de faux positifs futurs.
+54. **À vérifier à l'essai local** : si une unité d'image clé arrive **sans en-têtes exploitables**,
+    `cle_vue` devient vrai, `Ok(None)` ne déclenche aucune demande et le délai d'abandon ne démarre
+    pas — attente muette possible. Ce n'est pas le scénario du critique C1 (une unité perdue entière
+    donne `sans_perte == false`) et ce n'est pas vérifiable sans carte graphique.
+55. Sur le chemin d'erreur du décodage, la demande d'image clé est appelée deux fois par unité, sans
+    effet grâce à la limitation.
+
+**Tâche 10 — `sky-app`, `app/`, fenêtre dans l'application**
+56. La fenêtre s'ouvre à 1280×720 **pixels physiques** : petite à 200 %.
+57. Le changement de DPI quand on déplace la fenêtre d'un écran à l'autre n'est pas traité.
+58. Pas de sortie du plein écran par Échap.
+59. L'ouverture du décodeur dans `regarder` n'est protégée ni par le type ni par un test (relevé deux
+    fois au journal, fusionné ici).
+60. L'interface tutoie, la spec vouvoie (c'est la spec qui détonne).
+61. Le test du F11 raté court-circuite l'appel Windows : il prouve la logique de retour arrière, pas
+    l'état réel laissé par un `SetWindowPos` en échec.
+62. L'échec de F11 n'a plus aucun témoin (assumé, documenté).
+
+---
+
+### Cadrage d'origine (27/09/2026), conservé pour l'historique
+
+Deux sondes de faisabilité ont été lancées **avant** d'écrire la spec, parce que deux des trois
+inconnues du jalon ne reposaient sur aucune mesure. Résultats complets :
 `docs/superpowers/notes/2026-09-27-sondes-jalon-2-decodage-et-transport.md`.
 
-### Tranché sur mesure (27/09/2026)
+#### Tranché sur mesure (27/09/2026)
 - [x] **NVDEC décode notre HEVC 4:4:4.** 901 images sur 901, **569 im/s**, latence **1,57 ms médiane**
   (p99 3,39 ms), 8,2 % d'un cœur, décodeur à ~89 %. Justesse contre la référence du jalon 0 :
   **89,78 dB, 99,979 % de pixels identiques**. Le 4:4:4 est préservé, prouvé de trois façons dont une
   discriminante (un aller-retour 4:2:0 forcé perd 19–20 dB et altère 14 % des échantillons).
+  *Corrigé le 02/10/2026 : « perd 19–20 dB » est faux — c'est un plancher absolu, pas un écart ; la
+  neutralisation mesurée donne 15,06 dB absolus. Le test de `sky-decode` mesure 85,50 dB par un
+  autre chemin de conversion. Détail dans la note et la spec §2.*
   - **Le flux est en BT.601 pleine échelle, pas BT.709** (BT.709 plafonne à 36 dB). À porter dans le
     code de rendu, avec le chiffre en commentaire.
   - Piège écarté : mpv en `--hwdec=nvdec` **se replie silencieusement sur le logiciel** sur ce flux.
