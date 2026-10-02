@@ -22,3 +22,10 @@ windows = { version = "0.62", features = ["Win32_Graphics_Direct3D11"] }
 # publique voyage en base64 standard — la forme que rend le site.
 [dev-dependencies]
 base64.workspace = true
+# Le test de `hote::Retenue` crée son propre périphérique Direct3D 11 et relit
+# une texture : sans fenêtre ni capture d'écran.
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
+] }

@@ -15,7 +15,9 @@ use sky_compte::{deposer, relever, Coffre, Config, ErreurCompte, Etat};
 use sky_crypto::Identity;
 use sky_encode::{nvenc::NvencEncoder, Codec};
 use sky_net::{ErreurEnvoi, LinkEvent, MessageControle, Pacer, PeerLink};
-use windows::Win32::Graphics::Direct3D11::ID3D11Device;
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_TEXTURE2D_DESC,
+};
 
 use crate::arret::{synchroniser_sauf_arret, Arret, ErreurAttente, HorlogeArretable};
 use crate::etablissement::{etablir, Etablissement};
@@ -104,6 +106,109 @@ pub trait Images {
 
 /// Fabrique la source synthétique sur le device de la capture.
 pub type FabriqueSynthetique = fn(&ID3D11Device, u32, u32) -> anyhow::Result<Box<dyn Images>>;
+
+/// Ce que la boucle encode à chaque tour quand la source est l'écran.
+///
+/// La capture Windows ne livre une image **que quand l'écran change**. Deux
+/// défauts en naissaient, et cette structure les ferme :
+///
+/// - **la première image ne servait qu'à lire la taille**, puis était jetée :
+///   sur un écran figé au lancement, rien n'était encodé, et le spectateur
+///   attendait sans fin, sans même que son délai d'abandon soit armé ;
+/// - **une image clé demandée n'était honorée qu'à la prochaine capture** : après
+///   une perte suivie de dix secondes d'écran figé (un hôte qui lit), le
+///   spectateur renonçait sur « relancer le partage » sans défaut réel.
+///
+/// La règle : chaque image capturée est **retenue** (copiée, voir [`Retenue`]) ;
+/// quand aucune image neuve n'arrive, on ré-encode la retenue si la première n'a
+/// pas encore été encodée, ou si une image clé est due. Sinon, rien : un écran
+/// figé ne coûte toujours aucun encodage.
+///
+/// Générique sur l'image pour être éprouvé sans GPU ; `diffuser` l'emploie avec
+/// `CapturedFrame`.
+struct ImagesEcran<I> {
+    retenue: I,
+    premiere_due: bool,
+}
+
+impl<I: Clone> ImagesEcran<I> {
+    /// `premiere` doit déjà être une copie possédée : c'est elle qui sera
+    /// encodée si l'écran ne bouge plus.
+    fn depuis_premiere(premiere: I) -> ImagesEcran<I> {
+        ImagesEcran { retenue: premiere, premiere_due: true }
+    }
+
+    /// L'image à encoder ce tour-ci, s'il y en a une.
+    ///
+    /// `image_cle_due` doit être lu APRÈS l'attente de capture du tour : une
+    /// demande arrivée pendant cette attente doit être honorée au tour même.
+    fn a_encoder(
+        &mut self,
+        neuve: Option<I>,
+        image_cle_due: bool,
+        retenir: impl FnOnce(&I) -> anyhow::Result<I>,
+    ) -> anyhow::Result<Option<I>> {
+        match neuve {
+            Some(image) => {
+                // Retenue même si le budget fait sauter ce tour : l'image clé
+                // suivante doit montrer l'écran tel qu'il est, pas tel qu'il
+                // était à la dernière image encodée.
+                self.retenue = retenir(&image)?;
+                self.premiere_due = false;
+                Ok(Some(image))
+            }
+            None if self.premiere_due || image_cle_due => {
+                self.premiere_due = false;
+                Ok(Some(self.retenue.clone()))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+/// Une copie possédée de la dernière image capturée.
+///
+/// La texture que rend `WgcCapture::next_frame` appartient au pool de capture,
+/// qui peut la réécrire dès la capture suivante : la garder par référence ne
+/// garderait pas l'image. On la copie donc, GPU à GPU, dans une texture créée
+/// une fois et réécrite à chaque capture — rien ne passe par la mémoire
+/// centrale. Le coût n'est pas mesuré : une copie de ~14 Mo en mémoire vidéo
+/// par image capturée en 2560×1440.
+struct Retenue {
+    appareil: ID3D11Device,
+    contexte: ID3D11DeviceContext,
+    copie: Option<ID3D11Texture2D>,
+}
+
+impl Retenue {
+    fn nouvelle(appareil: &ID3D11Device) -> anyhow::Result<Retenue> {
+        let contexte = unsafe { appareil.GetImmediateContext() }?;
+        Ok(Retenue { appareil: appareil.clone(), contexte, copie: None })
+    }
+
+    fn retenir(&mut self, image: &CapturedFrame) -> anyhow::Result<CapturedFrame> {
+        let copie = match &self.copie {
+            Some(copie) => copie.clone(),
+            None => {
+                let mut description = D3D11_TEXTURE2D_DESC::default();
+                unsafe { image.texture.GetDesc(&mut description) };
+                // Une texture ordinaire du même format et de la même taille :
+                // rien de ce qui rend la texture de capture partageable ou
+                // lisible par le processeur ne sert ici.
+                description.MiscFlags = 0;
+                description.CPUAccessFlags = 0;
+                let mut texture: Option<ID3D11Texture2D> = None;
+                unsafe { self.appareil.CreateTexture2D(&description, None, Some(&mut texture)) }?;
+                let texture =
+                    texture.ok_or_else(|| anyhow::anyhow!("CreateTexture2D n'a rendu aucune texture"))?;
+                self.copie = Some(texture.clone());
+                texture
+            }
+        };
+        unsafe { self.contexte.CopyResource(&copie, &image.texture) };
+        Ok(CapturedFrame { texture: copie, ..image.clone() })
+    }
+}
 
 pub enum SourceImages {
     Ecran,
@@ -263,8 +368,14 @@ fn diffuser(
     evenements: &mut dyn FnMut(Evenement),
 ) -> Result<Fin, ErreurPartage> {
     let mut cap = WgcCapture::new(p.moniteur, None)?;
+    // Exactement l'une des deux sources est présente.
+    let mut ecran: Option<(ImagesEcran<CapturedFrame>, Retenue)> = None;
     let (largeur, hauteur, mut synth): (u32, u32, Option<Box<dyn Images>>) = match p.source {
         SourceImages::Ecran => {
+            // Ce code suppose, comme avant la vague de correction finale, que WGC
+            // livre une image à l'ouverture de la session même sur un écran
+            // figé. Ce n'est pas mesuré ici : si c'est faux, l'erreur ci-dessous
+            // le dit au bout de 5 s, au lieu d'une attente muette.
             let attente_max = Instant::now() + Duration::from_secs(5);
             let premiere = loop {
                 if let Some(f) = cap.next_frame(Duration::from_millis(200))? {
@@ -274,6 +385,11 @@ fn diffuser(
                     return Err(anyhow::anyhow!("aucune image capturée en 5 s — l'écran est-il figé ?").into());
                 }
             };
+            // Elle n'est plus jetée après lecture de sa taille : retenue, elle
+            // sera encodée au premier tour si l'écran ne bouge pas (I1).
+            let mut retenue = Retenue::nouvelle(cap.d3d_device())?;
+            let copie = retenue.retenir(&premiere)?;
+            ecran = Some((ImagesEcran::depuis_premiere(copie), retenue));
             (premiere.width, premiere.height, None)
         }
         SourceImages::Synthetique { largeur, hauteur, fabrique } => {
@@ -350,7 +466,15 @@ fn diffuser(
                         break;
                     }
                 }
-                trouvee
+                // Sans image neuve, la retenue est ré-encodée si une image clé est
+                // due : sur un écran figé, une demande est honorée en au plus
+                // ~50 ms au lieu d'attendre que l'écran bouge. La dette est lue
+                // ICI, après l'attente, pour qu'une demande arrivée pendant
+                // celle-ci serve au tour même.
+                let (images, retenue) = ecran
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("source écran sans image retenue"))?;
+                images.a_encoder(trouvee, envoi.image_cle_due, |image| retenue.retenir(image))?
             }
         };
 
@@ -655,15 +779,17 @@ impl EnvoiVideo {
         match lien.poll()? {
             LinkEvent::Failed(raison) => Ok(Some(raison)),
             LinkEvent::Controle(MessageControle::DemandeImageCle) => {
-                // Sans délai, et devant tout budget de débit ou saut d'image :
-                // sous rafraîchissement intra progressif (GOP et `idrPeriod`
-                // infinis), un spectateur sans image clé reçoit des images mais
-                // affiche du faux SANS le savoir — le décodeur ne signale rien.
-                // Cette demande est sa seule sortie de secours.
+                // Devant tout budget de débit ou saut d'image : sous
+                // rafraîchissement intra progressif (GOP et `idrPeriod` infinis),
+                // un spectateur sans image clé reçoit des images décodées sans
+                // aucune erreur (mesuré) dont rien ne garantit la justesse
+                // (déduit de la structure du flux, non mesuré). Cette demande
+                // est sa seule sortie de secours.
                 //
-                // L'encodeur fait le reste : la prochaine image sort en IDR,
-                // précédée de ses en-têtes, et plusieurs demandes rapprochées ne
-                // coûtent qu'un IDR.
+                // L'encodeur fait le reste : la prochaine image ENCODÉE sort en
+                // IDR, précédée de ses en-têtes, et plusieurs demandes
+                // rapprochées ne coûtent qu'un IDR. Sur un écran figé, cette
+                // image est la dernière capturée, ré-encodée (`ImagesEcran`).
                 encodeur.forcer_image_cle();
                 self.image_cle_due = true;
                 Ok(None)
@@ -1040,6 +1166,174 @@ mod tests {
             "la piste fermée interrompt le flux — sans pour autant dire que le lien est mort"
         );
         assert!(debut.elapsed() < BUDGET_RETRY_ENVOI, "rendu sans consommer le budget de relance");
+    }
+
+    /// Une image retenue : la copie la marque pour qu'on sache, en la
+    /// relisant, si c'est la retenue qui a été rendue ou l'image neuve.
+    fn retenir_factice(image: &u32) -> anyhow::Result<u32> {
+        Ok(image + 1000)
+    }
+
+    #[test]
+    fn sur_un_ecran_fige_au_lancement_la_premiere_image_est_encodee() {
+        // I1, second volet. La première image capturée ne servait qu'à lire la
+        // taille : sur un écran figé au lancement, rien n'était encodé et le
+        // spectateur attendait sans fin. Neutralisation : retirer
+        // `self.premiere_due ||` de `a_encoder` — le premier tour rend `None`.
+        let mut images = ImagesEcran::depuis_premiere(1u32);
+
+        assert_eq!(
+            images.a_encoder(None, false, retenir_factice).unwrap(),
+            Some(1),
+            "sans image neuve, la première image est encodée au premier tour"
+        );
+        assert_eq!(
+            images.a_encoder(None, false, retenir_factice).unwrap(),
+            None,
+            "une seule fois : un écran figé ne coûte ensuite aucun encodage"
+        );
+    }
+
+    #[test]
+    fn sur_un_ecran_fige_une_image_cle_due_reencode_la_derniere_image_capturee() {
+        // I1. La capture ne livre d'image que quand l'écran change : une image
+        // clé demandée n'était honorée qu'à la capture suivante, et après une
+        // perte suivie de dix secondes d'écran figé, le spectateur renonçait
+        // sans défaut réel. Neutralisation : retirer `|| image_cle_due` de
+        // `a_encoder` — le troisième appel rend `None`.
+        let mut images = ImagesEcran::depuis_premiere(1u32);
+
+        assert_eq!(
+            images.a_encoder(Some(2), false, retenir_factice).unwrap(),
+            Some(2),
+            "une image neuve est encodée telle quelle"
+        );
+        assert_eq!(images.a_encoder(None, false, retenir_factice).unwrap(), None, "rien n'est dû");
+        assert_eq!(
+            images.a_encoder(None, true, retenir_factice).unwrap(),
+            Some(1002),
+            "l'image clé due ré-encode la copie de la DERNIÈRE image capturée"
+        );
+    }
+
+    #[test]
+    fn une_image_neuve_est_retenue_meme_quand_rien_n_est_du() {
+        // L'image clé doit montrer l'écran tel qu'il est : chaque capture
+        // remplace la retenue, pas seulement celles qu'on encode.
+        let mut images = ImagesEcran::depuis_premiere(1u32);
+        let mut retenues = Vec::new();
+
+        images
+            .a_encoder(Some(5), false, |i| {
+                retenues.push(*i);
+                retenir_factice(i)
+            })
+            .unwrap();
+
+        assert_eq!(retenues, [5], "la capture neuve est copiée");
+        assert_eq!(images.a_encoder(None, true, retenir_factice).unwrap(), Some(1005));
+    }
+
+    #[test]
+    fn la_retenue_survit_a_la_reecriture_de_la_texture_capturee() {
+        // La texture de WGC retourne au pool, qui peut la réécrire. Retenir par
+        // référence ne garderait donc pas l'image : `Retenue` la copie. Ici la
+        // source est réécrite APRÈS la retenue, comme le ferait la capture
+        // suivante, et la retenue doit garder l'ancien contenu. Neutralisation :
+        // rendre `image.clone()` au lieu de la copie — la retenue relit la
+        // nouvelle couleur, ce test rougit.
+        use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+        use windows::Win32::Graphics::Direct3D11::{
+            D3D11CreateDevice, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ,
+            D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+            D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+        const COTE: u32 = 64;
+        let mut appareil: Option<ID3D11Device> = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                windows::Win32::Foundation::HMODULE::default(),
+                D3D11_CREATE_DEVICE_FLAG(0),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut appareil),
+                None,
+                None,
+            )
+        }
+        .expect("ce test exige un périphérique Direct3D 11 matériel");
+        let appareil = appareil.expect("périphérique");
+        let contexte = unsafe { appareil.GetImmediateContext() }.expect("contexte");
+
+        let description = |usage, bind: u32, cpu: u32| D3D11_TEXTURE2D_DESC {
+            Width: COTE,
+            Height: COTE,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: usage,
+            BindFlags: bind,
+            CPUAccessFlags: cpu,
+            MiscFlags: 0,
+        };
+        // BGRA : un pixel rouge, puis un bleu.
+        let unie = |bgra: [u8; 4]| bgra.repeat((COTE * COTE) as usize);
+        let rouge = unie([0, 0, 255, 255]);
+        let bleu = unie([255, 0, 0, 255]);
+
+        let donnees = D3D11_SUBRESOURCE_DATA {
+            pSysMem: rouge.as_ptr().cast(),
+            SysMemPitch: COTE * 4,
+            SysMemSlicePitch: 0,
+        };
+        let mut source: Option<ID3D11Texture2D> = None;
+        unsafe {
+            appareil.CreateTexture2D(
+                &description(D3D11_USAGE_DEFAULT, D3D11_BIND_SHADER_RESOURCE.0 as u32, 0),
+                Some(&donnees),
+                Some(&mut source),
+            )
+        }
+        .expect("texture source");
+        let source = source.expect("texture source");
+        let capturee = CapturedFrame {
+            texture: source.clone(),
+            width: COTE,
+            height: COTE,
+            captured_at: Instant::now(),
+        };
+
+        let mut retenue = Retenue::nouvelle(&appareil).expect("retenue");
+        let copie = retenue.retenir(&capturee).expect("copie");
+        // La capture suivante réécrit la texture du pool.
+        unsafe { contexte.UpdateSubresource(&source, 0, None, bleu.as_ptr().cast(), COTE * 4, 0) };
+
+        let mut lecture: Option<ID3D11Texture2D> = None;
+        unsafe {
+            appareil.CreateTexture2D(
+                &description(D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ.0 as u32),
+                None,
+                Some(&mut lecture),
+            )
+        }
+        .expect("texture de lecture");
+        let lecture = lecture.expect("texture de lecture");
+        unsafe { contexte.CopyResource(&lecture, &copie.texture) };
+        let mut carte = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { contexte.Map(&lecture, 0, D3D11_MAP_READ, 0, Some(&mut carte)) }.expect("Map");
+        let premier_pixel = unsafe { std::slice::from_raw_parts(carte.pData as *const u8, 4) }.to_vec();
+        unsafe { contexte.Unmap(&lecture, 0) };
+
+        assert_eq!(
+            premier_pixel,
+            [0, 0, 255, 255],
+            "la retenue doit garder l'image capturée (rouge), pas ce que le pool y a écrit ensuite"
+        );
     }
 
     #[test]

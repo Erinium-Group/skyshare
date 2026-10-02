@@ -30,9 +30,11 @@ pub type Puits = Box<dyn Write>;
 /// Sans cette limitation, un flux inintelligible provoquerait une avalanche de
 /// demandes, donc une avalanche d'images clés — chacune bien plus grosse qu'une
 /// image ordinaire — qui saturerait la liaison exactement quand elle va déjà
-/// mal. Une seconde suffit : l'hôte force l'IDR sans délai (voir
-/// `hote::EnvoiVideo::servir`), et plusieurs demandes rapprochées ne lui
-/// coûteraient qu'un seul IDR de toute façon.
+/// mal. Une seconde suffit : l'hôte force l'IDR à la prochaine image qu'il
+/// encode (voir `hote::EnvoiVideo::servir`) — sur un écran qui bouge, la capture
+/// suivante ; sur un écran figé, la dernière image capturée, ré-encodée au bout
+/// d'au plus ~50 ms d'attente (`hote::ImagesEcran`). Plusieurs demandes
+/// rapprochées ne lui coûteraient qu'un seul IDR de toute façon.
 const DELAI_ENTRE_DEMANDES: Duration = Duration::from_secs(1);
 
 /// Nombre d'unités d'accès refusées de suite par le décodeur au-delà duquel on
