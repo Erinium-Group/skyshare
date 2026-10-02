@@ -42,6 +42,15 @@ le fait pour NVENC. Pas de ffmpeg — il n'est pas installé sur la machine, et 
 | Occupation du décodeur | **~89 %** (`nvidia-smi dmon`, bruit de fond 4–7 %) |
 | Justesse contre la référence du jalon 0 | **89,78 dB, 99,979 % de pixels identiques** (contre `spike/mesures/frame120-hevc-444.png`) |
 
+> *Ajouté le 02/10/2026 (tâche 12 du jalon 2) — une seconde mesure de la même propriété existe
+> désormais, et ne donne pas le même chiffre.* Le test de `sky-decode`, qui décode le même fichier
+> et compare la même image 120, mesure **85,50 dB**, avec un écart maximal de **1 niveau** sur
+> 2 028 composantes parmi 11 059 200. Les deux chiffres sont justes : ils passent par **deux
+> conversions YUV → RVB différentes** — virgule fixe pour la référence du jalon 0, `f64` dans le
+> test — et 1 niveau d'écart est la signature d'un arrondi, pas d'une dégradation. Le seuil du
+> test reste à 80 dB ; ce qui le rend discriminant est la distance au cas faux (36,13 dB sous une
+> matrice BT.709, mesuré).
+
 ### Le 4:4:4 est réellement préservé — preuve discriminante
 
 Ce projet s'est déjà fait piéger par des preuves qui passaient aussi bien dans le cas
@@ -53,6 +62,16 @@ négatif. Celle-ci tient par trois angles indépendants :
 3. Test discriminant : un aller-retour 4:2:0 forcé sur les plans obtenus **perd 19–20 dB et
    altère 14 % des échantillons**. L'information de chrominance pleine résolution était donc
    bien présente — ce qui ne serait pas le cas si le décodeur avait converti en amont.
+
+   > *Corrigé le 02/10/2026 (tâche 12 du jalon 2).* **« Perd 19–20 dB » est faux tel qu'écrit.**
+   > 19 à 20 dB n'est pas un écart mais un **plancher absolu** : c'est le PSNR qu'atteignent les
+   > codecs 4:2:0 du jalon 0 sur le motif de test (`spike/mesures/psnr-h264-420.log`, `psnr_avg`
+   > de 20,45 à 20,46 par image ; `psnr-av1-420.log`, 20,42). La seule mesure d'aller-retour
+   > 4:2:0 conservée dans le dépôt, la neutralisation du test de `sky-decode` (tâche 2 du jalon 2),
+   > donne **15,06 dB absolus**, soit une chute de **70,4 dB** depuis 85,50 dB. La conclusion de
+   > ce point (le 4:4:4 est préservé) tient ; le chiffre, non. Établi par la revue de la tâche 2,
+   > depuis les journaux de mesure cités. Les sorties brutes de la sonde étant perdues (voir
+   > l'avertissement en tête), la confusion ne peut pas être retracée plus loin.
 
 ### Deux trouvailles qui changent la conception
 
@@ -136,6 +155,13 @@ une piste média, le seul refus possible est `RtcError::WriteWithoutPoll`
 paquetisation — donc jamais si l'appelant appelle `poll_output` entre deux écritures. Le
 mécanisme qui produit les 16 % **n'existe pas sur ce chemin** : le zéro est structurel, pas
 circonstanciel, et il est confirmé à 8× la charge visée.
+
+> *Nuancé le 02/10/2026 (tâche 12 du jalon 2).* Ce qui est structurel, c'est l'absence de la
+> contre-pression SCTP. **Le zéro lui-même est mesuré, pas construit** : le refus
+> `WriteWithoutPoll` existe bel et bien, et la tâche 6 l'a mesuré — 101 images acceptées en
+> attente, refus à la 102e (`media/mod.rs:464-467`). Il est récupérable (un `poll` libère une
+> place, `media/mod.rs:489-491`), et c'est ce que fait l'hôte. Conséquence pour le régulateur,
+> écrite dans `tasks/todo.md` : ces refus sont désormais son **seul** signal de perte.
 
 **Ce que le zéro ne dit pas** : il ne dit pas qu'aucune donnée n'est perdue. Il dit que
 l'émetteur n'est plus jamais bloqué. La perte se déplace du refus d'écriture vers la perte de
