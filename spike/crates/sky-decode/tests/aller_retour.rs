@@ -139,6 +139,91 @@ fn un_flux_1080_traverse_l_aller_retour_sans_decalage_de_chrominance() {
     );
 }
 
+/// Nombre d'images du test « sans retard ». Pair, pour que les deux motifs
+/// alternés y figurent autant de fois.
+const IMAGES_ALTERNEES: usize = 6;
+
+/// Chaque unité d'accès poussée rend SA propre image, au même appel — et non
+/// celle de l'unité précédente.
+///
+/// C'est la propriété dont dépend la garde d'affichage du spectateur : il
+/// décide d'afficher ou non selon l'unité qu'il vient de pousser (image clé,
+/// trou). Un décodeur qui rendrait l'image d'avant ferait afficher, à la reprise
+/// après une perte, la dernière image décodée sur des références perdues — et
+/// sur un écran qui cesse de bouger, la dernière image n'apparaîtrait jamais.
+///
+/// Deux témoins indépendants, parce qu'un seul pourrait mentir : l'horodatage
+/// que NVDEC recopie du paquet vers l'image, et le **contenu** — les images
+/// alternent deux motifs (bandes rouges en tête, puis bleues en tête), donc
+/// l'image k−1 a la couleur inverse de l'image k sur toute sa surface.
+///
+/// Neutralisation : retirer `CUVID_PKT_ENDOFPICTURE` dans `Decodeur::decoder`
+/// — le premier appel (en-têtes et IDR) ne rend plus rien, et ce test rougit.
+#[test]
+fn chaque_unite_poussee_rend_sa_propre_image_sans_retard() {
+    let peripherique = peripherique_direct3d11()
+        .unwrap_or_else(|| panic!("ce test exige un périphérique Direct3D 11 matériel"));
+    let mut encodeur = NvencEncoder::new(
+        &peripherique,
+        Codec::Hevc444,
+        LARGEUR,
+        HAUTEUR,
+        60,
+        DEBIT_BPS,
+    )
+    .unwrap_or_else(|e| panic!("ce test exige un encodeur NVENC HEVC 4:4:4 : {e:#}"));
+    let rouge_en_tete = texture_de_bandes(&peripherique, true).expect("texture rouge en tête");
+    let bleu_en_tete = texture_de_bandes(&peripherique, false).expect("texture bleu en tête");
+
+    // L'unité 0 est celle que NVENC produit en premier : en-têtes de séquence
+    // et IDR dans le même paquet, exactement ce que l'hôte écrit sur la piste.
+    let paquets: Vec<(bool, Vec<u8>)> = (0..IMAGES_ALTERNEES)
+        .map(|rang| {
+            let rouge = rang % 2 == 0;
+            let texture = if rouge { &rouge_en_tete } else { &bleu_en_tete };
+            let image = CapturedFrame {
+                texture: texture.clone(),
+                width: LARGEUR,
+                height: HAUTEUR,
+                captured_at: std::time::Instant::now(),
+            };
+            let paquet = encodeur
+                .encode(&image)
+                .expect("encodage")
+                .expect("NVENC rend un paquet par image");
+            (rouge, paquet.data)
+        })
+        .collect();
+
+    let mut decodeur = Decodeur::nouveau(LARGEUR, HAUTEUR)
+        .unwrap_or_else(|e| panic!("ce test exige un décodeur NVIDIA HEVC 4:4:4 : {e}"));
+    for (rang, (rouge, paquet)) in paquets.iter().enumerate() {
+        let image = decodeur
+            .decoder(paquet, rang as u64)
+            .expect("décodage")
+            .unwrap_or_else(|| {
+                panic!(
+                    "l'unité {rang} n'a rendu aucune image au moment où on l'a poussée : \
+                     le décodeur garde une image d'avance"
+                )
+            });
+        assert_eq!(
+            image.horodatage_ms, rang as u64,
+            "l'unité {rang} a rendu l'image horodatée {} : ce n'est pas la sienne",
+            image.horodatage_ms
+        );
+        let rgb = image.copier_vers_memoire_centrale().expect("copie de test");
+        let mal_classes = compter_mal_classes(&rgb, *rouge);
+        let part = mal_classes as f64 / (LARGEUR * HAUTEUR) as f64;
+        assert!(
+            part <= PART_MAL_CLASSEE_TOLEREE,
+            "l'unité {rang} a rendu une image dont {:.1} % des pixels ont la couleur de \
+             l'AUTRE motif : c'est le contenu d'une autre unité",
+            part * 100.0
+        );
+    }
+}
+
 /// Les trois morceaux d'un flux qu'un spectateur arrivé en retard recevrait.
 struct FluxDeReprise {
     /// Ce que rend `entetes_de_sequence` : VPS, SPS, PPS.
@@ -147,9 +232,13 @@ struct FluxDeReprise {
     image_p: Vec<u8>,
     /// L'image qui suit un `forcer_image_cle`.
     image_cle_forcee: Vec<u8>,
-    /// Les images ordinaires qui suivent l'image clé forcée. Le décodeur garde une
-    /// image d'avance : sans elles, même un flux sain ne rend rien au paquet où
-    /// l'IDR arrive (mesuré : aucune image après « en-têtes, IDR » seuls).
+    /// Les images ordinaires qui suivent l'image clé forcée.
+    ///
+    /// Elles étaient indispensables avant `CUVID_PKT_ENDOFPICTURE` : le décodeur
+    /// gardait alors une image d'avance, et « en-têtes, IDR » seuls ne rendaient
+    /// rien (mesuré). Ce n'est plus le cas — voir
+    /// `des_entetes_puis_une_image_cle_forcee_s_affichent`. Elles restent pour les
+    /// deux tests qui opposent un flux avec et sans en-têtes sur plusieurs images.
     suite: Vec<Vec<u8>>,
 }
 
@@ -218,15 +307,22 @@ fn images_rendues(paquets: &[&[u8]]) -> usize {
     rendues
 }
 
+/// Les en-têtes puis l'image clé forcée, ET RIEN D'AUTRE, rendent une image.
+///
+/// Cette assertion disait l'inverse avant `CUVID_PKT_ENDOFPICTURE` : il fallait
+/// une image ordinaire derrière l'IDR pour que celui-ci sorte. C'est le cas d'un
+/// hôte dont l'écran est figé après la demande : sans le drapeau, l'image clé
+/// n'aurait jamais été montrée. Neutralisation : retirer le drapeau dans
+/// `Decodeur::decoder` — 0 image, ce test rougit.
 #[test]
 fn des_entetes_puis_une_image_cle_forcee_s_affichent() {
     let flux = flux_de_reprise();
-    let mut paquets: Vec<&[u8]> = vec![&flux.entetes, &flux.image_cle_forcee];
-    paquets.extend(flux.suite.iter().map(Vec::as_slice));
+    let paquets: Vec<&[u8]> = vec![&flux.entetes, &flux.image_cle_forcee];
     let rendues = images_rendues(&paquets);
-    assert!(
-        rendues >= 1,
-        "un spectateur qui reçoit les en-têtes puis l'image clé forcée doit voir une image"
+    assert_eq!(
+        rendues, 1,
+        "un spectateur qui reçoit les en-têtes puis l'image clé forcée, sans rien après, \
+         doit voir cette image"
     );
 }
 
@@ -247,8 +343,10 @@ fn les_entetes_de_sequence_seuls_suffisent_a_ouvrir_le_decodeur() {
 }
 
 /// Le contraste qui donne son sens au test précédent, et il porte sur les
-/// en-têtes : les mêmes images ordinaires, SANS eux, ne donnent rien — c'est la
-/// fenêtre noire définitive de l'écart 3. Sans ce test, l'image affichée plus
+/// en-têtes : les mêmes images ordinaires, SANS eux, ne donnent rien. Côté
+/// spectateur, c'est « En attente de l'image… », une demande d'image clé par
+/// seconde, puis l'abandon au bout de dix secondes si rien n'arrive — et non plus
+/// la fenêtre noire définitive de l'écart 3. Sans ce test, l'image affichée plus
 /// haut pourrait venir d'un flux que le décodeur aurait accepté de toute façon.
 ///
 /// Le contraste « en-têtes puis image P au lieu d'un IDR » a été tenté et ne
@@ -279,9 +377,15 @@ fn ligne_rouge(y: u32) -> bool {
 /// que la compression ne peut pas fabriquer, alors qu'elle produit
 /// inévitablement quelques niveaux d'écart sur une valeur exacte.
 fn compter_bandes_mal_classees(rgb: &[u8]) -> u64 {
+    compter_mal_classes(rgb, true)
+}
+
+/// Comme [`compter_bandes_mal_classees`], pour le motif choisi : bandes rouges
+/// en tête (`rouge_en_tete`) ou son inverse.
+fn compter_mal_classes(rgb: &[u8], rouge_en_tete: bool) -> u64 {
     let mut mal_classes = 0;
     for y in 0..HAUTEUR {
-        let attendu_rouge = ligne_rouge(y);
+        let attendu_rouge = ligne_rouge(y) == rouge_en_tete;
         for x in 0..LARGEUR {
             let i = ((y * LARGEUR + x) * 3) as usize;
             let (r, b) = (rgb[i] as i32, rgb[i + 2] as i32);
@@ -315,11 +419,19 @@ fn peripherique_direct3d11() -> Option<ID3D11Device> {
 
 /// La texture source : bandes horizontales de [`BANDE`] lignes, rouge puis bleu.
 fn texture_a_bandes(peripherique: &ID3D11Device) -> windows::core::Result<ID3D11Texture2D> {
+    texture_de_bandes(peripherique, true)
+}
+
+/// Bandes de [`BANDE`] lignes, rouge en tête si `rouge_en_tete`, bleu sinon.
+fn texture_de_bandes(
+    peripherique: &ID3D11Device,
+    rouge_en_tete: bool,
+) -> windows::core::Result<ID3D11Texture2D> {
     // BGRA, comme les textures du pool de capture : NVENC ne voit aucune
     // différence avec une vraie image d'écran.
     let mut pixels = vec![0u8; (LARGEUR * HAUTEUR * 4) as usize];
     for y in 0..HAUTEUR {
-        let rouge = ligne_rouge(y);
+        let rouge = ligne_rouge(y) == rouge_en_tete;
         for x in 0..LARGEUR {
             let i = ((y * LARGEUR + x) * 4) as usize;
             pixels[i] = if rouge { 0 } else { 255 }; // B

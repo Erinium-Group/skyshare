@@ -89,17 +89,58 @@ fn les_entetes_seuls_ne_rendent_aucune_image_et_ce_n_est_pas_une_erreur() {
     let flux = std::fs::read(FLUX).expect("flux présent");
     // Même exigence de matériel que le test de référence, et pour la même raison.
     let mut decodeur = decodeur_ou_echouer();
-    // Les trois premières unités d'accès d'un flux NVENC sont VPS, SPS, PPS.
-    for (rang, unite) in unites_acces(&flux).into_iter().take(3).enumerate() {
+    // Les trois premiers NAL d'un flux NVENC sont VPS, SPS, PPS : poussés seuls,
+    // un par appel, ce sont des paquets sans aucune tranche.
+    for (rang, nal) in nals(&flux).into_iter().take(3).enumerate() {
         let rendu = decodeur
-            .decoder(&unite, rang as u64)
+            .decoder(&nal, rang as u64)
             .expect("pas une erreur");
         assert!(rendu.is_none(), "un en-tête ne produit pas d'image");
     }
 }
 
-/// Découpe un flux Annex-B en unités d'accès sur les codes de départ.
+/// Regroupe les NAL d'un flux Annex-B en **unités d'accès** : une image, avec
+/// les NAL non-VCL qui la précèdent (en-têtes de séquence, SEI préfixes).
+///
+/// `Decodeur::decoder` exige une unité entière par appel — c'est ce que le
+/// spectateur reçoit de la piste média, et c'est ce qui l'autorise à poser
+/// `CUVID_PKT_ENDOFPICTURE`. Pousser NAL par NAL ferait décoder une SEI ou une
+/// demi-image comme si c'était une image complète.
+///
+/// Frontières selon ITU-T H.265, 7.4.2.4.4 : une unité nouvelle commence au
+/// premier NAL qui suit une tranche et qui est soit un NAL non-VCL de tête
+/// (VPS 32, SPS 33, PPS 34, AUD 35, SEI préfixe 39, 41 à 44, 48 à 55), soit une
+/// tranche dont `first_slice_segment_in_pic_flag` vaut 1 (premier bit après
+/// l'en-tête de deux octets).
 fn unites_acces(flux: &[u8]) -> Vec<Vec<u8>> {
+    let mut unites: Vec<Vec<u8>> = Vec::new();
+    let mut courante: Vec<u8> = Vec::new();
+    let mut tranche_vue = false;
+    for nal in nals(flux) {
+        // Le NAL commence par son code de départ de trois octets (`nals`).
+        let entete = &nal[3..];
+        let type_nal = (entete[0] >> 1) & 0x3F;
+        let tranche = type_nal <= 31;
+        let ouvre_une_unite = if tranche {
+            tranche_vue && entete.get(2).is_some_and(|octet| octet & 0x80 != 0)
+        } else {
+            tranche_vue && matches!(type_nal, 32..=35 | 39 | 41..=44 | 48..=55)
+        };
+        if ouvre_une_unite {
+            unites.push(std::mem::take(&mut courante));
+            tranche_vue = false;
+        }
+        courante.extend_from_slice(&nal);
+        tranche_vue |= tranche;
+    }
+    if !courante.is_empty() {
+        unites.push(courante);
+    }
+    unites
+}
+
+/// Découpe un flux Annex-B en NAL sur les codes de départ.
+fn nals(flux: &[u8]) -> Vec<Vec<u8>> {
     let mut debuts = Vec::new();
     let mut i = 0;
     while i + 3 < flux.len() {

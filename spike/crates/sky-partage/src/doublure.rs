@@ -170,6 +170,18 @@ pub enum Issue {
 /// Il ne décode rien : ce qui s'éprouve ici est la décision du spectateur
 /// — afficher, attendre, demander une image clé — et non NVDEC, que
 /// `sky-decode` mesure déjà sur son propre banc.
+///
+/// **Le contrat qu'il imite, et d'où il vient.** Une `Issue::Image` est l'image
+/// de l'unité qu'on vient de lui pousser, au même appel. Pendant tout le jalon 2,
+/// c'était FAUX pour le vrai décodeur : sans `CUVID_PKT_ENDOFPICTURE`, NVDEC
+/// rendait l'image de l'unité précédente, et les tests de la garde d'affichage
+/// étaient verts pour une autre raison que leur nom — à la reprise après une
+/// perte, le vrai spectateur aurait affiché la dernière image décodée sur des
+/// références perdues. Le drapeau est posé depuis la vague de correction finale,
+/// et le contrat est désormais PROUVÉ sur le vrai décodeur :
+/// `sky-decode/tests/aller_retour.rs`,
+/// `chaque_unite_poussee_rend_sa_propre_image_sans_retard`. Qui change ce
+/// comportement dans `Decodeur::decoder` doit changer cette doublure avec lui.
 pub struct DecodeurFactice {
     issues: VecDeque<Issue>,
     /// Ce que rendent les appels au-delà de `issues`.

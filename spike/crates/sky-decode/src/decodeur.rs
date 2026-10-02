@@ -222,15 +222,33 @@ impl Decodeur {
     /// Pousse une unité d'accès et rend l'image que le rappel d'affichage a
     /// déposée, s'il y en a une.
     ///
+    /// **`unite` doit être une unité d'accès ENTIÈRE** — une image et une seule,
+    /// éventuellement précédée de ses en-têtes de séquence. C'est ce que
+    /// l'appelant réel reçoit : l'hôte écrit une unité NVENC entière par
+    /// `PeerLink::ecrire_image`, et `str0m` ne rend un `MediaData` qu'une fois
+    /// tous les paquets RTP d'une même image arrivés, sans trou. Un appelant qui
+    /// pousserait des NAL isolés (une tranche sur deux d'une image) ferait
+    /// décoder une image incomplète.
+    ///
+    /// L'image rendue est celle de l'unité poussée, au même appel. C'est le rôle
+    /// de `CUVID_PKT_ENDOFPICTURE` (`nvcuvid.h` : « the packet contains exactly
+    /// one frame ») : sans lui, l'analyseur ne sait qu'une image est complète
+    /// qu'en voyant le début de la suivante, et rend l'image k−1 quand on pousse
+    /// k — mesuré, `tests/aller_retour.rs`. Le spectateur décide d'afficher
+    /// selon l'unité qu'il vient de pousser : avec une image de retard, il
+    /// afficherait à la reprise après une perte la dernière image décodée sur des
+    /// références perdues.
+    ///
     /// `Ok(None)` n'est pas une erreur : le décodeur avale les en-têtes
-    /// VPS/SPS/PPS et les tranches incomplètes sans rendre d'image.
+    /// VPS/SPS/PPS sans rendre d'image.
     pub fn decoder(
         &mut self,
         unite: &[u8],
         horodatage_ms: u64,
     ) -> Result<Option<ImageDecodee>, ErreurDecodeur> {
         let mut paquet: CUVIDSOURCEDATAPACKET = unsafe { std::mem::zeroed() };
-        paquet.flags = CUvideopacketflags::CUVID_PKT_TIMESTAMP as c_ulong;
+        paquet.flags = (CUvideopacketflags::CUVID_PKT_TIMESTAMP as c_ulong)
+            | (CUvideopacketflags::CUVID_PKT_ENDOFPICTURE as c_ulong);
         paquet.payload_size = unite.len() as c_ulong;
         paquet.payload = unite.as_ptr();
         paquet.timestamp = horodatage_ms as i64;
