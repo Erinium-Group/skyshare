@@ -16,10 +16,7 @@
 
 use sky_crypto::Identity;
 use sky_net::handshake::{self, Blob};
-use sky_net::PeerLink;
-
-/// Profil Main 4:4:4 de HEVC. `profile_id = 1` est Main, qui serait un mensonge.
-const PROFIL_MAIN_444: u8 = 4;
+use sky_net::{FormatVideo, PeerLink};
 
 /// Une offre de spectateur, et de quoi ouvrir la réponse qui lui sera scellée.
 ///
@@ -27,13 +24,17 @@ const PROFIL_MAIN_444: u8 = 4;
 /// `PeerLink` n'expose aucun descellement — c'est au test de garder la clé.
 fn offre_de_spectateur() -> (Identity, String) {
     let secret = Identity::generate().en_octets();
-    let (_lien, offre) = PeerLink::offrant(Identity::depuis_octets(&secret)).expect("offre");
+    let (_lien, offre) =
+        PeerLink::offrant(Identity::depuis_octets(&secret), &FormatVideo::PREFERENCE)
+            .expect("offre");
     (Identity::depuis_octets(&secret), offre)
 }
 
 /// Le SDP que l'hôte retient réellement, descellé par le spectateur.
 fn hote_repond(spectateur: &Identity, offre: &str) -> String {
-    let (_lien, reponse) = PeerLink::repondant(Identity::generate(), offre).expect("réponse");
+    let (_lien, reponse) =
+        PeerLink::repondant(Identity::generate(), offre, &FormatVideo::PREFERENCE)
+            .expect("réponse");
     let blob = Blob::from_text(&reponse).expect("bloc de réponse illisible");
     let comprime = spectateur
         .open(&blob.sealed_sdp)
@@ -41,35 +42,45 @@ fn hote_repond(spectateur: &Identity, offre: &str) -> String {
     handshake::decomprimer(&comprime).expect("réponse non décompressable")
 }
 
-/// La ligne `a=fmtp:` du type de charge retenu pour H265, s'il y en a un.
+/// La ligne `a=fmtp:` d'un type de charge donné, s'il y en a une.
 ///
-/// Le type de charge n'est pas supposé : il est lu sur la ligne `a=rtpmap:`, car
-/// la négociation peut le réattribuer.
-fn ligne_fmtp_h265(sdp: &str) -> Option<String> {
-    let pt = sdp
-        .lines()
-        .filter_map(|l| l.strip_prefix("a=rtpmap:"))
-        .find(|reste| {
-            reste
-                .split_once(' ')
-                .is_some_and(|(_, codec)| codec.starts_with("H265/"))
-        })
-        .and_then(|reste| reste.split_once(' '))
-        .map(|(pt, _)| pt.to_string())?;
-
-    let prefixe = format!("a=fmtp:{pt} ");
+/// Le type de charge est celui de `FormatVideo::type_de_charge` : les deux côtés
+/// sont SkyShare, et la table est la seule source de ces numéros.
+fn ligne_fmtp(sdp: &str, type_de_charge: u8) -> Option<String> {
+    let prefixe = format!("a=fmtp:{type_de_charge} ");
     sdp.lines()
         .find_map(|l| l.strip_prefix(&prefixe))
         .map(|params| params.trim_end().to_string())
 }
 
 #[test]
-fn la_reponse_sdp_retient_le_profil_main_444() {
+fn la_reponse_sdp_retient_les_trois_profils_annonces() {
     let (spectateur, offre) = offre_de_spectateur();
     let reponse = hote_repond(&spectateur, &offre);
-    let fmtp = ligne_fmtp_h265(&reponse).expect("la réponse doit décrire H265");
+
+    // `profile-id=4` est le 4:4:4 ; `profile-id=1` (Main) serait un mensonge.
+    let hevc_444 = ligne_fmtp(&reponse, FormatVideo::Hevc444.type_de_charge())
+        .expect("la réponse doit décrire HEVC 4:4:4");
     assert!(
-        fmtp.contains(&format!("profile-id={PROFIL_MAIN_444}")),
-        "le profil annoncé n'est pas Main 4:4:4 : {fmtp}"
+        hevc_444.contains("profile-id=4"),
+        "le profil annoncé n'est pas HEVC 4:4:4 : {hevc_444}"
+    );
+
+    let hevc_420 = ligne_fmtp(&reponse, FormatVideo::Hevc420.type_de_charge())
+        .expect("la réponse doit décrire HEVC 4:2:0");
+    assert!(
+        hevc_420.contains("profile-id=1"),
+        "le profil annoncé n'est pas HEVC Main : {hevc_420}"
+    );
+
+    let h264 = ligne_fmtp(&reponse, FormatVideo::H264.type_de_charge())
+        .expect("la réponse doit décrire H.264");
+    assert!(
+        h264.contains("packetization-mode=1"),
+        "H.264 doit annoncer la paquetisation en mode 1 : {h264}"
+    );
+    assert!(
+        h264.contains("profile-level-id=640034"),
+        "H.264 doit annoncer le profil High niveau 5.2 : {h264}"
     );
 }

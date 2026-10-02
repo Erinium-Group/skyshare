@@ -17,7 +17,7 @@ use sky_capture::CapturedFrame;
 use sky_compte::{deposer, relever, Coffre, Config, ErreurCompte, Etat};
 use sky_crypto::Identity;
 use sky_encode::{nvenc::NvencEncoder, Codec};
-use sky_net::{ErreurEnvoi, LinkEvent, MessageControle, Pacer, PeerLink};
+use sky_net::{ErreurEnvoi, FormatVideo, LinkEvent, MessageControle, Pacer, PeerLink};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_TEXTURE2D_DESC,
 };
@@ -279,7 +279,11 @@ pub fn heberger(
             // Recevable ne veut pas dire utilisable : si `repondant` refuse le
             // SDP, on essaie l'offre suivante sans interrompre l'attente.
             for offre in offres_recevables(etat, relever(etat, &identite)) {
-                match PeerLink::repondant(Identity::generate(), &offre.texte) {
+                match PeerLink::repondant(
+                    Identity::generate(),
+                    &offre.texte,
+                    &[FormatVideo::Hevc444],
+                ) {
                     Ok((link, reponse)) => return Some((link, reponse, offre.destinataire)),
                     Err(e) => {
                         let raison = e.to_string();

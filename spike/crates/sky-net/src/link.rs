@@ -32,7 +32,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context};
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::ChannelId;
-use str0m::format::{Codec, CodecExtra};
+use str0m::format::CodecExtra;
 use str0m::media::{Direction, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
@@ -40,6 +40,9 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 use sky_crypto::Identity;
 
 use crate::controle::MessageControle;
+use crate::format::{
+    FormatVideo, NIVEAU_HEVC_6_0, PROFIL_HEVC_444, PROFIL_HEVC_MAIN, PROFIL_NIVEAU_H264, TIER_MAIN,
+};
 use crate::handshake::Blob;
 use crate::stun;
 
@@ -84,13 +87,14 @@ pub enum ErreurEnvoi {
     Serialisation,
     /// La piste média n'est pas encore négociée, ou ne l'est plus.
     PisteFermee,
-    /// La piste est installée mais aucun type de charge H265 n'y a été retenu.
+    /// La piste est installée mais le format négocié n'est pas parmi les types
+    /// de charge du rédacteur.
     ///
     /// Distinct de `PisteFermee` : là, la session n'a pas encore le média ; ici
     /// elle l'a, et c'est l'entente sur le codec qui manque. **Aucun test ne
     /// l'exerce** : il faudrait un correspondant qui accepte la piste sans
-    /// retenir HEVC, et `str0m` écarte plutôt la ligne de média entière quand
-    /// aucun codec ne concorde. Le cas est nommé plutôt que replié sur
+    /// retenir un de nos formats, et `str0m` écarte plutôt la ligne de média
+    /// entière quand aucun codec ne concorde. Le cas est nommé plutôt que replié sur
     /// `ImageRefusee` parce que la cause est diagnostiquable et que la
     /// confondre avec un refus d'écriture égarerait le diagnostic.
     CodecNonNegocie,
@@ -119,29 +123,6 @@ const CANAL: &str = "sky";
 /// Taille maximale d'un datagramme UDP accepté (limite interne de `str0m`).
 const TAILLE_DATAGRAMME: usize = 2000;
 
-/// Profil **Main 4:4:4** de HEVC (`profile-id=4`, « Format Range Extensions »
-/// d'ITU-T H.265 Annexe A, où vivent les profils 4:4:4).
-///
-/// `profile-id=1` est Main — le réglage par défaut de `str0m::CodecConfig` — et
-/// serait un mensonge : NVENC produit du 4:4:4. Cette valeur est verrouillée par
-/// `tests/piste_media.rs`, qui inspecte la RÉPONSE SDP : la paquetisation
-/// RFC 7798 ne lit pas le contenu du NAL, elle transporterait donc notre flux
-/// tout aussi bien avec un profil faux. Aucun test de transport ne peut voir
-/// cette erreur.
-const PROFIL_MAIN_444: u8 = 4;
-
-/// Palier « Main » (`tier-flag=0`), par opposition au palier « High ».
-const TIER_MAIN: u8 = 0;
-
-/// Niveau 6.0. `level_id = (6 * 10 + 0) * 3 = 180` (ITU-T H.265 Annexe A).
-const NIVEAU_6_0: u8 = 180;
-
-/// Type de charge RTP de la vidéo, et celui de ses retransmissions. Mêmes
-/// valeurs que les réglages par défaut de `str0m` ; la négociation peut les
-/// réattribuer, donc rien ne les suppose ailleurs dans le code.
-const PAYLOAD_TYPE_H265: u8 = 102;
-const RTX_H265: u8 = 103;
-
 /// Fréquence de l'horloge RTP vidéo, en unités par seconde (RFC 3551).
 const HORLOGE_RTP: u64 = 90_000;
 
@@ -149,17 +130,18 @@ const HORLOGE_RTP: u64 = 90_000;
 pub enum LinkEvent {
     /// ICE a trouvé un chemin et DTLS est établi.
     Connected,
-    /// Une unité d'accès HEVC complète est arrivée sur la piste média.
+    /// Une unité d'accès vidéo complète est arrivée sur la piste média.
     ///
-    /// `donnees` est de l'Annex-B, tel que le dépaquetiseur RFC 7798 l'a
-    /// réassemblé — donc tel que NVENC l'avait produit.
+    /// `donnees` est de l'Annex-B, tel que le dépaquetiseur (RFC 7798 pour HEVC,
+    /// RFC 6184 pour H.264) l'a réassemblé — donc tel que l'encodeur l'avait
+    /// produit.
     Image {
         donnees: Vec<u8>,
         /// Horodatage RTP ramené en millisecondes. Son origine est celle que
         /// l'émetteur a choisie : c'est une durée depuis SON départ, pas une
         /// heure.
         horodatage_ms: u64,
-        /// Image clé, au sens du dépaquetiseur HEVC.
+        /// Image clé, au sens du dépaquetiseur (HEVC ou H.264).
         cle: bool,
         /// Faux dès qu'un paquet RTP a manqué entre l'image précédente et
         /// celle-ci : le flux a un trou, et cette image ne se décode
@@ -175,6 +157,10 @@ pub enum LinkEvent {
         /// sans aucune erreur sur un flux privé de son point d'accès : la perte
         /// pourrait ne jamais se signaler. Qui le supprimerait rouvrirait ce trou.
         sans_perte: bool,
+        /// Le format lu sur le paquet. Il sert à prouver que les deux côtés
+        /// s'accordent (tests) ; le spectateur choisit son décodeur par
+        /// `PeerLink::format_negocie`.
+        format: Option<FormatVideo>,
     },
     /// Un message de contrôle est arrivé sur le canal de données.
     Controle(MessageControle),
@@ -298,8 +284,12 @@ impl PeerLink {
     /// aux lettres ; mais cela demande une clé de plus en paramètre, et ce n'est
     /// pas cette tâche-ci qui l'ajoute. Ne pas lire ce commentaire comme une
     /// promesse tenue.
-    pub fn offrant(identity: Identity) -> anyhow::Result<(Self, String)> {
-        let (mut rtc, horloge) = nouveau_rtc();
+    ///
+    /// `formats` : les formats vidéo que ce côté sait **décoder**, dans l'ordre
+    /// de l'offre ; liste vide refusée.
+    pub fn offrant(identity: Identity, formats: &[FormatVideo]) -> anyhow::Result<(Self, String)> {
+        anyhow::ensure!(!formats.is_empty(), "aucun format vidéo à annoncer");
+        let (mut rtc, horloge) = nouveau_rtc(formats);
         let (socket, locale) = Self::socket_et_candidats(&mut rtc)?;
 
         let mut change = rtc.sdp_api();
@@ -387,14 +377,22 @@ impl PeerLink {
     ///
     /// Rôle de signaling lui aussi : le répondant peut parfaitement être celui
     /// qui émettra ensuite la vidéo.
-    pub fn repondant(identity: Identity, offre_texte: &str) -> anyhow::Result<(Self, String)> {
+    ///
+    /// `formats` : les formats vidéo que ce côté sait **encoder** ; liste vide
+    /// refusée.
+    pub fn repondant(
+        identity: Identity,
+        offre_texte: &str,
+        formats: &[FormatVideo],
+    ) -> anyhow::Result<(Self, String)> {
+        anyhow::ensure!(!formats.is_empty(), "aucun format vidéo à annoncer");
         let blob = Blob::from_text(offre_texte)?;
         let sdp = crate::handshake::decomprimer(&blob.sealed_sdp)?;
         // L'erreur de `str0m` cite le SDP fautif : on ne la propage pas.
         let offer =
             SdpOffer::from_sdp_string(&sdp).map_err(|_| anyhow!("bloc illisible ou incomplet"))?;
 
-        let (mut rtc, horloge) = nouveau_rtc();
+        let (mut rtc, horloge) = nouveau_rtc(formats);
         let (socket, locale) = Self::socket_et_candidats(&mut rtc)?;
 
         let cibles_pair = cibles_depuis_sdp(&sdp);
@@ -687,18 +685,22 @@ impl PeerLink {
                         }
                     }
                     Event::MediaData(donnees) => {
-                        // `is_keyframe` vient du dépaquetiseur HEVC, qui lit
-                        // l'en-tête de NAL. On ne le devine pas depuis les
-                        // octets ici.
+                        // `is_keyframe` vient du dépaquetiseur (HEVC ou H.264),
+                        // qui lit l'en-tête de NAL. On ne le devine pas depuis
+                        // les octets ici.
                         let cle = matches!(
                             donnees.codec_extra,
                             CodecExtra::H265(extra) if extra.is_keyframe
+                        ) || matches!(
+                            donnees.codec_extra,
+                            CodecExtra::H264(extra) if extra.is_keyframe
                         );
                         return Ok(LinkEvent::Image {
                             donnees: donnees.data.to_vec(),
                             horodatage_ms: en_millisecondes(donnees.time),
                             cle,
                             sans_perte: donnees.contiguous,
+                            format: FormatVideo::depuis_parametres(&donnees.params),
                         });
                     }
                     _ => {}
@@ -775,10 +777,12 @@ impl PeerLink {
         self.ecrire(&octets)
     }
 
-    /// Écrit une unité d'accès HEVC sur la piste média.
+    /// Écrit une unité d'accès vidéo sur la piste média, dans le format négocié
+    /// (`format_negocie`).
     ///
     /// `unite` est de l'**Annex-B**, tel que NVENC le produit : le paquetiseur
-    /// RFC 7798 de `str0m` le consomme sans conversion. `horodatage_ms` est une
+    /// RFC 7798 (HEVC) ou RFC 6184 (H.264) de `str0m` le consomme sans
+    /// conversion. `horodatage_ms` est une
     /// durée depuis le départ de l'émetteur, pas une heure.
     ///
     /// # Ce qui remplace le canal de données, et pourquoi
@@ -817,15 +821,21 @@ impl PeerLink {
         let mid = self.piste.ok_or(ErreurEnvoi::PisteFermee)?;
         // Avant `writer`, qui emprunte `self.rtc` : `maintenant` emprunte `self`.
         let instant = self.maintenant();
+        // Avant `writer` aussi : `format_negocie` lit `self.rtc`. Le refus
+        // n'est tranché qu'après `writer` : tant que la session n'a pas installé
+        // le média (offrant avant la réponse), c'est `PisteFermee`, pas un
+        // défaut d'entente sur le codec.
+        let format = self.format_negocie();
 
         let writer = self.rtc.writer(mid).ok_or(ErreurEnvoi::PisteFermee)?;
-        // Le type de charge n'est pas supposé : la négociation peut réattribuer
-        // celui que nous proposions, et `payload_params` ne rend que ce que le
-        // correspondant a effectivement retenu.
+        let format = format.ok_or(ErreurEnvoi::CodecNonNegocie)?;
+        // Le type de charge n'est pas supposé : `payload_params` ne rend que ce
+        // que le correspondant a effectivement retenu, et le format négocié doit
+        // y figurer.
         let pt = writer
             .payload_params()
-            .find(|params| params.spec().codec == Codec::H265)
             .map(|params| params.pt())
+            .find(|pt| *pt == format.type_de_charge().into())
             .ok_or(ErreurEnvoi::CodecNonNegocie)?;
 
         writer
@@ -841,6 +851,18 @@ impl PeerLink {
                 str0m::RtcError::WriteWithoutPoll => ErreurEnvoi::TropDImagesEnAttente,
                 _ => ErreurEnvoi::ImageRefusee,
             })
+    }
+
+    /// Le format que les deux côtés utilisent : le premier de
+    /// `FormatVideo::PREFERENCE` dont le type de charge a été retenu par la
+    /// négociation. Même fonction des deux côtés, donc même réponse, sans
+    /// dépendre de l'ordre de la réponse SDP (spec §4).
+    pub fn format_negocie(&self) -> Option<FormatVideo> {
+        let media = self.rtc.media(self.piste?)?;
+        let retenus = media.remote_pts();
+        FormatVideo::PREFERENCE
+            .into_iter()
+            .find(|f| retenus.contains(&f.type_de_charge().into()))
     }
 
     /// Vrai dès que la piste média vidéo est connue du lien.
@@ -1010,7 +1032,9 @@ fn en_millisecondes(temps: MediaTime) -> u64 {
 /// change rien, car ce qui expire à ~30 s est la poignée de main DTLS, que
 /// `str0m` 0.23.1 n'expose pas. C'est l'horloge différée qui règle le problème,
 /// et elle le règle pour les deux mécanismes à la fois.
-fn nouveau_rtc() -> (Rtc, Instant) {
+///
+/// Les formats annoncés sont ceux de `formats`, dans l'ordre reçu.
+fn nouveau_rtc(formats: &[FormatVideo]) -> (Rtc, Instant) {
     // `str0m` exige qu'un fournisseur cryptographique soit installé pour le
     // processus. L'appel est idempotent : le premier gagne, les suivants sont
     // ignorés sans erreur.
@@ -1030,33 +1054,59 @@ fn nouveau_rtc() -> (Rtc, Instant) {
     config.set_max_stun_retransmits(120);
     config.set_max_stun_rto(std::time::Duration::from_secs(3));
 
-    // Un seul codec annoncé : HEVC, et dans le profil que l'encodeur produit
-    // réellement.
+    // Seuls les formats demandés sont annoncés (au plus HEVC 4:4:4, HEVC 4:2:0
+    // et H.264), chacun dans le profil que l'encodeur produit réellement.
     //
     // `clear` retire tout le catalogue par défaut (Opus, VP8, VP9, AV1, les sept
     // variantes de H264, H266…). Deux raisons, aucune cosmétique :
     //
-    // 1. **Honnêteté.** Le projet n'a ni encodeur ni décodeur pour ces codecs —
-    //    ni repli logiciel. Les annoncer inviterait le correspondant à en
-    //    choisir un que nous ne saurions pas produire.
+    // 1. **Honnêteté.** N'annoncer que ce que nous savons produire ou lire — ni
+    //    repli logiciel, ni codec sans encodeur ni décodeur. Annoncer le reste
+    //    inviterait le correspondant à choisir un format que nous ne saurions
+    //    pas traiter.
     // 2. **Taille du bloc.** L'offre traverse une messagerie, collée à la main,
     //    et un test la borne (`l_offre_reelle_tient_sous_la_borne`). Le
     //    catalogue complet ajoute une trentaine de lignes `a=rtpmap` /
-    //    `a=fmtp` / `a=rtcp-fb` à la description de la piste vidéo.
+    //    `a=fmtp` / `a=rtcp-fb` à la description de la piste vidéo ; trois
+    //    formats en coûtent encore, d'où une borne recalibrée.
     //
-    // Le profil est déclaré explicitement : `enable_h265` de `str0m` poserait
+    // **Une seule entrée par famille concordable.** Deux entrées locales qui
+    // concordent avec le même type de charge distant font paniquer `str0m`
+    // (`assert_claim_once`, « Pt locked multiple times »). HEVC 4:4:4 et HEVC
+    // Main ne concordent jamais entre eux (profil exact exigé) : deux entrées
+    // H265 sont donc sûres ; H.264 n'en a qu'une.
+    //
+    // Les profils sont déclarés explicitement : `enable_h265` de `str0m` poserait
     // `profile-id=1` (Main), or NVENC produit du 4:4:4. La paquetisation
     // fonctionnerait avec un profil faux — c'est précisément pourquoi la garde
-    // est un test sur la RÉPONSE SDP et non sur le transport.
+    // est un test sur la RÉPONSE SDP (`tests/piste_media.rs`) et non sur le
+    // transport : la paquetisation RFC 7798 ne lit pas le contenu du NAL.
     let codecs = config.codec_config();
     codecs.clear();
-    codecs.add_h265(
-        PAYLOAD_TYPE_H265.into(),
-        Some(RTX_H265.into()),
-        PROFIL_MAIN_444,
-        TIER_MAIN,
-        NIVEAU_6_0,
-    );
+    for format in formats {
+        match format {
+            FormatVideo::Hevc444 => codecs.add_h265(
+                format.type_de_charge().into(),
+                Some(format.retransmission().into()),
+                PROFIL_HEVC_444,
+                TIER_MAIN,
+                NIVEAU_HEVC_6_0,
+            ),
+            FormatVideo::Hevc420 => codecs.add_h265(
+                format.type_de_charge().into(),
+                Some(format.retransmission().into()),
+                PROFIL_HEVC_MAIN,
+                TIER_MAIN,
+                NIVEAU_HEVC_6_0,
+            ),
+            FormatVideo::H264 => codecs.add_h264(
+                format.type_de_charge().into(),
+                Some(format.retransmission().into()),
+                true,
+                PROFIL_NIVEAU_H264,
+            ),
+        }
+    }
 
     // `enable_bwe` reste éteint, et ce n'est pas un oubli : sans lui `str0m`
     // installe un `NullPacer`, donc le contrôle de congestion reste celui du
@@ -1183,6 +1233,15 @@ s=-
 mod tests {
     use super::*;
 
+    /// Une unité d'accès H.264 minimale en Annex-B : SPS, PPS, puis une tranche
+    /// IDR (types de NAL 7, 8 et 5). Le dépaquetiseur RFC 6184 de `str0m` ne lit
+    /// que l'en-tête de chaque NAL : l'unité n'a pas à être décodable.
+    const UNITE_H264_IDR: &[u8] = &[
+        0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x34, 0xAC, 0xD9, //
+        0x00, 0x00, 0x00, 0x01, 0x68, 0xEE, 0x3C, 0x80, //
+        0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x00, 0x10, 0xFF,
+    ];
+
     #[test]
     fn le_spectateur_offre_et_l_hote_repond() {
         // Le sens exige par la spec d'architecture (D2, 23/08) : c'est celui qui
@@ -1200,8 +1259,10 @@ mod tests {
         let spectateur_id = Identity::generate();
         let hote_id = Identity::generate();
 
-        let (mut spectateur, offre) = PeerLink::offrant(spectateur_id).unwrap();
-        let (mut hote, reponse) = PeerLink::repondant(hote_id, &offre).unwrap();
+        let (mut spectateur, offre) =
+            PeerLink::offrant(spectateur_id, &FormatVideo::PREFERENCE).unwrap();
+        let (mut hote, reponse) =
+            PeerLink::repondant(hote_id, &offre, &FormatVideo::PREFERENCE).unwrap();
         spectateur.accepter_reponse(&reponse).unwrap();
 
         // Le canal doit s'ouvrir meme si c'est desormais l'offrant qui le cree
@@ -1247,10 +1308,11 @@ mod tests {
         // emis. Le repondant doit donc tenir les adresses du pair des sa
         // construction, sans quoi son battement de maintien ne perce rien et
         // les sondages de l'offrant sont jetes a l'entree de sa box.
-        let (_, offre) = PeerLink::offrant(Identity::generate()).unwrap();
+        let (_, offre) = PeerLink::offrant(Identity::generate(), &FormatVideo::PREFERENCE).unwrap();
         let offre = offre_avec_candidat_public(&offre);
 
-        let (hote, _) = PeerLink::repondant(Identity::generate(), &offre).unwrap();
+        let (hote, _) =
+            PeerLink::repondant(Identity::generate(), &offre, &FormatVideo::PREFERENCE).unwrap();
 
         let attendue: SocketAddr = "203.0.113.7:40404".parse().unwrap();
         assert!(
@@ -1285,8 +1347,10 @@ mod tests {
         // ce sont les adresses de celui qui DEMANDE A REGARDER qu'elle expose.
         // Remettre l'ancien sens fait rougir ce test, parce que l'offre porte
         // alors le port de l'hote.
-        let (spectateur, offre) = PeerLink::offrant(Identity::generate()).unwrap();
-        let (hote, _reponse) = PeerLink::repondant(Identity::generate(), &offre).unwrap();
+        let (spectateur, offre) =
+            PeerLink::offrant(Identity::generate(), &FormatVideo::PREFERENCE).unwrap();
+        let (hote, _reponse) =
+            PeerLink::repondant(Identity::generate(), &offre, &FormatVideo::PREFERENCE).unwrap();
         assert_ne!(spectateur.port_local(), hote.port_local());
 
         // Aucune cle n'est necessaire : c'est bien cela, « en clair ».
@@ -1311,7 +1375,7 @@ mod tests {
         // pour une raison qui vaudrait aussi bien des deux cotes. L'offrant ne
         // peut rien connaitre du pair tant qu'il n'a pas sa reponse — et il n'en
         // a pas besoin, puisque c'est lui qui prend l'initiative d'emettre.
-        let (offrant, _) = PeerLink::offrant(Identity::generate()).unwrap();
+        let (offrant, _) = PeerLink::offrant(Identity::generate(), &FormatVideo::PREFERENCE).unwrap();
         assert!(offrant.cibles_pair().is_empty());
     }
 
@@ -1331,19 +1395,26 @@ mod tests {
     /// Le catalogue de codecs est déjà réduit à HEVC seul (voir `nouveau_rtc`) ;
     /// sans cela le coût serait plusieurs fois supérieur.
     ///
-    /// 1 560 laisse environ 20 % au-dessus du plus grand bloc mesuré et reste
-    /// sous le plus petit bloc non comprimé — mesuré à 2 561 caractères sur ces
-    /// mêmes six négociations : c'est une garde de la COMPRESSION, et elle
-    /// discrimine encore. La limite de la boîte aux lettres,
+    /// **Re-mesuré le 02/10/2026, tâche 1 du sous-jalon « toutes cartes »**, les
+    /// trois formats annoncés (HEVC 4:4:4, HEVC 4:2:0, H.264 : trois entrées
+    /// `rtpmap`/`fmtp`/RTX) : sur six négociations locales, offre de 1 389 à
+    /// 1 405 caractères, réponse de 1 441 à 1 453 (SDP d'offre de 2 526 à
+    /// 2 535 octets). Les deux formats ajoutés coûtent donc environ 150 à 200
+    /// caractères de bloc, une fois comprimés.
+    ///
+    /// 1 750 laisse environ 20 % au-dessus du plus grand bloc mesuré (1 453) et
+    /// reste sous le plus petit bloc non comprimé — mesuré à 3 425 caractères
+    /// sur six offres : c'est une garde de la COMPRESSION, et elle discrimine
+    /// encore. La limite de la boîte aux lettres,
     /// `sky_compte::boite::TAILLE_MAX_CLAIR` (4 048 octets), est bien plus
-    /// haute ; elle n'est pas importée pour ne pas faire dépendre `sky-net` de
-    /// `sky-compte`.
-    const BORNE_BLOC_REEL: usize = 1560;
+    /// haute et tient ; elle n'est pas importée pour ne pas faire dépendre
+    /// `sky-net` de `sky-compte`.
+    const BORNE_BLOC_REEL: usize = 1750;
 
     #[test]
     fn l_offre_reelle_tient_sous_la_borne() {
         // Rougit seul si `offrant` cesse de comprimer son SDP.
-        let (_, offre) = PeerLink::offrant(Identity::generate()).unwrap();
+        let (_, offre) = PeerLink::offrant(Identity::generate(), &FormatVideo::PREFERENCE).unwrap();
         println!("offre reelle : {} caracteres", offre.len());
         assert!(
             offre.len() < BORNE_BLOC_REEL,
@@ -1357,8 +1428,10 @@ mod tests {
     /// Deux liens en boucle locale, canal ouvert des deux côtés : `(hôte,
     /// spectateur)`. Même montage que `le_spectateur_offre_et_l_hote_repond`.
     fn paire_connectee() -> (PeerLink, PeerLink) {
-        let (mut spectateur, offre) = PeerLink::offrant(Identity::generate()).unwrap();
-        let (mut hote, reponse) = PeerLink::repondant(Identity::generate(), &offre).unwrap();
+        let (mut spectateur, offre) =
+            PeerLink::offrant(Identity::generate(), &FormatVideo::PREFERENCE).unwrap();
+        let (mut hote, reponse) =
+            PeerLink::repondant(Identity::generate(), &offre, &FormatVideo::PREFERENCE).unwrap();
         spectateur.accepter_reponse(&reponse).unwrap();
 
         let limite = Instant::now() + Duration::from_secs(10);
@@ -1510,7 +1583,8 @@ mod tests {
 
     #[test]
     fn envoyer_avant_l_ouverture_du_canal_est_refuse() {
-        let (mut offrant, _) = PeerLink::offrant(Identity::generate()).unwrap();
+        let (mut offrant, _) =
+            PeerLink::offrant(Identity::generate(), &FormatVideo::PREFERENCE).unwrap();
         assert_eq!(
             offrant.envoyer_controle(&MessageControle::PartageArrete),
             Err(ErreurEnvoi::CanalFerme)
@@ -1573,6 +1647,7 @@ mod tests {
                     horodatage_ms,
                     cle,
                     sans_perte,
+                    ..
                 } => Some((donnees, *horodatage_ms, *cle, *sans_perte)),
                 _ => None,
             })
@@ -1611,8 +1686,10 @@ mod tests {
         // codec manquant. Mesuré, il refuse aussi pour piste fermée : `str0m`
         // ne délivre pas de `writer` avant que la session ait réellement
         // installé le média, ce qui n'arrive qu'à l'acceptation de la réponse.
-        let (mut spectateur, offre) = PeerLink::offrant(Identity::generate()).unwrap();
-        let (mut hote, _) = PeerLink::repondant(Identity::generate(), &offre).unwrap();
+        let (mut spectateur, offre) =
+            PeerLink::offrant(Identity::generate(), &FormatVideo::PREFERENCE).unwrap();
+        let (mut hote, _) =
+            PeerLink::repondant(Identity::generate(), &offre, &FormatVideo::PREFERENCE).unwrap();
         assert_eq!(
             hote.ecrire_image(b"pas encore", 0),
             Err(ErreurEnvoi::PisteFermee)
@@ -1716,7 +1793,11 @@ mod tests {
         // L'identité du spectateur est dédoublée par ses octets : `offrant` la
         // consomme, et il faut pouvoir desceller la réponse de l'hôte.
         let secret = Identity::generate().en_octets();
-        let (_spectateur, offre) = PeerLink::offrant(Identity::depuis_octets(&secret)).unwrap();
+        // Un seul format de chaque côté : avec H.264 et HEVC 4:2:0 en plus, la
+        // ligne média survivrait sur un autre type de charge et la preuve
+        // (« la ligne média disparaît ») ne tiendrait plus.
+        let (_spectateur, offre) =
+            PeerLink::offrant(Identity::depuis_octets(&secret), &[FormatVideo::Hevc444]).unwrap();
         let blob = Blob::from_text(&offre).unwrap();
         let sdp = crate::handshake::decomprimer(&blob.sealed_sdp).unwrap();
         let truque = sdp.replace("tier-flag=0", "tier-flag=1");
@@ -1729,7 +1810,8 @@ mod tests {
         .to_text();
 
         let (mut hote, reponse) =
-            PeerLink::repondant(Identity::generate(), &offre_truquee).unwrap();
+            PeerLink::repondant(Identity::generate(), &offre_truquee, &[FormatVideo::Hevc444])
+                .unwrap();
 
         // L'observation porte sur la RÉPONSE, et non sur un `ecrire_image` après
         // pompage. Une première version de ce test faisait pomper la paire :
@@ -1776,12 +1858,109 @@ mod tests {
         );
     }
 
+    /// `paire_avec_piste`, avec des listes de formats choisies de chaque côté.
+    fn paire_avec_formats(spectateur: &[FormatVideo], hote: &[FormatVideo]) -> (PeerLink, PeerLink) {
+        let (mut s, offre) = PeerLink::offrant(Identity::generate(), spectateur).unwrap();
+        let (mut h, reponse) = PeerLink::repondant(Identity::generate(), &offre, hote).unwrap();
+        s.accepter_reponse(&reponse).unwrap();
+        let limite = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < limite {
+            let _ = s.poll();
+            let _ = h.poll();
+            if s.canal_ouvert() && h.canal_ouvert() && h.piste_ouverte() {
+                return (h, s);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("le canal ou la piste ne se sont pas ouverts dans les 10 s");
+    }
+
+    #[test]
+    fn un_spectateur_h264_seul_obtient_h264_des_deux_cotes() {
+        let (mut hote, mut spectateur) =
+            paire_avec_formats(&[FormatVideo::H264], &FormatVideo::PREFERENCE);
+        assert_eq!(hote.format_negocie(), Some(FormatVideo::H264));
+        assert_eq!(spectateur.format_negocie(), Some(FormatVideo::H264));
+        // Et le paquet arrive bien étiqueté H.264, et reconnu comme image clé :
+        // les deux côtés s'accordent.
+        hote.ecrire_image(UNITE_H264_IDR, 7).unwrap();
+        let evenements = pomper_jusqu_a(&mut spectateur, &mut hote, Duration::from_secs(5));
+        let (format, cle) = evenements
+            .iter()
+            .find_map(|e| match e {
+                LinkEvent::Image { format, cle, .. } => Some((*format, *cle)),
+                _ => None,
+            })
+            .expect("aucune image reçue");
+        assert_eq!(format, Some(FormatVideo::H264));
+        assert!(cle, "une IDR H.264 doit être vue comme image clé");
+    }
+
+    #[test]
+    fn deux_cotes_complets_s_accordent_sur_le_444() {
+        let (hote, spectateur) =
+            paire_avec_formats(&FormatVideo::PREFERENCE, &FormatVideo::PREFERENCE);
+        assert_eq!(hote.format_negocie(), Some(FormatVideo::Hevc444));
+        assert_eq!(spectateur.format_negocie(), Some(FormatVideo::Hevc444));
+    }
+
+    #[test]
+    fn un_hote_sans_444_et_un_spectateur_complet_s_accordent_sur_le_hevc_420() {
+        let (hote, spectateur) = paire_avec_formats(
+            &FormatVideo::PREFERENCE,
+            &[FormatVideo::Hevc420, FormatVideo::H264],
+        );
+        assert_eq!(hote.format_negocie(), Some(FormatVideo::Hevc420));
+        assert_eq!(spectateur.format_negocie(), Some(FormatVideo::Hevc420));
+    }
+
+    #[test]
+    fn des_listes_disjointes_ne_negocient_aucun_format() {
+        let secret = Identity::generate().en_octets();
+        let (_, offre) =
+            PeerLink::offrant(Identity::depuis_octets(&secret), &[FormatVideo::Hevc444]).unwrap();
+        let (mut hote, reponse) =
+            PeerLink::repondant(Identity::generate(), &offre, &[FormatVideo::H264]).unwrap();
+
+        // C'EST CETTE ASSERTION QUI PORTE LA PREUVE : la réponse de l'hôte ne
+        // décrit plus aucun codec vidéo. Les deux suivantes passeraient aussi
+        // bien si `repondant` ignorait sa liste — l'hôte n'a de piste qu'à
+        // `Event::MediaAdded` et pas d'`writer` avant la fin de DTLS —, elles ne
+        // disent que l'effet observable. Vérifié par neutralisation : avec la
+        // liste ignorée, la réponse retient H265 et ce test rougit ici.
+        let spectateur_id = Identity::depuis_octets(&secret);
+        let blob_reponse = Blob::from_text(&reponse).unwrap();
+        let sdp_reponse =
+            crate::handshake::decomprimer(&spectateur_id.open(&blob_reponse.sealed_sdp).unwrap())
+                .unwrap();
+        assert!(
+            !sdp_reponse.contains("H265") && !sdp_reponse.contains("H264"),
+            "la réponse décrit encore un codec : la liste de l'hôte est ignorée"
+        );
+
+        let _ = hote.poll();
+        assert_eq!(hote.format_negocie(), None);
+        assert_eq!(hote.ecrire_image(b"rien", 0), Err(ErreurEnvoi::PisteFermee));
+    }
+
+    #[test]
+    fn offrir_une_liste_vide_est_refuse() {
+        assert!(PeerLink::offrant(Identity::generate(), &[]).is_err());
+    }
+
+    #[test]
+    fn repondre_avec_une_liste_vide_est_refuse() {
+        let (_, offre) = PeerLink::offrant(Identity::generate(), &FormatVideo::PREFERENCE).unwrap();
+        assert!(PeerLink::repondant(Identity::generate(), &offre, &[]).is_err());
+    }
+
     #[test]
     fn la_reponse_reelle_tient_sous_la_borne() {
         // Rougit seul si `repondant` cesse de comprimer son SDP avant de le
         // sceller. L'offre consommée est une vraie sortie d'`offrant`.
-        let (_, offre) = PeerLink::offrant(Identity::generate()).unwrap();
-        let (_, reponse) = PeerLink::repondant(Identity::generate(), &offre).unwrap();
+        let (_, offre) = PeerLink::offrant(Identity::generate(), &FormatVideo::PREFERENCE).unwrap();
+        let (_, reponse) =
+            PeerLink::repondant(Identity::generate(), &offre, &FormatVideo::PREFERENCE).unwrap();
         println!("reponse reelle : {} caracteres", reponse.len());
         assert!(
             reponse.len() < BORNE_BLOC_REEL,

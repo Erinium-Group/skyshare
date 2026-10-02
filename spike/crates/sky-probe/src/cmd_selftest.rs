@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use sky_crypto::Identity;
-use sky_net::{LinkEvent, PeerLink};
+use sky_net::{FormatVideo, LinkEvent, PeerLink};
 
 const DELAI: Duration = Duration::from_secs(10);
 
@@ -19,10 +19,11 @@ pub fn run() -> anyhow::Result<()> {
     // Le sens exigé par la décision D2 : c'est celui qui veut REGARDER qui
     // produit l'offre. L'hôte ne publie aucune adresse avant d'avoir ouvert
     // l'offre et su à qui il parle.
-    let (mut spectateur, offre) = PeerLink::offrant(Identity::generate())?;
+    let (mut spectateur, offre) = PeerLink::offrant(Identity::generate(), &[FormatVideo::Hevc444])?;
     println!("Offre du spectateur : {} caractères", offre.len());
 
-    let (mut hote, reponse) = PeerLink::repondant(Identity::generate(), &offre)?;
+    let (mut hote, reponse) =
+        PeerLink::repondant(Identity::generate(), &offre, &[FormatVideo::Hevc444])?;
     println!("Réponse de l'hôte   : {} caractères", reponse.len());
 
     spectateur.accepter_reponse(&reponse)?;
@@ -86,8 +87,10 @@ pub fn run() -> anyhow::Result<()> {
     // « mauvaise clé ou message altéré » qui envoie chercher un problème de
     // chiffrement inexistant.
     {
-        let (mut autre_spectateur, autre_offre) = PeerLink::offrant(Identity::generate())?;
-        let (_, reponse_etrangere) = PeerLink::repondant(Identity::generate(), &autre_offre)?;
+        let (mut autre_spectateur, autre_offre) =
+            PeerLink::offrant(Identity::generate(), &[FormatVideo::Hevc444])?;
+        let (_, reponse_etrangere) =
+            PeerLink::repondant(Identity::generate(), &autre_offre, &[FormatVideo::Hevc444])?;
         match autre_spectateur.accepter_reponse(&reponse) {
             Err(e) if e.to_string().contains("autre négociation") => {
                 println!("Garde-fou    : un bloc d'un autre essai est bien refusé.")

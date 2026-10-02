@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use sky_compte::{deposer, relever, resoudre_ami, Ami, Coffre, Config, ErreurCompte, Etat};
 use sky_crypto::Identity;
 use sky_decode::{Decodeur, ErreurDecodeur, ImageDecodee};
-use sky_net::{ErreurEnvoi, LinkEvent, MessageControle, PeerLink};
+use sky_net::{ErreurEnvoi, FormatVideo, LinkEvent, MessageControle, PeerLink};
 use sky_rendu::{EtatVisionnage, EvenementFenetre, Fenetre, ImageAAfficher};
 
 use crate::arret::{synchroniser_sauf_arret, Arret, ErreurAttente, HorlogeArretable};
@@ -337,7 +337,7 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
         maintenant: Instant,
     ) -> Result<Suite, ErreurPartage> {
         match evenement {
-            LinkEvent::Image { donnees, horodatage_ms, cle, sans_perte } => {
+            LinkEvent::Image { donnees, horodatage_ms, cle, sans_perte, .. } => {
                 self.sur_image(lien, &donnees, horodatage_ms, cle, sans_perte, maintenant)?;
             }
             LinkEvent::Controle(MessageControle::PartageArrete) => {
@@ -631,7 +631,7 @@ pub fn regarder(
         return Ok(Fin::AucunAppareilChezLAmi { nom: ami.discord_name });
     }
 
-    let (mut link, offre) = PeerLink::offrant(Identity::generate())?;
+    let (mut link, offre) = PeerLink::offrant(Identity::generate(), &[FormatVideo::Hevc444])?;
     let session = session_de(&offre)?;
     let deposes = deposer(config, coffre, &ami.appareils, offre.as_bytes()).map_err(ErreurPartage::Compte)?;
     if deposes == 0 {
@@ -810,7 +810,13 @@ mod tests {
 
     /// Une unité d'accès de `taille` octets, telle que la piste média la rend.
     fn image_de(taille: usize, cle: bool, sans_perte: bool) -> LinkEvent {
-        LinkEvent::Image { donnees: vec![7u8; taille], horodatage_ms: 0, cle, sans_perte }
+        LinkEvent::Image {
+            donnees: vec![7u8; taille],
+            horodatage_ms: 0,
+            cle,
+            sans_perte,
+            format: Some(FormatVideo::Hevc444),
+        }
     }
 
     fn image(cle: bool, sans_perte: bool) -> LinkEvent {
