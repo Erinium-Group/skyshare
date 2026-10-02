@@ -42,7 +42,7 @@ export type FinVue =
   | { cause: "arrete" }
   | { cause: "pas_en_partage"; ami: string }
   | { cause: "reseau_bloque" }
-  | { cause: "trop_lente" }
+  | { cause: "envoi_en_retard" }
   | { cause: "session_expiree" }
   | { cause: "aucune_demande"; fenetreS: number }
   | { cause: "partage_arrete" }

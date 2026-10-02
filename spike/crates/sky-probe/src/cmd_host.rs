@@ -146,8 +146,9 @@ fn afficher_fin(fin: Fin, plancher: u32, plafond: u32) -> anyhow::Result<()> {
         Fin::LienTombe(raison) => println!("\nÉCHEC : {raison}"),
         Fin::FileDePaquetisationPleine => println!(
             "\nÉCHEC : la file de paquetisation vidéo est restée pleine plus de \
-             {} ms — le correspondant ne consomme plus le flux. Arrêt pour ne \
-             pas produire un flux corrompu.",
+             {} ms — cette file est locale : la boucle d'envoi n'a pas servi le \
+             lien assez souvent (ce n'est pas un signe de réseau lent). Arrêt pour \
+             ne pas produire un flux corrompu.",
             BUDGET_RETRY_ENVOI.as_millis(),
         ),
         Fin::DureeEcoulee(bilan) => {

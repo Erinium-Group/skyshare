@@ -6,13 +6,15 @@ import { decimale, duree, messageDeFin } from "./messages";
  * cite tous les quatre rougit dès qu'un mot bouge, mais il ne dit pas lequel, et
  * surtout il ne distingue pas « le texte a changé » de « la mauvaise branche a
  * été choisie ». Un test par cause rougit nommément quand `reseau_bloque` rend
- * le texte de `trop_lente`.
+ * le texte d'`envoi_en_retard`.
  *
  * Ces textes sont une PROMESSE faite à l'utilisateur, pas une étiquette
  * d'interface : les changer change ce qu'on lui dit de son réseau et de sa
- * session. Ils viennent de la spec §4, « Échecs, tous en clair ».
+ * session. Ils viennent de la spec §4, « Échecs, tous en clair » — sauf
+ * `envoi_en_retard`, corrigé par la vague finale du jalon 2 parce que le texte
+ * de la spec désignait une cause réseau fausse.
  */
-describe("les quatre échecs de la spec §4, au mot près", () => {
+describe("les quatre échecs de la spec §4", () => {
   it("l'ami n'est pas en partage — et il est NOMMÉ", () => {
     expect(messageDeFin({ cause: "pas_en_partage", ami: "Bob" })).toBe("Bob n'est pas en partage");
     // Le nom vient de `FinVue`, jamais d'une constante : un message qui dirait
@@ -28,8 +30,16 @@ describe("les quatre échecs de la spec §4, au mot près", () => {
     );
   });
 
-  it("connexion trop lente — la limite connue du transport actuel", () => {
-    expect(messageDeFin({ cause: "trop_lente" })).toBe("La connexion était trop lente pour la vidéo");
+  it("envoi en retard — une cause locale, qui n'accuse pas le réseau", () => {
+    // Revue finale du jalon 2, M4b : la file de paquetisation est LOCALE,
+    // vidée par nos propres `poll` sans rien attendre du correspondant. Le
+    // texte de la spec (« la connexion était trop lente pour la vidéo ») accusait
+    // le réseau. Neutralisation : le remettre — les deux assertions rougissent.
+    const texte = messageDeFin({ cause: "envoi_en_retard" });
+    expect(texte).toBe(
+      "Le partage s'est arrêté : l'envoi de la vidéo a pris trop de retard sur cette machine.",
+    );
+    expect(texte).not.toMatch(/connexion|réseau|lente/);
   });
 
   it("session expirée — reconnecte-toi", () => {

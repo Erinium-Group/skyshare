@@ -52,10 +52,14 @@ const DRAINAGE_ARRET: Duration = Duration::from_millis(50);
 
 /// Budget de relance pour une image déjà encodée que la piste média refuse
 /// encore — voir `EnvoiVideo::envoyer_image`. Le seul refus possible y est
-/// `TropDImagesEnAttente`, et il se résorbe d'un `poll` par place ; ce budget
-/// n'est donc atteint que si le correspondant ne consomme plus rien du tout.
-/// Mesuré sur le chemin média : 0 refus sur 2593 écritures à 12 Mbps et 0 sur
-/// 21552 à 100 Mbps quand la boucle sert le réseau entre deux images.
+/// `TropDImagesEnAttente`, et il se résorbe d'un `poll` par place. La file est
+/// LOCALE — vidée par nos propres `poll`, sans pacer et sans rien attendre du
+/// correspondant (`str0m`, `Media::do_payload`) : ce budget n'est donc atteint
+/// que si CETTE boucle n'a pas servi le lien pendant 300 ms. Ce commentaire
+/// disait « que si le correspondant ne consomme plus rien », ce qui désignait
+/// une fausse cause (revue finale, M4b). Mesuré par la sonde du 27/09 en
+/// boucle locale : 0 refus sur 2593 écritures à 12 Mbps et 0 sur 21552 à
+/// 100 Mbps quand la boucle sert le réseau entre deux images.
 pub const BUDGET_RETRY_ENVOI: Duration = Duration::from_millis(300);
 
 /// Ce que la boucle d'envoi attend du lien pair-à-pair. `PeerLink` en est la
@@ -348,7 +352,7 @@ fn en_annoncant_l_arret<L: LienVideo>(
     // Sans exception, et c'est délibéré. La ronde 1 exemptait `Fin::LienTombe`,
     // sous l'idée qu'il n'y a plus personne à qui parler — mais `Fin::LienTombe`
     // couvre aussi les refus de la PISTE MÉDIA (`PisteFermee`,
-    // `CodecNonNegocie`, `EcritureRefusee`), et le canal de données qui porte
+    // `CodecNonNegocie`, `ImageRefusee`), et le canal de données qui porte
     // `PartageArrete` peut alors être parfaitement vivant. L'exception
     // réintroduisait donc, par une déduction fausse, le défaut même qu'elle
     // accompagnait.
@@ -624,11 +628,14 @@ enum IssueEnvoi {
     /// Partie — au premier coup, ou après avoir laissé la file se dépiler.
     Envoyee,
     /// La file de paquetisation est restée pleine au-delà de
-    /// `BUDGET_RETRY_ENVOI` : le correspondant ne consomme plus rien.
+    /// `BUDGET_RETRY_ENVOI`. Cette file est LOCALE (voir
+    /// `PeerLink::ecrire_image`) : la boucle de l'hôte n'a pas servi le lien
+    /// assez souvent. Ce n'est PAS le correspondant qui ne consomme plus, comme
+    /// ce commentaire le disait.
     FilePleine,
     /// Plus rien ne peut être écrit : soit le lien est tombé
     /// (`LinkEvent::Failed`), soit la piste média ne prend plus d'image
-    /// (`PisteFermee`, `CodecNonNegocie`, `EcritureRefusee`).
+    /// (`PisteFermee`, `CodecNonNegocie`, `ImageRefusee`).
     ///
     /// Les deux cas ne se valent pas — dans le second, le canal de données peut
     /// rester vivant — et c'est pourquoi la variante ne s'appelle pas

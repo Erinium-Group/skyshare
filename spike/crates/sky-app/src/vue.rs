@@ -64,7 +64,11 @@ pub enum FinVue {
     Arrete,
     PasEnPartage { ami: String },
     ReseauBloque,
-    TropLente,
+    /// Hôte : la file de paquetisation, LOCALE, est restée pleine — la boucle
+    /// d'envoi a pris du retard sur cette machine. S'appelait `TropLente` et
+    /// s'affichait « la connexion était trop lente pour la vidéo » : une cause
+    /// réseau que rien ne mesure ici (revue finale du jalon 2, M4b).
+    EnvoiEnRetard,
     SessionExpiree,
     /// La fenêtre de disponibilité VOYAGE avec la cause (revue finale, M3) :
     /// l'interface écrivait « pendant 30 minutes » en dur, et changer
@@ -316,7 +320,7 @@ mod contrat_typescript {
             FinVue::Arrete,
             FinVue::PasEnPartage { ami: "Bob".to_string() },
             FinVue::ReseauBloque,
-            FinVue::TropLente,
+            FinVue::EnvoiEnRetard,
             FinVue::SessionExpiree,
             FinVue::AucuneDemande { fenetre_s: 1800 },
             FinVue::PartageArrete,
@@ -341,7 +345,7 @@ mod contrat_typescript {
                 FinVue::Arrete
                 | FinVue::PasEnPartage { .. }
                 | FinVue::ReseauBloque
-                | FinVue::TropLente
+                | FinVue::EnvoiEnRetard
                 | FinVue::SessionExpiree
                 | FinVue::AucuneDemande { .. }
                 | FinVue::PartageArrete

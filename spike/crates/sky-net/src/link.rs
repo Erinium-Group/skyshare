@@ -50,8 +50,17 @@ pub enum ErreurEnvoi {
     CanalFerme,
     /// Le tampon d'émission est plein : l'appelant réessaie ou renonce.
     TamponPlein,
-    /// `str0m` a refusé l'écriture.
+    /// `str0m` a refusé l'écriture sur le CANAL DE DONNÉES.
     EcritureRefusee,
+    /// `str0m` a refusé une image sur la PISTE MÉDIA, pour une autre raison
+    /// que la file de paquetisation pleine (`TropDImagesEnAttente`).
+    ///
+    /// Séparée d'`EcritureRefusee` par la vague finale (revue de branche, M4a) :
+    /// les deux partageaient « écriture impossible sur le canal », et l'hôte
+    /// lisait « Connexion interrompue : écriture impossible sur le canal » quand
+    /// c'était la piste qui refusait — sur un canal de données parfaitement
+    /// vivant.
+    ImageRefusee,
     /// La file de paquetisation de la piste média est pleine : plus de cent
     /// images attendent d'être découpées en paquets RTP.
     ///
@@ -82,7 +91,7 @@ pub enum ErreurEnvoi {
     /// l'exerce** : il faudrait un correspondant qui accepte la piste sans
     /// retenir HEVC, et `str0m` écarte plutôt la ligne de média entière quand
     /// aucun codec ne concorde. Le cas est nommé plutôt que replié sur
-    /// `EcritureRefusee` parce que la cause est diagnostiquable et que la
+    /// `ImageRefusee` parce que la cause est diagnostiquable et que la
     /// confondre avec un refus d'écriture égarerait le diagnostic.
     CodecNonNegocie,
 }
@@ -92,7 +101,8 @@ impl std::fmt::Display for ErreurEnvoi {
         f.write_str(match self {
             Self::CanalFerme => "canal de données pas ouvert",
             Self::TamponPlein => "tampon d'émission plein",
-            Self::EcritureRefusee => "écriture impossible sur le canal",
+            Self::EcritureRefusee => "écriture impossible sur le canal de données",
+            Self::ImageRefusee => "la piste vidéo a refusé l'image",
             Self::TropDImagesEnAttente => "trop d'images en attente de paquetisation",
             Self::Serialisation => "message impossible à sérialiser",
             Self::PisteFermee => "piste vidéo pas encore négociée",
@@ -790,7 +800,13 @@ impl PeerLink {
     /// Attention à ce qu'un `poll` fait au juste — il libère **une** place et non
     /// la file, `str0m` ne dépilant qu'une image par tour : plusieurs refus
     /// d'affilée sont normaux quand on a beaucoup de retard. Toute autre erreur
-    /// rend `EcritureRefusee` et n'a pas de relance connue.
+    /// rend `ImageRefusee` et n'a pas de relance connue.
+    ///
+    /// **Cette file est LOCALE.** Elle se vide pendant nos propres `poll`
+    /// (`Media::do_payload`), sans pacer (`NullPacer`, `enable_bwe` n'étant pas
+    /// activé) et sans rien attendre du correspondant. Un refus dit donc que la
+    /// boucle de l'hôte n'a pas servi le lien assez souvent — pas que le réseau
+    /// est lent.
     ///
     /// La sonde du 27/09/2026 n'a mesuré **aucun** refus (0 sur 21552
     /// écritures à 100 Mbps), **en boucle locale**, avec une boucle qui sert le
@@ -823,7 +839,7 @@ impl PeerLink {
             // porter du SDP, donc des adresses.
             .map_err(|e| match e {
                 str0m::RtcError::WriteWithoutPoll => ErreurEnvoi::TropDImagesEnAttente,
-                _ => ErreurEnvoi::EcritureRefusee,
+                _ => ErreurEnvoi::ImageRefusee,
             })
     }
 
@@ -1626,9 +1642,24 @@ mod tests {
     }
 
     #[test]
+    fn un_refus_de_la_piste_ne_se_dit_pas_comme_un_refus_du_canal() {
+        // Revue finale, M4a : les deux refus partageaient « écriture impossible
+        // sur le canal », et l'hôte accusait un canal vivant. Neutralisation :
+        // rendre le texte d'`EcritureRefusee` pour `ImageRefusee` — ce test
+        // rougit. Ce qu'il ne prouve pas : que `ecrire_image` rend bien
+        // `ImageRefusee` — aucun refus de `str0m` autre que la file pleine
+        // n'est provocable ici ; le branchement se lit dans le code.
+        let piste = ErreurEnvoi::ImageRefusee.to_string();
+        let canal = ErreurEnvoi::EcritureRefusee.to_string();
+        assert!(piste.contains("piste"), "le refus de la piste la nomme : {piste}");
+        assert!(!piste.contains("canal"), "et ne désigne pas le canal : {piste}");
+        assert_ne!(piste, canal);
+    }
+
+    #[test]
     fn la_file_de_paquetisation_pleine_est_un_refus_recuperable() {
         // La propriété dont la tâche 8 dépendra : ce refus-là se relance, il ne
-        // s'abandonne pas. Le confondre avec `EcritureRefusee` obligerait
+        // s'abandonne pas. Le confondre avec `ImageRefusee` obligerait
         // l'appelant à deviner — et sous GOP infini, abandonner une image casse
         // la chaîne de références pour tout le reste du flux.
         let (mut hote, mut spectateur) = paire_avec_piste();

@@ -150,8 +150,14 @@ pub enum Fin {
     /// `etablir` : canal non ouvert en `DELAI_ETABLISSEMENT`.
     EtablissementEchoue(Diagnostic),
     /// Hôte : la **file de paquetisation** de la piste média est restée pleine
-    /// plus de `BUDGET_RETRY_ENVOI` — « la connexion était trop lente pour la
-    /// vidéo » (écart 7). Le correspondant ne dépile plus rien.
+    /// plus de `BUDGET_RETRY_ENVOI`.
+    ///
+    /// Cette file est LOCALE : `str0m` la vide pendant nos propres `poll`, sans
+    /// pacer et sans rien attendre du correspondant. Elle ne dit donc rien d'un
+    /// réseau lent : elle dit que la boucle de l'hôte n'a pas servi le lien
+    /// assez souvent. Cette documentation disait « la connexion était trop
+    /// lente pour la vidéo, le correspondant ne dépile plus rien », et
+    /// l'interface l'affichait (revue finale, M4b ; cas jamais observé).
     ///
     /// S'appelait `TamponSature { morceau, morceaux }` jusqu'à la tâche 10 du
     /// jalon 2 : le découpage maison et son tampon d'émission ont disparu à la
@@ -163,7 +169,7 @@ pub enum Fin {
     ///
     /// LE NOM DIT MOINS QUE LA VARIANTE. Elle couvre bien un lien tombé
     /// (`LinkEvent::Failed`), mais aussi, côté hôte, une piste média qui ne
-    /// prend plus d'image (`PisteFermee`, `CodecNonNegocie`, `EcritureRefusee`)
+    /// prend plus d'image (`PisteFermee`, `CodecNonNegocie`, `ImageRefusee`)
     /// alors que le canal de données peut être parfaitement vivant. Ne pas en
     /// déduire qu'il n'y a plus personne à qui parler : `hote.rs` a déjà payé
     /// cette erreur une fois (`en_annoncant_l_arret`).

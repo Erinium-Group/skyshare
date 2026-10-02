@@ -127,7 +127,7 @@ pub fn fin_vue(issue: &Result<Fin, ErreurPartage>) -> FinVue {
                       abouti."
                 .to_string(),
         },
-        Ok(Fin::FileDePaquetisationPleine) => FinVue::TropLente,
+        Ok(Fin::FileDePaquetisationPleine) => FinVue::EnvoiEnRetard,
         Ok(Fin::PartageArrete) => FinVue::PartageArrete,
         // La durée affichée vient de la constante du cœur, jamais d'un littéral
         // de l'interface (revue finale, M3) : `FENETRE_HOTE` est ce que `hote`
@@ -325,7 +325,7 @@ mod tests {
             FinVue::PasEnPartage { ami: "Bob".into() }
         );
         assert_eq!(fin_vue(&Ok(Fin::EtablissementEchoue(diagnostic(false)))), FinVue::ReseauBloque);
-        assert_eq!(fin_vue(&Ok(Fin::FileDePaquetisationPleine)), FinVue::TropLente);
+        assert_eq!(fin_vue(&Ok(Fin::FileDePaquetisationPleine)), FinVue::EnvoiEnRetard);
         assert_eq!(
             fin_vue(&Err(ErreurPartage::Compte(ErreurCompte::Refuse))),
             FinVue::SessionExpiree

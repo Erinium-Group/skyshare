@@ -30,12 +30,15 @@ export function messageDeFin(fin: FinVue): string {
       // Un CONSTAT, pas une cause supposée : rien ne mesure lequel des deux
       // réseaux bloque (spec §4).
       return "Aucune connexion directe n'a pu s'établir entre vos deux réseaux";
-    case "trop_lente":
-      // La file de paquetisation de la piste média est restée pleine : le
-      // correspondant ne dépilait plus rien (`Fin::FileDePaquetisationPleine`).
-      // L'ancien commentaire parlait d'un « tampon d'émission saturé » — un
-      // mécanisme disparu avec le découpage maison, à la tâche 8 du jalon 2.
-      return "La connexion était trop lente pour la vidéo";
+    case "envoi_en_retard":
+      // TEXTE CORRIGÉ PAR LA VAGUE FINALE DU JALON 2 (revue de branche, M4b) :
+      // il remplace « La connexion était trop lente pour la vidéo », texte de la
+      // spec §4 du jalon 1. La fin vient de la file de paquetisation de la
+      // piste média (`Fin::FileDePaquetisationPleine`), qui est LOCALE : `str0m`
+      // la vide pendant nos propres `poll`, sans rien attendre du correspondant.
+      // Elle dit que l'envoi a pris du retard sur cette machine, rien d'un
+      // réseau lent. Cas jamais observé ; texte à valider par le propriétaire.
+      return "Le partage s'est arrêté : l'envoi de la vidéo a pris trop de retard sur cette machine.";
     case "session_expiree":
       return "Session expirée — reconnecte-toi";
     case "arrete":
