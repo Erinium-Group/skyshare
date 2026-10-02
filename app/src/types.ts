@@ -68,7 +68,8 @@ export type PartageVue =
       spectateur: string | null;
       depuisMs: number;
       debitMbps: number;
-      rttMs: number;
+      /** `null` quand rien ne le mesure — aujourd'hui toujours, côté hôte. */
+      rttMs: number | null;
       ecran: number;
     }
   | { etat: "demande"; ami: string; debutMs: number }

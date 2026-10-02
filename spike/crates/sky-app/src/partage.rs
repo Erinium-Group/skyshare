@@ -239,7 +239,7 @@ pub fn appliquer(
                 spectateur,
                 depuis_ms: maintenant_ms,
                 debit_mbps: 0.0,
-                rtt_ms: 0.0,
+                rtt_ms: None,
                 ecran: *ecran,
             })
         }
@@ -248,7 +248,7 @@ pub fn appliquer(
                 spectateur: spectateur.clone(),
                 depuis_ms: maintenant_ms,
                 debit_mbps: 0.0,
-                rtt_ms: 0.0,
+                rtt_ms: None,
                 ecran: *ecran,
             })
         }
@@ -412,10 +412,37 @@ mod tests {
                 spectateur: Some("Bob".into()),
                 depuis_ms: 5_000,
                 debit_mbps: 0.0,
-                rtt_ms: 0.0,
+                rtt_ms: None,
                 ecran: 1
             })
         );
+    }
+
+    #[test]
+    fn un_aller_retour_absent_reste_absent_jusqu_a_l_interface() {
+        // I4 de la revue finale : l'hôte n'a aucune mesure de RTT, et un 0
+        // s'affichait « Aller-retour : 0 ms ». Neutralisation : rendre
+        // `rtt_ms: Some(rtt_ms.unwrap_or(0.0))` dans `appliquer` — ce test rougit.
+        let actuel = PartageVue::Diffuse {
+            spectateur: None,
+            depuis_ms: 1,
+            debit_mbps: 0.0,
+            rtt_ms: None,
+            ecran: 0,
+        };
+        let mesure = Evenement::Mesures(Mesures::Envoi {
+            debit_mbps: 12.4,
+            cible_mbps: 30.0,
+            images_sautees: 0,
+            rtt_ms: None,
+        });
+        let Some(PartageVue::Diffuse { rtt_ms, debit_mbps, .. }) =
+            appliquer(&actuel, &mesure, 2_000, None)
+        else {
+            panic!("une mesure d'envoi met à jour la diffusion");
+        };
+        assert_eq!(rtt_ms, None, "aucune mesure ne devient un zéro");
+        assert_eq!(debit_mbps, 12.4);
     }
 
     #[test]

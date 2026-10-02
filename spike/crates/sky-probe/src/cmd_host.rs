@@ -103,9 +103,17 @@ pub(crate) fn lignes_hote(evenement: &Evenement) -> Vec<String> {
             "\nRésolution {largeur}x{hauteur}, {}, plancher {plancher_mbps} Mbps, plafond {plafond_mbps} Mbps.\n",
             codec.label()
         )],
-        Evenement::Mesures(Mesures::Envoi { debit_mbps, cible_mbps, images_sautees, rtt_ms }) => vec![format!(
-            "  {debit_mbps:.1} Mbps envoyés | cible pacer {cible_mbps:.1} Mbps | {images_sautees} images sautées cumulées | RTT {rtt_ms:.1} ms"
-        )],
+        Evenement::Mesures(Mesures::Envoi { debit_mbps, cible_mbps, images_sautees, rtt_ms }) => {
+            // « RTT 0.0 ms » s'affichait depuis la piste média, faute d'écho :
+            // un zéro qui ressemblait à une mesure (revue finale, I4).
+            let rtt = match rtt_ms {
+                Some(ms) => format!("{ms:.1} ms"),
+                None => "non mesuré".to_string(),
+            };
+            vec![format!(
+                "  {debit_mbps:.1} Mbps envoyés | cible pacer {cible_mbps:.1} Mbps | {images_sautees} images sautées cumulées | RTT {rtt}"
+            )]
+        }
         // Événements du spectateur : `heberger` ne les émet jamais.
         Evenement::DemandeEnvoyee { .. } | Evenement::ReponseRecue { .. } | Evenement::Mesures(Mesures::Reception { .. }) => {
             Vec::new()
@@ -321,11 +329,27 @@ mod tests {
             debit_mbps: 12.34,
             cible_mbps: 20.0,
             images_sautees: 3,
-            rtt_ms: 85.24,
+            rtt_ms: Some(85.24),
         }));
         assert_eq!(
             lignes,
             vec!["  12.3 Mbps envoyés | cible pacer 20.0 Mbps | 3 images sautées cumulées | RTT 85.2 ms".to_string()]
+        );
+    }
+
+    #[test]
+    fn un_rtt_absent_se_dit_non_mesure_et_jamais_zero() {
+        // I4 de la revue finale. Neutralisation : rendre `0.0 ms` pour `None`
+        // — ce test rougit.
+        let lignes = lignes_hote(&Evenement::Mesures(Mesures::Envoi {
+            debit_mbps: 12.34,
+            cible_mbps: 20.0,
+            images_sautees: 3,
+            rtt_ms: None,
+        }));
+        assert_eq!(
+            lignes,
+            vec!["  12.3 Mbps envoyés | cible pacer 20.0 Mbps | 3 images sautées cumulées | RTT non mesuré".to_string()]
         );
     }
 

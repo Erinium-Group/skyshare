@@ -343,6 +343,21 @@ describe("panneau de partage", () => {
     expect(screen.getByText("115 ms")).toBeInTheDocument();
   });
 
+  it("un aller-retour non mesuré se dit « non mesuré », jamais « 0 ms »", () => {
+    // Revue finale du jalon 2, I4 : le cœur n'a aucune mesure de RTT côté
+    // hôte. Neutralisation : afficher `${Math.round(partage.rttMs ?? 0)} ms` —
+    // ce test rougit.
+    render(
+      <PanneauPartage
+        instantane={instantaneDeTest({
+          partage: { etat: "diffuse", spectateur: "Bob", depuisMs: Date.now(), debitMbps: 12.4, rttMs: null, ecran: 0 },
+        })}
+      />,
+    );
+    expect(screen.getByText("non mesuré")).toBeInTheDocument();
+    expect(screen.queryByText("0 ms")).toBeNull();
+  });
+
   it("un spectateur sans nom ne fait pas afficher « null regarde ton écran »", () => {
     // `spectateur: string | null` dans `types.ts` : le cœur ne connaît pas
     // toujours le nom. Neutralisation : retirer le `?? "Un ami"`.

@@ -83,7 +83,13 @@ export function PanneauPartage({ instantane }: { instantane: Instantane }) {
           <dl className="flex gap-8">
             <Mesure libelle="Depuis" valeur={duree(maintenant - partage.depuisMs)} />
             <Mesure libelle="Débit envoyé" valeur={`${decimale(partage.debitMbps)} Mbps`} />
-            <Mesure libelle="Aller-retour" valeur={`${Math.round(partage.rttMs)} ms`} />
+            {/* Revue finale du jalon 2, I4 : l'hôte n'a plus aucune mesure
+                d'aller-retour depuis la piste média, et un 0 s'affichait
+                « 0 ms » — une mesure parfaite qui n'existait pas. */}
+            <Mesure
+              libelle="Aller-retour"
+              valeur={partage.rttMs === null ? "non mesuré" : `${Math.round(partage.rttMs)} ms`}
+            />
           </dl>
         </section>
       );

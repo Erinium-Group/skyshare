@@ -36,7 +36,11 @@ pub enum Evenement {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Mesures {
-    Envoi { debit_mbps: f64, cible_mbps: f64, images_sautees: u64, rtt_ms: f64 },
+    /// `rtt_ms` est `None` quand rien ne l'a mesuré — c'est le cas de l'hôte
+    /// depuis la piste média (aucun écho, RTCP lu par personne). Il valait 0 :
+    /// l'interface affichait « Aller-retour : 0 ms », une mesure parfaite qui
+    /// n'existait pas (revue finale du jalon 2, I4).
+    Envoi { debit_mbps: f64, cible_mbps: f64, images_sautees: u64, rtt_ms: Option<f64> },
     /// Le relevé du spectateur, tel que `Visionnage::relever_mesures` le
     /// produit : une seule source de vérité de la boucle jusqu'à l'interface.
     Reception(MesuresVisionnage),

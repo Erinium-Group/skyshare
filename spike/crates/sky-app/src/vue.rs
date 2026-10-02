@@ -110,7 +110,17 @@ pub enum PartageVue {
     /// Hôte disponible : une demande sera honorée jusqu'à `debut + fenetre`.
     Disponible { debut_ms: u64, fenetre_s: u64, ecran: usize },
     /// Hôte : un ami regarde (ou se connecte).
-    Diffuse { spectateur: Option<String>, depuis_ms: u64, debit_mbps: f64, rtt_ms: f64, ecran: usize },
+    ///
+    /// `rtt_ms` est `None` tant que rien ne le mesure — aujourd'hui toujours :
+    /// l'hôte n'a plus d'écho depuis la piste média. L'interface affiche alors
+    /// « non mesuré » ; un 0 s'y lisait comme une mesure parfaite (I4).
+    Diffuse {
+        spectateur: Option<String>,
+        depuis_ms: u64,
+        debit_mbps: f64,
+        rtt_ms: Option<f64>,
+        ecran: usize,
+    },
     /// Spectateur : demande envoyée, réponse attendue.
     Demande { ami: String, debut_ms: u64 },
     /// Spectateur : connecté, l'image s'affiche dans la fenêtre de visionnage
@@ -286,7 +296,7 @@ mod contrat_typescript {
                 spectateur: Some("Bob".to_string()),
                 depuis_ms: 1,
                 debit_mbps: 12.0,
-                rtt_ms: 15.0,
+                rtt_ms: Some(15.0),
                 ecran: 0,
             },
             PartageVue::Demande { ami: "Bob".to_string(), debut_ms: 1 },
@@ -537,10 +547,13 @@ mod contrat_typescript {
             spectateur: None,
             depuis_ms: 1,
             debit_mbps: 1.0,
-            rtt_ms: 1.0,
+            rtt_ms: None,
             ecran: 0,
         })
         .unwrap();
         present_et_nul(&diffuse, "spectateur");
+        // I4 : un aller-retour non mesuré arrive `null`, jamais 0 ni absent —
+        // l'interface en fait « non mesuré ».
+        present_et_nul(&diffuse, "rttMs");
     }
 }

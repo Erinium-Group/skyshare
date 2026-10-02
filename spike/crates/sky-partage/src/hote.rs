@@ -579,9 +579,9 @@ fn diffuser(
                 debit_mbps: delta as f64 * 8.0 / ecoule / 1e6,
                 cible_mbps: pacer.target_bps() as f64 / 1e6,
                 images_sautees,
-                // Sans écho, aucun RTT à annoncer — 0 dit « pas de mesure »,
-                // comme `rtt_ms: None` dans le bilan final.
-                rtt_ms: 0.0,
+                // Sans écho, aucun RTT à annoncer : `None`, comme dans le bilan
+                // final. Un 0 s'affichait « Aller-retour : 0 ms » (I4).
+                rtt_ms: None,
             }));
             octets_precedent = envoi.octets;
             dernier_affichage = Instant::now();

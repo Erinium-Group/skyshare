@@ -316,8 +316,10 @@ personne. La perte n'est plus visible qu'à travers les **refus de la file de pa
 débit monte de 8 % par tic jusqu'au plafond, **et n'en redescend pas**. **Ce n'est pas structurel** :
 `SEUIL_PERTE` valant 2 %, un seul refus dans une fenêtre de moins de cinquante images suffit à
 faire détecter une congestion. **C'est la première chose à regarder si l'image se dégrade pendant
-l'essai à deux machines.** Corollaire visible au terminal : la colonne « RTT » des lignes de mesure
-de `sky-probe host` affiche **0,0 ms en dur**, ce n'est pas une mesure.
+l'essai à deux machines.** Corollaire visible : la colonne « RTT » de `sky-probe host` et la ligne
+« Aller-retour » du panneau de l'hôte affichaient **0 ms en dur**, qui se lisait comme une mesure
+parfaite. Depuis la vague finale (revue finale, I4), les deux disent **« non mesuré »** : la valeur
+voyage en `Option` du cœur jusqu'à l'écran. Le `Pacer`, lui, reçoit toujours un 0 en interne.
 
 **3. Dette de vérifiabilité : la preuve du décodage n'est rejouable que sur la machine du
 propriétaire.** Les tests de `sky-decode` lisent `spike/cmp-hevc-444.h265` (17,5 Mo) jusqu'à
