@@ -9,12 +9,15 @@ use std::time::{Duration, Instant};
 
 use sky_compte::{deposer, relever, resoudre_ami, Ami, Coffre, Config, ErreurCompte, Etat};
 use sky_crypto::Identity;
-use sky_decode::{Decodeur, ErreurDecodeur, ImageDecodee};
+use sky_decode::{
+    sonder_decodage, CodecMf, Decodeur, DecodeurMf, ErreurDecodeur, ImageDecodee, ImageMf,
+};
 use sky_net::{ErreurEnvoi, FormatVideo, LinkEvent, MessageControle, PeerLink};
 use sky_rendu::{EtatVisionnage, EvenementFenetre, Fenetre, ImageAAfficher};
 
 use crate::arret::{synchroniser_sauf_arret, Arret, ErreurAttente, HorlogeArretable};
 use crate::etablissement::{etablir, Etablissement};
+use crate::formats::{formats_a_offrir, formats_decodables};
 use crate::evenement::{
     Bilan, BilanReception, ErreurPartage, ErreurVisionnage, Evenement, Fin, Mesures,
     MesuresVisionnage,
@@ -178,6 +181,18 @@ impl Decodage for Decodeur {
     }
 }
 
+impl Decodage for DecodeurMf {
+    type Image = ImageMf;
+
+    fn decoder(
+        &mut self,
+        unite: &[u8],
+        horodatage_ms: u64,
+    ) -> Result<Option<ImageMf>, ErreurDecodeur> {
+        DecodeurMf::decoder(self, unite, horodatage_ms)
+    }
+}
+
 /// Ce que `Visionnage::traiter` dit à la boucle de faire ensuite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Suite {
@@ -222,6 +237,10 @@ pub enum Suite {
 /// tour un défaut qui ne se dénonce pas, alors que « En attente de l'image… »
 /// se lit. Le coût est borné par un aller-retour de demande d'image clé.
 pub struct Visionnage<D, A> {
+    // L'ORDRE DES CHAMPS EST UNE CONTRAINTE : Rust détruit les champs dans
+    // l'ordre de leur déclaration. `decodeur` doit donc précéder `afficheur`,
+    // pour que le décodeur Media Foundation (bâti sur le périphérique D3D11 de
+    // la fenêtre) tombe AVANT la fenêtre qui porte ce périphérique.
     decodeur: D,
     afficheur: A,
     reception: Reception,
@@ -595,6 +614,10 @@ pub struct ParametresSpectateur<'a> {
     /// `sky-probe view` le prend AVANT de lire le coffre, comme au C2 (spec
     /// §8, « exactement comme à l'essai réel »).
     pub lancement: Instant,
+    /// `sky-probe view --format` : restreint ce que le spectateur offre, sans
+    /// jamais l'élargir au-delà de ce qu'il décode. `None` partout ailleurs
+    /// (l'application offre tout ce qu'elle sait décoder).
+    pub formats_imposes: Option<Vec<FormatVideo>>,
 }
 
 pub fn regarder(
@@ -611,16 +634,21 @@ pub fn regarder(
     if coffre.identifiant_appareil().map_err(ErreurPartage::Compte)?.is_none() {
         return Ok(Fin::AucunAppareilLocal);
     }
-    // Le décodeur AVANT toute négociation, et c'est voulu (spec §5 : les
-    // capacités s'interrogent « avant ») : une machine sans carte NVIDIA, ou dont
-    // le décodeur ne prend pas le 4:4:4, l'apprend en une fraction de seconde au
-    // lieu de traverser la boîte aux lettres et ICE — et l'hôte ne démarre ni
-    // capture ni encodage pour un spectateur qui n'aurait rien pu en faire. Après
-    // la vérification d'appareil, qui est locale et donne un message plus utile.
-    // Le contexte CUDA tenu pendant l'attente ne coûte rien de mesurable ; il est
-    // lié à ce fil, qui est aussi celui de la boucle de réception.
-    let decodeur = Decodeur::nouveau(LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)
-        .map_err(|e| ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(e)))?;
+    // Les capacités AVANT toute négociation, et c'est voulu (spec §5) : une
+    // machine qui ne décode rien l'apprend en une fraction de seconde, sans
+    // traverser la boîte aux lettres ni ICE, et l'hôte ne démarre rien pour elle.
+    // La sonde ne garde rien d'ouvert : le décodeur réel naît après la connexion,
+    // sur le périphérique de la fenêtre (Media Foundation l'exige). Après la
+    // vérification d'appareil, qui est locale et donne un message plus utile.
+    let formats = formats_a_offrir(
+        formats_decodables(&sonder_decodage(LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)),
+        p.formats_imposes.as_deref(),
+    );
+    if formats.is_empty() {
+        return Err(ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(
+            ErreurDecodeur::AucunDecodeur,
+        )));
+    }
     // L'identité DURABLE : c'est pour sa clé d'annuaire que l'hôte scelle
     // l'enveloppe de sa réponse. La clé de l'offre, elle, est éphémère.
     let identite = coffre.identite().map_err(ErreurPartage::Compte)?;
@@ -631,7 +659,7 @@ pub fn regarder(
         return Ok(Fin::AucunAppareilChezLAmi { nom: ami.discord_name });
     }
 
-    let (mut link, offre) = PeerLink::offrant(Identity::generate(), &[FormatVideo::Hevc444])?;
+    let (mut link, offre) = PeerLink::offrant(Identity::generate(), &formats)?;
     let session = session_de(&offre)?;
     let deposes = deposer(config, coffre, &ami.appareils, offre.as_bytes()).map_err(ErreurPartage::Compte)?;
     if deposes == 0 {
@@ -680,22 +708,34 @@ pub fn regarder(
     };
     evenements(Evenement::Connecte { en: duree, depuis_le_lancement: Some(lancement.elapsed()) });
 
+    // Le lien est ouvert : le format que l'hôte a retenu est connu. Aucun, c'est
+    // que `str0m` a écarté la ligne média — aucun format commun aux deux cartes.
+    let Some(format) = link.format_negocie() else {
+        return Ok(Fin::AucunFormatCommun);
+    };
+
     // Ouvert APRÈS la connexion, comme le fichier de `view` au C2 : jamais de
     // fichier vide laissé par une négociation ratée.
     let puits = ouvrir_puits()?;
-    recevoir(&mut link, decodeur, &ami.discord_name, puits, p.duree_max, arret, evenements)
+    recevoir(&mut link, format, &ami.discord_name, puits, p.duree_max, arret, evenements)
 }
 
-/// Ouvre la fenêtre, puis passe la main à `boucle`.
+/// Ouvre la fenêtre, construit le décodeur du format négocié, puis passe la
+/// main à `boucle`.
 ///
-/// Le décodeur (créé en tête de `regarder`) et la fenêtre sont fabriqués dans ce
-/// module plutôt que reçus de l'appelant, pour que ni `ParametresSpectateur` ni
-/// la signature de `regarder` ne changent. Cette fonction n'est que du câblage
-/// vers des types réels ; tout ce qui se décide est dans `boucle` et
-/// `Visionnage`, éprouvés par doublures.
+/// Le décodeur naît ICI, après la négociation, et non en tête de `regarder` :
+/// `regarder` ne sonde que les capacités (avant tout réseau), et le moteur dépend
+/// du format retenu par l'hôte. NVDEC (`Decodeur`) pour le HEVC 4:4:4 ;
+/// Media Foundation (`DecodeurMf`) pour le HEVC 4:2:0 et le H.264, construit sur
+/// le périphérique D3D11 de la fenêtre — d'où la fenêtre ouverte d'abord.
+///
+/// Le décodeur et la fenêtre sont fabriqués dans ce module plutôt que reçus de
+/// l'appelant, pour que la signature de `regarder` reste celle des appelants.
+/// Cette fonction n'est que du câblage vers des types réels ; tout ce qui se
+/// décide est dans `boucle` et `Visionnage`, éprouvés par doublures.
 fn recevoir(
     link: &mut PeerLink,
-    decodeur: Decodeur,
+    format: FormatVideo,
     nom_de_l_hote: &str,
     puits: Option<Puits>,
     duree_max: Option<Duration>,
@@ -707,8 +747,20 @@ fn recevoir(
         LARGEUR_FENETRE,
         HAUTEUR_FENETRE,
     )?;
-    let visionnage = Visionnage::nouveau(decodeur, fenetre, Instant::now());
-    boucle(link, visionnage, puits, duree_max, arret, evenements)
+    evenements(Evenement::Format(format));
+    let ouverture = |e| ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(e));
+    match format {
+        FormatVideo::Hevc444 => {
+            let decodeur = Decodeur::nouveau(LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE).map_err(ouverture)?;
+            boucle(link, Visionnage::nouveau(decodeur, fenetre, Instant::now()), puits, duree_max, arret, evenements)
+        }
+        FormatVideo::Hevc420 | FormatVideo::H264 => {
+            let codec = if format == FormatVideo::H264 { CodecMf::H264 } else { CodecMf::Hevc };
+            let decodeur = DecodeurMf::nouveau(codec, fenetre.appareil(), LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)
+                .map_err(ouverture)?;
+            boucle(link, Visionnage::nouveau(decodeur, fenetre, Instant::now()), puits, duree_max, arret, evenements)
+        }
+    }
 }
 
 /// La boucle de réception : décoder, afficher, mesurer — jusqu'à une fin.

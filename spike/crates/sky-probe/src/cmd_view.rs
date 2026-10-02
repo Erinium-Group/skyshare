@@ -7,13 +7,17 @@ use std::time::{Duration, Instant};
 
 use sky_compte::synchroniser;
 use sky_partage::{
-    regarder, Arret, Bilan, BilanReception, Designation, Evenement, Fin, Mesures, ParametresSpectateur, Puits,
+    regarder, Arret, Bilan, BilanReception, Designation, Evenement, Fin, FormatVideo, Mesures,
+    ParametresSpectateur, Puits,
 };
 
 use crate::cmd_compte::{avertissement_consommation, causes_d_un_depot_refuse, config_et_coffre};
-use crate::cmd_host::{afficher, afficher_diagnostic, erreur_partage};
+use crate::cmd_host::{afficher, afficher_diagnostic, erreur_partage, format_depuis_texte};
 
-pub fn run(ami_designe: &str, secondes: u64, sortie: &str) -> anyhow::Result<()> {
+pub fn run(ami_designe: &str, secondes: u64, sortie: &str, format: &str) -> anyhow::Result<()> {
+    // Validé avant tout : une faute de frappe coûte une seconde, pas une
+    // négociation.
+    let formats_imposes = formats_imposes(format)?;
     // Pris AVANT le coffre, comme au C2 : c'est d'ici que se mesurent
     // « Réponse reçue après » et « depuis le lancement de view ».
     let lancement = Instant::now();
@@ -29,6 +33,7 @@ pub fn run(ami_designe: &str, secondes: u64, sortie: &str) -> anyhow::Result<()>
             ami: Designation::Texte(ami_designe),
             duree_max: Some(Duration::from_secs(secondes)),
             lancement,
+            formats_imposes,
         },
         || Ok(Some(Box::new(File::create(sortie)?) as Puits)),
         &arret,
@@ -36,6 +41,14 @@ pub fn run(ami_designe: &str, secondes: u64, sortie: &str) -> anyhow::Result<()>
     )
     .map_err(erreur_partage)?;
     afficher_fin(fin, sortie)
+}
+
+/// `auto` : rien d'imposé. Sinon le seul format nommé.
+fn formats_imposes(texte: &str) -> anyhow::Result<Option<Vec<FormatVideo>>> {
+    if texte == "auto" {
+        return Ok(None);
+    }
+    Ok(Some(vec![format_depuis_texte(texte)?]))
 }
 
 /// La conscience DPI par moniteur, posée AVANT que `regarder` n'ouvre la
@@ -90,13 +103,13 @@ fn lignes_spectateur(evenement: &Evenement, sortie: &str) -> Vec<String> {
             m.latence_decodage_ms,
             m.images_abandonnees
         )],
+        Evenement::Format(f) => vec![format!("format négocié : {}", f.libelle())],
         // Événements de l'hôte : `regarder` ne les émet jamais.
         Evenement::Pret
         | Evenement::Disponible { .. }
         | Evenement::DemandeEcartee { .. }
         | Evenement::EchecLocal { .. }
         | Evenement::DemandeRecue { .. }
-        | Evenement::Format(_)
         | Evenement::Diffusion { .. }
         | Evenement::Mesures(Mesures::Envoi { .. }) => Vec::new(),
     }
@@ -136,8 +149,8 @@ fn afficher_fin(fin: Fin, sortie: &str) -> anyhow::Result<()> {
         | Fin::FileDePaquetisationPleine
         | Fin::AucunFormatEncodable => {}
         Fin::AucunFormatCommun => println!(
-            "\nÉCHEC : aucun format vidéo en commun — ce décodeur ne sait lire aucun format \
-             que la carte de ton ami encode."
+            "\nÉCHEC : aucun format vidéo en commun — la carte de ton ami n'encode aucun des \
+             formats que cette machine offre (ce qu'elle décode, restreint par `--format`)."
         ),
     }
     Ok(())
@@ -171,6 +184,21 @@ fn afficher_bilan(b: &BilanReception, sortie: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_n_impose_rien_et_un_nom_impose_ce_seul_format() {
+        assert_eq!(formats_imposes("auto").unwrap(), None);
+        assert_eq!(formats_imposes("H264").unwrap(), Some(vec![FormatVideo::H264]));
+        assert!(formats_imposes("av1").is_err());
+    }
+
+    #[test]
+    fn le_format_negocie_s_affiche_comme_chez_l_hote() {
+        assert_eq!(
+            lignes_spectateur(&Evenement::Format(FormatVideo::Hevc420), "recu.h265"),
+            vec![format!("format négocié : {}", FormatVideo::Hevc420.libelle())]
+        );
+    }
 
     #[test]
     fn la_ligne_connecte_du_spectateur_est_celle_du_c2() {

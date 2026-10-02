@@ -95,7 +95,12 @@ impl Partageur for PartageurReel {
             noyau.config(),
             noyau.coffre(),
             |_| noyau.synchroniser(),
-            ParametresSpectateur { ami: Designation::Identifiant(ami), duree_max: None, lancement },
+            ParametresSpectateur {
+                ami: Designation::Identifiant(ami),
+                duree_max: None,
+                lancement,
+                formats_imposes: None,
+            },
             || Ok(None),
             arret,
             evenements,
