@@ -16,6 +16,10 @@ Architecture générale : `docs/superpowers/specs/2026-08-22-skyshare-architectu
 > (`.superpowers/sdd/2026-09-30-jalon-2-premier-pixel/progress.md`, **ignoré par git**) ou le
 > code lui-même ; elle est recopiée ici pour survivre à la fusion.
 
+> **Corrections de la vague finale, 02/10/2026, après la revue de branche.** Signalées sur place
+> par « *Corrigé par la vague finale* » : (a) une carte sans HEVC 4:4:4 ne « diffuse » rien de
+> lisible — le partage exige désormais ce codec, §5, §7 et §10.
+
 ---
 
 ## §1 Ce que ce jalon livre, et ce qu'il ne livre pas
@@ -234,7 +238,9 @@ pub struct ImageDecodee { /* ... */ }
 pub enum ErreurDecodeur {
     /// Aucune carte NVIDIA : cette machine ne peut ni diffuser ni recevoir (§7).
     AucuneCarteNvidia(String),
-    /// Carte présente, mais son décodeur ne prend pas le HEVC 4:4:4 (antérieure à Turing).
+    /// Carte présente, mais son décodeur ne prend pas le HEVC 4:4:4 : elle ne peut pas recevoir.
+    /// (*Corrigé par la vague finale* : la spec ajoutait « antérieure à Turing », génération
+    /// qu'aucun code ne vérifie, et en déduisait au §7 qu'une telle carte peut diffuser.)
     QuatreQuatreQuatreNonPris,
     /// Carte capable du 4:4:4, mais pas à cette taille.
     ResolutionTropGrande { largeur: u32, hauteur: u32, maximum: (u32, u32) },
@@ -359,16 +365,31 @@ Textes exacts, en français, à reprendre verbatim dans `app/src/messages.ts` :
 | Situation | Message |
 |---|---|
 | Aucune carte NVIDIA | « Cette machine n'a pas de carte graphique NVIDIA. SkyShare ne peut ni partager son écran ni en recevoir un sur cette machine. » |
-| Carte NVIDIA antérieure à Turing | « La carte graphique de cette machine peut partager un écran, mais pas en recevoir un : son décodeur ne prend pas en charge la couleur pleine résolution. » |
+| Carte NVIDIA sans décodage HEVC 4:4:4 | « Le décodeur de la carte graphique de cette machine ne prend pas en charge la couleur pleine résolution : SkyShare ne peut pas recevoir d'écran sur cette machine. » — *corrigé par la vague finale*, voir ci-dessous |
 | Session de décodage refusée | « Le décodeur vidéo n'a pas pu démarrer. Fermez les autres applications qui utilisent la carte graphique, puis réessayez. » |
 | Flux illisible malgré une demande d'image clé | « L'image ne peut pas être reconstituée. Demandez à la personne qui partage de relancer son partage. » |
 
 **Correction d'une inexactitude du dépôt.** `CLAUDE.md` affirmait jusqu'ici : « Pas de repli
 logiciel x264. Sans carte NVIDIA, une machine ne peut que recevoir. » C'est faux sous cette
 conception : sans carte NVIDIA, il n'y a **ni NVENC ni NVDEC**, donc ni diffusion ni réception.
-La phrase supposait un décodage logiciel qui n'existe nulle part dans le projet. Le cas « peut
-diffuser, pas recevoir » est celui des **cartes NVIDIA antérieures à Turing**, qui encodent mais
-ne décodent pas le 4:4:4.
+La phrase supposait un décodage logiciel qui n'existe nulle part dans le projet.
+
+*Corrigé par la vague finale (02/10/2026, revue de branche, I2).* Ce paragraphe ajoutait : « le cas
+“peut diffuser, pas recevoir” est celui des cartes NVIDIA antérieures à Turing, qui encodent mais
+ne décodent pas le 4:4:4 », et le message de la ligne 2 du tableau le promettait à l'utilisateur.
+C'était faux deux fois. **D'après le code**, une carte qui n'encode pas le HEVC 4:4:4 ne diffuse
+rien de lisible : `pick_best` lui choisissait H.264 ou AV1, envoyé sur une piste qui ne négocie que
+le H265, vers un décodeur qui n'accepte que le 4:4:4. **D'après le dépôt lui-même**, le jalon 0
+(écart 6, base documentaire) dit que les GTX 10xx n'encodent pas le HEVC 4:4:4 du tout. Ce qui est
+vrai, et que le code tient désormais :
+
+- **partager exige un encodeur NVENC HEVC 4:4:4** — sinon refus avant tout réseau, avec un
+  message propre (`Noyau::partager`, et `heberger` qui rend `Fin::CodecNonTransmissible` pour tout
+  autre appelant) ;
+- **regarder exige un décodeur NVDEC HEVC 4:4:4 8 bits** — sinon refus à l'ouverture.
+
+Quelles générations de cartes passent l'un ou l'autre n'est **pas tranché** ici : aucune carte
+antérieure à Turing n'a été essayée.
 
 ---
 
@@ -464,8 +485,9 @@ limite à écrire, pas à laisser découvrir par un utilisateur.
 ## §10 Limites assumées, écrites d'avance
 
 - **Un seul spectateur, un seul écran, pas de son.**
-- **Sans carte NVIDIA : ni diffusion ni réception.** Carte antérieure à Turing : diffusion
-  seulement.
+- **Sans carte NVIDIA : ni diffusion ni réception.** Sans encodeur HEVC 4:4:4 : pas de
+  diffusion ; sans décodeur HEVC 4:4:4 : pas de réception. *Corrigé par la vague finale* : la
+  spec disait « carte antérieure à Turing : diffusion seulement », voir §7.
 - **Déchirement possible**, conséquence assumée de D7 (latence prioritaire).
 - **L'écart 7 reste ouvert** jusqu'au second essai réel. Ce jalon établit que la cause supposée
   disparaît, pas que le RTT est bon.

@@ -123,6 +123,12 @@ pub struct Diagnostic {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fin {
     Arrete,
+    /// Hôte : le codec demandé n'est pas le HEVC 4:4:4, refusé AVANT tout
+    /// réseau. C'est le seul codec que la piste média négocie
+    /// (`sky-net/src/link.rs`, catalogue réduit au H265) et le seul que le
+    /// décodeur du spectateur accepte (4:4:4 8 bits) : tout autre flux partirait
+    /// sur une piste H265 et ne serait lisible par personne.
+    CodecNonTransmissible { codec: Codec },
     /// `duree_max` atteinte (`sky-probe --seconds`). Jamais dans l'application.
     DureeEcoulee(Box<Bilan>),
     AucunAppareilLocal,

@@ -80,7 +80,9 @@ pub enum FinVue {
     // selon la langue de Windows.
     /// Aucune carte NVIDIA : ni NVENC ni NVDEC, donc ni diffusion ni réception.
     SansCarteNvidia,
-    /// Carte antérieure à Turing : elle encode, mais ne décode pas le 4:4:4.
+    /// Carte NVIDIA dont le décodeur ne prend pas le HEVC 4:4:4 : elle ne peut
+    /// pas recevoir. Rien n'est dit de sa capacité à partager, qui exige
+    /// l'ENCODAGE HEVC 4:4:4 et se décide ailleurs (`Noyau::partager`).
     #[serde(rename = "sans_decodage_444")]
     SansDecodage444,
     /// Session de décodage refusée, ou contexte CUDA impossible à rendre

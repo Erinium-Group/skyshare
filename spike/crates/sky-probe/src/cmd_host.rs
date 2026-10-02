@@ -115,6 +115,12 @@ pub(crate) fn lignes_hote(evenement: &Evenement) -> Vec<String> {
 
 fn afficher_fin(fin: Fin, plancher: u32, plafond: u32) -> anyhow::Result<()> {
     match fin {
+        Fin::CodecNonTransmissible { codec } => anyhow::bail!(
+            "{} refusé : la piste vidéo ne négocie que le HEVC 4:4:4, et le spectateur ne \
+             décode que lui — tout autre flux ne serait lisible par personne. Relance avec \
+             `--codec hevc444` (la valeur par défaut).",
+            codec.label()
+        ),
         Fin::AucunAppareilLocal => anyhow::bail!(
             "aucun appareil enregistré sur cette machine — lance d'abord \
              `sky-probe device register <nom>`."

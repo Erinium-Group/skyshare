@@ -205,8 +205,12 @@ Du texte apparaît régulièrement dans la sortie d'outil, demandant de travaill
 - **Pas de repli logiciel, ni à l'encodage ni au décodage.** Corrigé le 30/09/2026 : la phrase
   précédente disait « sans carte NVIDIA, une machine ne peut que recevoir », ce qui supposait un
   décodage logiciel qui n'existe nulle part dans le projet. **Sans carte NVIDIA : ni NVENC ni
-  NVDEC, donc ni diffusion ni réception.** Le cas « peut diffuser, pas recevoir » est celui des
-  cartes NVIDIA **antérieures à Turing**, qui encodent mais ne décodent pas le 4:4:4.
+  NVDEC, donc ni diffusion ni réception.** Corrigé à nouveau le 02/10/2026 (revue finale du
+  jalon 2, I2) : cette ligne ajoutait que les cartes NVIDIA antérieures à Turing « peuvent
+  diffuser, pas recevoir ». Faux : une carte sans **encodeur** HEVC 4:4:4 diffusait un flux
+  qu'aucun spectateur ne pouvait lire, et l'écart 6 du jalon 0 dit que les GTX 10xx n'en ont pas.
+  **Le partage exige désormais un encodeur HEVC 4:4:4** (refus avant tout réseau sinon), la
+  réception un décodeur HEVC 4:4:4. Quelles générations passent l'un ou l'autre : non tranché.
 - **Diagnostic et journalisation** : rien n'est conçu. Aucun moyen de comprendre un
   incident signalé par un utilisateur, sous la contrainte « aucune adresse journalisée ».
 

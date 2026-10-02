@@ -133,6 +133,12 @@ pub fn fin_vue(issue: &Result<Fin, ErreurPartage>) -> FinVue {
         // de l'interface (revue finale, M3) : `FENETRE_HOTE` est ce que `hote`
         // a réellement attendu avant de rendre `AucuneDemande`.
         Ok(Fin::AucuneDemande) => FinVue::AucuneDemande { fenetre_s: FENETRE_HOTE.as_secs() },
+        // `Noyau::partager` refuse déjà ce cas avant tout démarrage ; cette
+        // branche ne sert que si ce refus disparaissait un jour — et elle dit
+        // alors la même chose.
+        Ok(Fin::CodecNonTransmissible { .. }) => {
+            FinVue::Autre { message: crate::noyau::MESSAGE_SANS_HEVC_444.to_string() }
+        }
         Ok(Fin::AucunAppareilLocal) => FinVue::Autre {
             message: "Cette machine n'a pas d'appareil enregistré : reconnecte-toi.".to_string(),
         },

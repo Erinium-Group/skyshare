@@ -67,6 +67,14 @@ pub const MESSAGE_SESSION_EXPIREE: &str = "Session expirée — reconnecte-toi";
 /// « Regarder », par `FinVue::SansCarteNvidia`.
 pub const MESSAGE_SANS_NVIDIA: &str =
     "Partage impossible : aucune carte NVIDIA utilisable sur cette machine.";
+/// Une carte NVIDIA est là, mais son encodeur ne fait pas le HEVC 4:4:4 :
+/// `pick_best` a retenu un autre codec. Or le HEVC 4:4:4 est le seul que la
+/// piste média négocie et que le spectateur décode — partager autre chose
+/// produirait un flux que personne ne peut lire (revue finale du jalon 2, I2).
+/// TEXTE NOUVEAU, ABSENT DE LA SPEC : à valider par le propriétaire.
+pub const MESSAGE_SANS_HEVC_444: &str = "Partage impossible : la carte graphique de cette machine \
+     n'encode pas la couleur pleine résolution (HEVC 4:4:4), le seul format que SkyShare sait \
+     transmettre.";
 /// L'écran choisi n'est plus dans la liste relevée à l'instant du clic — il a
 /// été débranché, ou la liste affichée avait vieilli.
 pub const MESSAGE_ECRAN_DISPARU: &str = "Cet écran n'existe plus : choisis-en un autre.";
@@ -1157,6 +1165,14 @@ impl Noyau {
             let mut d = self.donnees();
             permis_hors_partage(Phase::de(&d.partage))?;
             let codec = d.nvenc.ok_or_else(|| MESSAGE_SANS_NVIDIA.to_string())?;
+            // Refusé ICI, avant toute réservation, pour le message ; `heberger`
+            // refuse aussi (`Fin::CodecNonTransmissible`), pour tout appelant.
+            // Les deux ne sont pas redondantes : celle-ci donne la cause en
+            // clair sans démarrer de fil ni changer l'icône, celle-là tient le
+            // contrat même si celle-ci disparaît.
+            if codec != Codec::Hevc444 {
+                return Err(MESSAGE_SANS_HEVC_444.to_string());
+            }
             // Le rang est validé contre la liste QU'ON VIENT DE RELEVER : sans
             // cela, un rang périmé arriverait jusqu'à `WgcCapture::new`, qui
             // partagerait un autre moniteur — ou échouerait loin de l'utilisateur.
@@ -2525,6 +2541,23 @@ mod tests {
         assert_eq!(c.noyau.partager(0), Err(MESSAGE_SANS_NVIDIA.to_string()));
         assert_eq!(c.noyau.phase(), Phase::Inactive);
         assert!(c.coquille.icones.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn une_carte_sans_hevc_444_ne_partage_pas_un_flux_illisible() {
+        // I2 de la revue finale. `pick_best` rend H.264 ou AV1 sur une carte
+        // sans HEVC 4:4:4 ; la piste ne négocie que le H265 et le spectateur ne
+        // décode que le 4:4:4. Neutralisation : retirer le refus de `partager`
+        // — le partage démarre (la garde de `heberger` n'est pas atteinte par
+        // le partageur factice), l'icône change, ce test rougit.
+        let c = contexte("sky-test-app-sans-hevc-444", true);
+        *c.coquille.ecrans.lock().unwrap() = vec![ecran(0, "A")];
+        for codec in [Codec::H264_444, Codec::Av1_420, Codec::H264_420] {
+            c.noyau.definir_nvenc(Some(codec));
+            assert_eq!(c.noyau.partager(0), Err(MESSAGE_SANS_HEVC_444.to_string()), "{codec:?}");
+            assert_eq!(c.noyau.phase(), Phase::Inactive);
+        }
+        assert!(c.coquille.icones.lock().unwrap().is_empty(), "rien n'a démarré");
     }
 
     #[test]

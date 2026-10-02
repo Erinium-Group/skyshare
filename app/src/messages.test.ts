@@ -52,10 +52,16 @@ describe("les quatre messages du décodage, spec du jalon 2 §7, au mot près", 
     );
   });
 
-  it("carte antérieure à Turing : partager oui, recevoir non", () => {
-    expect(messageDeFin({ cause: "sans_decodage_444" })).toBe(
-      "La carte graphique de cette machine peut partager un écran, mais pas en recevoir un : son décodeur ne prend pas en charge la couleur pleine résolution.",
+  it("carte sans décodage 4:4:4 : recevoir non, et rien n'est promis du partage", () => {
+    // Le texte de la spec promettait « peut partager un écran » : faux en
+    // général (le partage exige l'ENCODAGE HEVC 4:4:4, qu'aucun code ne vérifie
+    // ici). Corrigé le 02/10/2026 ; la seconde assertion garde la promesse
+    // retirée hors du texte.
+    const texte = messageDeFin({ cause: "sans_decodage_444" });
+    expect(texte).toBe(
+      "Le décodeur de la carte graphique de cette machine ne prend pas en charge la couleur pleine résolution : SkyShare ne peut pas recevoir d'écran sur cette machine.",
     );
+    expect(texte).not.toMatch(/peut partager/);
   });
 
   it("décodeur refusé : fermer ce qui occupe la carte", () => {

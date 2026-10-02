@@ -150,8 +150,10 @@ Capture à **164,3 im/s** (rapport 0,99 au taux d'écran), CPU de la chaîne à 
 - **Repli logiciel x264** — le spike n'implémente que NVENC. ~~Une machine sans carte
   NVIDIA ne peut pas émettre, seulement recevoir.~~ *Corrigé le 02/10/2026 : faux depuis le
   jalon 2, qui décode par NVDEC sans aucun repli logiciel. Sans carte NVIDIA, une machine ne
-  peut **ni émettre ni recevoir** ; une NVIDIA antérieure à Turing peut émettre, pas recevoir
-  (spec du jalon 2, §7). Même phrase que celle corrigée dans `CLAUDE.md` le 30/09.*
+  peut **ni émettre ni recevoir**. Même phrase que celle corrigée dans `CLAUDE.md` le 30/09.*
+  *Corrigé par la vague finale du jalon 2 (02/10/2026) : cette ligne ajoutait « une NVIDIA
+  antérieure à Turing peut émettre, pas recevoir ». Faux : partager exige un encodeur HEVC 4:4:4
+  (sinon refus, revue finale I2), et l'écart 6 ci-dessus dit que les GTX 10xx n'en ont pas.*
 
 ---
 
@@ -394,7 +396,11 @@ Au terme de la tâche 10 : `cargo test --workspace --no-fail-fast` **420 réussi
 ### Limites connues, écrites d'avance
 - **Un seul spectateur, un écran, pas de son** ; déchirement possible (présentation sans attente de
   synchronisation verticale, D7).
-- **Sans NVIDIA : ni diffusion ni réception.** NVIDIA antérieure à Turing : diffusion seulement.
+- **Sans NVIDIA : ni diffusion ni réception.** Sans encodeur HEVC 4:4:4 : pas de diffusion — le
+  partage est refusé avant tout réseau, au lieu d'envoyer un flux que personne ne peut lire (revue
+  finale, I2). Sans décodeur HEVC 4:4:4 : pas de réception. *La ligne disait « NVIDIA antérieure à
+  Turing : diffusion seulement », en contradiction avec l'écart 6 (GTX 10xx : pas de HEVC 4:4:4) ;
+  quelles générations passent l'un ou l'autre n'est pas tranché, aucune n'ayant été essayée.*
 - **Un spectateur sans image clé verrait une image faussement plausible**, sans erreur du décodeur
   (rafraîchissement intra progressif). Le garde-fou est applicatif, dans `spectateur.rs`.
 - **L'aller-retour décodage n'est éprouvé qu'en 1440 et 1080**, deux multiples de 8 ; l'en-tête

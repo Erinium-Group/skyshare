@@ -41,8 +41,11 @@ const ECART_MAX_TOLERE: u8 = 1;
 
 /// Ouvre le décodeur, ou fait échouer le test en disant que le matériel manque.
 ///
-/// Ce test est celui du **receveur** : le jalon 0 a établi qu'une machine sans
-/// carte NVIDIA ne peut qu'émettre. Se taire en vert sans décodeur serait « une
+/// Ce test est celui du **receveur**, et un receveur sans décodeur NVIDIA
+/// HEVC 4:4:4 n'existe pas : le projet n'a aucun repli logiciel, ni à
+/// l'encodage ni au décodage. (Ce commentaire disait « une machine sans carte
+/// NVIDIA ne peut qu'émettre », phrase corrigée dans `CLAUDE.md` le 30/09/2026 :
+/// sans carte NVIDIA, ni émission ni réception.) Se taire en vert sans décodeur serait « une
 /// preuve qui passerait aussi bien dans le cas négatif » — la faute que ce dépôt
 /// documente nommément.
 fn decodeur_ou_echouer() -> Decodeur {

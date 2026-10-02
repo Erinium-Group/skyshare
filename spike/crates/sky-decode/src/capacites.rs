@@ -24,9 +24,14 @@ pub enum ErreurDecodeur {
     )]
     AucuneCarteNvidia(String),
 
+    /// Le texte ne dit RIEN de la capacité à partager, et c'est voulu : il
+    /// disait « cette machine peut partager un écran », ce que rien ne vérifie
+    /// ici — partager exige un ENCODEUR HEVC 4:4:4, que ce module ne sonde pas,
+    /// et le jalon 0 (écart 6) indique, sur base documentaire, que les cartes
+    /// qui ne décodent pas le 4:4:4 ne l'encodent pas non plus.
     #[error(
-        "le décodeur de cette carte ne prend pas en charge le HEVC 4:4:4. Cette \
-         machine peut partager un écran, mais pas en recevoir un."
+        "le décodeur de cette carte ne prend pas en charge le HEVC 4:4:4 : cette \
+         machine ne peut pas recevoir d'écran."
     )]
     QuatreQuatreQuatreNonPris,
 
@@ -154,8 +159,9 @@ mod tests {
     #[test]
     fn sans_format_de_sortie_444_le_verdict_refuse() {
         let mut brut = brut_capable();
-        // La carte se dit capable, mais n'offre que du NV12 (bit 0) : c'est le cas
-        // des cartes antérieures à Turing. Mesuré à la sonde du 27/09 : pour notre
+        // La carte se dit capable, mais n'offre que du NV12 (bit 0) : le cas d'une
+        // carte qui ne décode pas le 4:4:4 (supposé, aucune n'a été essayée ici).
+        // Mesuré à la sonde du 27/09 : pour notre
         // flux, une carte capable n'offre MÊME PAS NV12 — le masque est donc la
         // source de vérité, pas `bIsSupported` seul.
         brut.nOutputFormatMask = 1 << 0;

@@ -236,6 +236,16 @@ pub fn heberger(
     arret: &Arret,
     evenements: &mut dyn FnMut(Evenement),
 ) -> Result<Fin, ErreurPartage> {
+    // Le contrat de codec, tenu ICI et pas seulement chez l'appelant : la piste
+    // média ne négocie que le H265, et le spectateur ne décode que le 4:4:4.
+    // `pick_best` peut pourtant rendre H.264 ou AV1 sur une carte sans HEVC
+    // 4:4:4, et `sky-probe host --codec` accepte tout : un tel flux partirait
+    // sur une piste H265 et ne serait lisible par personne. `sky-app` refuse
+    // aussi en amont (`Noyau::partager`), pour son message ; cette garde-ci
+    // protège tout appelant, présent ou futur. Les deux ne sont pas redondantes.
+    if p.codec != Codec::Hevc444 {
+        return Ok(Fin::CodecNonTransmissible { codec: p.codec });
+    }
     // Construit AVANT la négociation (C2) : une faute de bornes doit coûter
     // une seconde, pas une attente de FENETRE_HOTE.
     let mut pacer =
@@ -1334,6 +1344,46 @@ mod tests {
             [0, 0, 255, 255],
             "la retenue doit garder l'image capturée (rouge), pas ce que le pool y a écrit ensuite"
         );
+    }
+
+    #[test]
+    fn un_codec_autre_que_hevc_444_est_refuse_avant_tout_reseau() {
+        // I2 de la revue finale. La piste média ne négocie que le H265 et le
+        // spectateur ne décode que le 4:4:4 : un flux H.264 ou AV1 partirait
+        // et ne serait lisible par personne. Neutralisation mesurée : retirer la
+        // garde en tête de `heberger` — il poursuit jusqu'à la vérification
+        // d'appareil, rend `AucunAppareilLocal`, et ce test rougit sur la fin.
+        let coffre = Coffre::pour_test("sky-test-partage-codec-hote");
+        let config = Config::vers("http://127.0.0.1:1");
+        let mut synchronisations = 0u32;
+        let mut evenements = Vec::new();
+
+        for codec in [Codec::H264_420, Codec::H264_444, Codec::Av1_420] {
+            let fin = heberger(
+                &config,
+                &coffre,
+                |_| {
+                    synchronisations += 1;
+                    Err(ErreurCompte::Refuse)
+                },
+                ParametresHote {
+                    codec,
+                    plafond_mbps: 30,
+                    plancher_mbps: 10,
+                    moniteur: 0,
+                    source: SourceImages::Ecran,
+                    duree_max: None,
+                },
+                &Arret::nouveau(),
+                &mut |e| evenements.push(e),
+            );
+            assert!(
+                matches!(fin, Ok(Fin::CodecNonTransmissible { codec: refuse }) if refuse == codec),
+                "{codec:?} doit être refusé : {fin:?}"
+            );
+        }
+        assert_eq!(synchronisations, 0, "aucune synchronisation : rien n'a touché le réseau");
+        assert!(evenements.is_empty(), "rien n'est annoncé : {evenements:?}");
     }
 
     #[test]

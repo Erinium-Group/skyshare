@@ -128,7 +128,10 @@ fn afficher_fin(fin: Fin, sortie: &str) -> anyhow::Result<()> {
         // elle, le lève (un seul chemin d'arrêt, tâche 10). Les autres fins
         // sont celles de l'hôte.
         Fin::Arrete => println!("\nFenêtre fermée : visionnage arrêté. Fichier écrit : {sortie}"),
-        Fin::AucuneDemande | Fin::ReponseRefusee | Fin::FileDePaquetisationPleine => {}
+        Fin::AucuneDemande
+        | Fin::ReponseRefusee
+        | Fin::FileDePaquetisationPleine
+        | Fin::CodecNonTransmissible { .. } => {}
     }
     Ok(())
 }

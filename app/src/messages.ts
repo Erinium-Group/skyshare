@@ -57,7 +57,13 @@ export function messageDeFin(fin: FinVue): string {
     case "sans_carte_nvidia":
       return "Cette machine n'a pas de carte graphique NVIDIA. SkyShare ne peut ni partager son écran ni en recevoir un sur cette machine.";
     case "sans_decodage_444":
-      return "La carte graphique de cette machine peut partager un écran, mais pas en recevoir un : son décodeur ne prend pas en charge la couleur pleine résolution.";
+      // TEXTE DE LA SPEC §7 CORRIGÉ le 02/10/2026 (revue finale du jalon 2,
+      // I2). Il promettait « cette machine peut partager un écran » : rien ne
+      // le vérifie à cet endroit — partager exige un ENCODEUR HEVC 4:4:4 —, et
+      // le jalon 0 (écart 6) dit, sur base documentaire, que les cartes sans
+      // décodage 4:4:4 ne l'encodent pas non plus. Le texte ne dit plus que ce
+      // qui est su : cette machine ne peut pas recevoir.
+      return "Le décodeur de la carte graphique de cette machine ne prend pas en charge la couleur pleine résolution : SkyShare ne peut pas recevoir d'écran sur cette machine.";
     case "decodeur_refuse":
       // Session refusée ou contexte CUDA perdu : deux causes, un message vrai
       // des deux.
