@@ -73,14 +73,17 @@ export function messageDeFin(fin: FinVue): string {
     case "resolution_trop_grande":
       // TEXTE NOUVEAU, ABSENT DE LA SPEC (tâche 10). La spec ne prévoyait que
       // trois refus du décodeur ; celui-ci est le quatrième. Il est levé À
-      // L'OUVERTURE, avant toute connexion, contre la taille que le spectateur
-      // annonce — l'écran de l'ami n'est pas encore connu, et le message ne
-      // doit donc pas l'accuser.
+      // L'OUVERTURE contre la taille que le spectateur annonce, et depuis la
+      // vague finale (I3) aussi au premier paquet contre la taille CODÉE du
+      // flux reçu — qui peut dépasser l'écran de quelques lignes (1088 pour
+      // 1080). Dans les deux cas le message dit ce qui manque à CETTE carte,
+      // sans accuser l'ami.
       return `Le décodeur vidéo de cette carte graphique s'arrête à ${fin.largeurMax}×${fin.hauteurMax} : SkyShare a besoin d'au moins ${fin.largeur}×${fin.hauteur} pour recevoir un écran sur cette machine.`;
     case "decodage_interrompu":
       // TEXTE NOUVEAU, ABSENT DE LA SPEC (ronde de correction 1 de la tâche
-      // 10). Le décodeur, ouvert et qui a peut-être déjà montré l'image, a
-      // refusé le flux trop longtemps malgré les demandes d'image clé. Les
+      // 10). Le décodeur, qui a DÉJÀ montré au moins une image (vague finale,
+      // I3 : avant, c'est une erreur d'ouverture), a refusé le flux trop
+      // longtemps malgré les demandes d'image clé. Les
       // textes de la spec §7 décrivent l'OUVERTURE (« n'a pas pu démarrer »,
       // « cette carte ne prend pas en charge… ») et seraient faux ici. Rien ne
       // dit de quel côté vient le défaut : le message n'en désigne aucun.

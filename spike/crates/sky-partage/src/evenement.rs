@@ -188,16 +188,24 @@ pub enum Fin {
 /// `SessionRefusee` en cours de flux arrive après que l'image s'est affichée,
 /// quand « le décodeur n'a pas pu démarrer » serait faux. Les messages de la
 /// spec §7 décrivent l'ouverture ; le flux a donc sa propre variante.
+///
+/// LE CRITÈRE EST LA PREMIÈRE IMAGE AFFICHÉE, pas le lieu de l'appel (revue
+/// finale du jalon 2, I3). La session NVDEC ne naît qu'au premier paquet reçu,
+/// dans le rappel de séquence : un pilote qui la refuse, ou un flux plus grand
+/// que la carte, échoue PENDANT le flux alors que rien n'a été vu. Une telle
+/// erreur est une erreur d'ouverture.
 #[derive(Debug)]
 pub enum ErreurVisionnage {
-    /// `Decodeur::nouveau` a refusé, en tête de `regarder`, avant toute
-    /// négociation : pas de carte, pas de 4:4:4, résolution trop grande,
-    /// session refusée. Les messages de la spec §7 sont ceux-là.
+    /// Le décodeur n'a jamais démarré : `Decodeur::nouveau` a refusé en tête de
+    /// `regarder` (pas de carte, pas de 4:4:4, résolution annoncée trop
+    /// grande), ou le décodage a échoué AVANT la première image affichée —
+    /// plafond de refus atteint, ou délai d'attente expiré sur un refus. Les
+    /// messages de la spec §7 sont ceux-là.
     Ouverture(ErreurDecodeur),
-    /// Le décodeur, ouvert et fonctionnel, a refusé
-    /// `ECHECS_DECODAGE_AVANT_ABANDON` unités de suite PENDANT le flux, malgré
-    /// les demandes d'image clé. L'erreur portée est la dernière reçue : elle
-    /// renseigne `sky-probe`, elle ne désigne pas une cause à l'utilisateur.
+    /// Le décodeur, qui a déjà fait afficher au moins une image, a refusé
+    /// `ECHECS_DECODAGE_AVANT_ABANDON` unités de suite, malgré les demandes
+    /// d'image clé. L'erreur portée est la dernière reçue : elle renseigne
+    /// `sky-probe`, elle ne désigne pas une cause à l'utilisateur.
     DecodageInterrompu(ErreurDecodeur),
     /// Aucune image clé en `ATTENTE_IMAGE_CLE_MAX` malgré les demandes.
     ImageIrreconstituable,

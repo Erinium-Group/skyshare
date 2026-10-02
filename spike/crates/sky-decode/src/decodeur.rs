@@ -98,6 +98,10 @@ struct EtatPartage {
     /// de la carte, que [`sonder_materiel`] a déjà vérifiée.
     largeur_annoncee: u32,
     hauteur_annoncee: u32,
+    /// Taille maximale que le décodeur de la carte accepte, relevée par
+    /// [`sonder_materiel`]. `nouveau` ne la compare qu'à la taille ANNONCÉE ; le
+    /// rappel de séquence la compare à la taille RÉELLE du flux.
+    maximum: (u32, u32),
     /// Taille de la zone affichée, connue seulement au rappel de séquence.
     largeur_affichee: u32,
     hauteur_affichee: u32,
@@ -180,6 +184,7 @@ impl Decodeur {
             session: Rc::clone(&session),
             largeur_annoncee: largeur,
             hauteur_annoncee: hauteur,
+            maximum: (capacites.largeur_max, capacites.hauteur_max),
             largeur_affichee: 0,
             hauteur_affichee: 0,
             hauteur_surface: 0,
@@ -302,6 +307,28 @@ fn verifier_format_de_sequence(format: &CUVIDEOFORMAT) -> Result<(), ErreurDecod
     Ok(())
 }
 
+/// La taille RÉELLE du flux tient-elle dans ce que la carte décode ?
+///
+/// `Decodeur::nouveau` ne vérifie que la taille ANNONCÉE par le spectateur
+/// (2560×1440) : un hôte dont l'écran dépasse le maximum de la carte faisait
+/// échouer `cuvidCreateDecoder`, et l'utilisateur lisait « le décodeur n'a pas
+/// pu démarrer, fermez les autres applications » — une fausse cause (revue
+/// finale, I3). On compare donc aussi la taille codée, ici, et le refus porte
+/// sa propre variante, avec ses chiffres.
+fn verifier_taille_de_sequence(
+    format: &CUVIDEOFORMAT,
+    maximum: (u32, u32),
+) -> Result<(), ErreurDecodeur> {
+    if format.coded_width > maximum.0 || format.coded_height > maximum.1 {
+        return Err(ErreurDecodeur::ResolutionTropGrande {
+            largeur: format.coded_width,
+            hauteur: format.coded_height,
+            maximum,
+        });
+    }
+    Ok(())
+}
+
 /// Rappel de séquence : NVDEC a lu les en-têtes et annonce le format.
 ///
 /// Valeur de retour attendue par le SDK : 0 pour échouer, sinon le nombre de
@@ -316,7 +343,9 @@ unsafe extern "C" fn rappel_sequence(donnees: *mut c_void, format: *mut CUVIDEOF
         return etat.surfaces_de_decodage as c_int;
     }
 
-    if let Err(refus) = verifier_format_de_sequence(format) {
+    if let Err(refus) = verifier_format_de_sequence(format)
+        .and_then(|()| verifier_taille_de_sequence(format, etat.maximum))
+    {
         etat.erreur = Some(refus);
         return 0;
     }
@@ -456,6 +485,22 @@ mod tests {
         format.chroma_format = cudaVideoChromaFormat::cudaVideoChromaFormat_420;
         let refus = verifier_format_de_sequence(&format).expect_err("doit être refusé");
         assert!(matches!(refus, ErreurDecodeur::QuatreQuatreQuatreNonPris));
+    }
+
+    #[test]
+    fn un_flux_plus_grand_que_la_carte_est_refuse_avec_ses_chiffres() {
+        // Revue finale, I3. Neutralisation : faire rendre `Ok(())` à
+        // `verifier_taille_de_sequence` sans comparer — ce test rougit, et lui
+        // seul. Que le rappel de séquence l'appelle se lit dans le code : aucun
+        // flux plus grand que le maximum d'une RTX 4060 n'est à portée de test.
+        let format = format_conforme(); // 2560×1440
+        let refus = verifier_taille_de_sequence(&format, (2048, 1152)).expect_err("trop grand");
+        assert!(matches!(
+            refus,
+            ErreurDecodeur::ResolutionTropGrande { largeur: 2560, hauteur: 1440, maximum: (2048, 1152) }
+        ));
+        verifier_taille_de_sequence(&format, (4096, 4096)).expect("tient dans la carte");
+        verifier_taille_de_sequence(&format, (2560, 1440)).expect("pile à la limite");
     }
 
     #[test]

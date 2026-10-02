@@ -234,6 +234,16 @@ pub struct Visionnage<D, A> {
     /// pas une panne : il ne doit pas repeindre « Connexion perdue » par-dessus.
     partage_arrete: bool,
     echecs_consecutifs: u32,
+    /// Au moins une image a été montrée. C'est le critère qui sépare une erreur
+    /// d'OUVERTURE d'une erreur du FLUX (revue finale, I3) : la session NVDEC
+    /// ne naît qu'au premier paquet reçu (rappel de séquence), donc un pilote
+    /// qui la refuse échoue PENDANT le flux — alors que rien n'a été affiché, et
+    /// que « s'est interrompu en cours de visionnage » serait faux.
+    image_affichee: bool,
+    /// La dernière erreur du décodeur, tant qu'aucune image n'a été affichée et
+    /// qu'aucun décodage n'a réussi depuis. Si l'attente d'une image clé expire
+    /// dans cet état, c'est elle la cause — pas une image irreconstituable.
+    erreur_avant_image: Option<ErreurDecodeur>,
     images_abandonnees: u32,
     // La fenêtre de mesure, remise à zéro à chaque relevé.
     debut_fenetre: Instant,
@@ -256,6 +266,8 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             en_attente_depuis: None,
             partage_arrete: false,
             echecs_consecutifs: 0,
+            image_affichee: false,
+            erreur_avant_image: None,
             images_abandonnees: 0,
             debut_fenetre: maintenant,
             octets_precedent: 0,
@@ -347,7 +359,15 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             if !self.partage_arrete
                 && maintenant.saturating_duration_since(depuis) >= ATTENTE_IMAGE_CLE_MAX
             {
-                return Err(ErreurPartage::Visionnage(ErreurVisionnage::ImageIrreconstituable));
+                // Un décodeur qui n'a jamais rien montré et dont le dernier
+                // geste a été un refus n'a pas démarré : c'est la cause à dire,
+                // pas une image irreconstituable — le cas d'unités qui arrivent
+                // trop lentement pour atteindre le plafond de refus (I3).
+                let cause = match self.erreur_avant_image.take() {
+                    Some(erreur) => ErreurVisionnage::Ouverture(erreur),
+                    None => ErreurVisionnage::ImageIrreconstituable,
+                };
+                return Err(ErreurPartage::Visionnage(cause));
             }
         }
         Ok(Suite::Continuer)
@@ -394,13 +414,22 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             Err(erreur) => {
                 self.echecs_consecutifs += 1;
                 if self.echecs_consecutifs >= ECHECS_DECODAGE_AVANT_ABANDON {
-                    // EN COURS DE FLUX, pas à l'ouverture : la variante le dit,
-                    // pour que `sky-app` n'affiche pas un message d'ouverture
-                    // (« n'a pas pu démarrer », « cette carte ne prend pas en
-                    // charge… ») après une image déjà montrée.
-                    return Err(ErreurPartage::Visionnage(ErreurVisionnage::DecodageInterrompu(
-                        erreur,
-                    )));
+                    // Le critère est l'image AFFICHÉE, pas le lieu de l'appel
+                    // (revue finale, I3). Après une image montrée, la variante
+                    // dit « en cours de flux », pour que `sky-app` n'affiche pas
+                    // un message d'ouverture à qui vient de voir l'image. Avant,
+                    // c'est une erreur d'ouverture : la session NVDEC ne naît
+                    // qu'au premier paquet, et un pilote qui la refuse échoue
+                    // ici sans que rien n'ait jamais été affiché.
+                    let cause = if self.image_affichee {
+                        ErreurVisionnage::DecodageInterrompu(erreur)
+                    } else {
+                        ErreurVisionnage::Ouverture(erreur)
+                    };
+                    return Err(ErreurPartage::Visionnage(cause));
+                }
+                if !self.image_affichee {
+                    self.erreur_avant_image = Some(erreur);
                 }
                 // Un refus isolé peut venir d'une unité tronquée ; une image clé
                 // repart de zéro et la répare.
@@ -411,6 +440,9 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
         // Le plafond compte les refus CONSÉCUTIFS : des refus épars sur une
         // liaison qui marche ne doivent pas s'additionner jusqu'à l'abandon.
         self.echecs_consecutifs = 0;
+        // Le décodeur vient de réussir : un refus antérieur ne dit plus qu'il
+        // n'a pas démarré.
+        self.erreur_avant_image = None;
 
         // `Ok(None)` n'est pas une erreur : le décodeur a avalé des en-têtes de
         // séquence. Rien à afficher ; s'il manquait quelque chose, la demande est
@@ -428,6 +460,7 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
             return Ok(self.abandonner(lien, maintenant)?);
         }
         self.afficheur.afficher(&image)?;
+        self.image_affichee = true;
         self.etat_affiche = None;
         self.en_attente_depuis = None;
         // `image` tombe ici : une des quatre surfaces de sortie de NVDEC est
@@ -965,19 +998,72 @@ mod tests {
             .expect_err("au-delà du plafond, le refus remonte");
 
         // L'erreur TYPÉE du décodeur doit survivre jusqu'à la sortie, DANS SA
-        // VARIANTE d'`ErreurPartage`, et marquée comme née PENDANT le flux :
-        // `sky-app` se branche sur le type, jamais sur un texte. Neutralisations
-        // (tâche 10) : la faire voyager dans `ErreurPartage::Autre(..)`, comme
-        // avant — ce test rougit ; la marquer `Ouverture` — il rougit aussi, avec
-        // `un_decodeur_qui_lache_apres_l_image_ne_dit_pas_qu_il_n_a_pas_demarre`.
+        // VARIANTE d'`ErreurPartage` : `sky-app` se branche sur le type, jamais
+        // sur un texte. Neutralisation (tâche 10) : la faire voyager dans
+        // `ErreurPartage::Autre(..)`, comme avant — ce test rougit.
+        //
+        // AUCUNE IMAGE N'A ÉTÉ AFFICHÉE : c'est donc une erreur d'OUVERTURE
+        // (revue finale, I3). Ce test attendait `DecodageInterrompu` jusqu'à la
+        // vague finale : le critère était le lieu de l'appel, et une session
+        // refusée par le pilote au premier paquet aurait reçu « s'est
+        // interrompu en cours de visionnage » alors que rien n'avait été vu.
+        // Neutralisation : rendre `DecodageInterrompu` quel que soit
+        // `image_affichee` — ce test rougit.
         assert!(
             matches!(
                 erreur,
-                ErreurPartage::Visionnage(ErreurVisionnage::DecodageInterrompu(
+                ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(
                     ErreurDecodeur::QuatreQuatreQuatreNonPris
                 ))
             ),
-            "la variante du décodeur est préservée : {erreur:?}"
+            "avant toute image, la variante du décodeur arrive en erreur d'ouverture : {erreur:?}"
+        );
+    }
+
+    #[test]
+    fn un_decodeur_qui_refuse_lentement_avant_toute_image_n_accuse_pas_l_hote() {
+        // I3, second chemin. Les unités arrivent trop lentement pour atteindre
+        // le plafond de refus (un hôte dont l'écran est figé ne renvoie qu'une
+        // image clé par demande, une par seconde) : c'est le délai d'attente qui
+        // expire. Il disait « image irreconstituable — demandez de relancer le
+        // partage », alors que c'est le décodeur de CETTE machine qui n'a jamais
+        // démarré. Neutralisation : ne jamais renseigner `erreur_avant_image`
+        // — le délai rend `ImageIrreconstituable`, ce test rougit.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[], Issue::Echec, t0);
+
+        v.traiter(&mut lien, image(true, true), t0).expect("un refus isolé n'est pas fatal");
+        let erreur = v
+            .traiter(&mut lien, LinkEvent::Idle, t0 + ATTENTE_IMAGE_CLE_MAX)
+            .expect_err("le délai écoulé, le visionnage renonce");
+
+        assert!(
+            matches!(erreur, ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(_))),
+            "un décodeur qui n'a jamais rien rendu n'a pas démarré : {erreur:?}"
+        );
+    }
+
+    #[test]
+    fn un_refus_suivi_d_un_decodage_reussi_n_est_plus_une_erreur_d_ouverture() {
+        // Le pendant du précédent : un refus isolé (unité tronquée) suivi d'un
+        // décodage qui réussit ne dit plus que le décodeur n'a pas démarré. Si
+        // l'image clé n'arrive jamais, la cause est bien l'image. Neutralisation :
+        // ne pas effacer `erreur_avant_image` sur un décodage réussi — ce test
+        // rougit sur `Ouverture`.
+        let t0 = Instant::now();
+        let mut lien = LienFactice::nouveau();
+        let mut v = visionnage(&[Issue::Echec], Issue::Image, t0);
+
+        v.traiter(&mut lien, image(false, true), t0).expect("refus isolé");
+        v.traiter(&mut lien, image(false, true), t0).expect("décodée, non affichée faute de clé");
+        let erreur = v
+            .traiter(&mut lien, LinkEvent::Idle, t0 + ATTENTE_IMAGE_CLE_MAX)
+            .expect_err("le délai écoulé, le visionnage renonce");
+
+        assert!(
+            matches!(erreur, ErreurPartage::Visionnage(ErreurVisionnage::ImageIrreconstituable)),
+            "le décodeur marche, c'est l'image clé qui manque : {erreur:?}"
         );
     }
 

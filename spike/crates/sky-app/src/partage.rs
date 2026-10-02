@@ -172,10 +172,11 @@ pub fn fin_vue(issue: &Result<Fin, ErreurPartage>) -> FinVue {
 ///
 /// LE MOMENT COMPTE AUTANT QUE LA VARIANTE (ronde de correction 1). Les
 /// messages de la spec §7 décrivent l'OUVERTURE : « n'a pas pu démarrer »,
-/// « cette carte ne prend pas en charge… ». Levée en cours de flux, la même
-/// `ErreurDecodeur` les rendrait faux — l'image s'est déjà affichée, et un
-/// `QuatreQuatreQuatreNonPris` du rappel de séquence accuse le flux reçu, pas
-/// la carte. Le flux a donc son propre message, qui ne désigne aucune cause.
+/// « cette carte ne prend pas en charge… ». Levée après une image affichée, la
+/// même `ErreurDecodeur` les rendrait faux. Le flux a donc son propre message,
+/// qui ne désigne aucune cause. Depuis la vague finale (I3), c'est `sky-partage`
+/// qui tranche le moment, sur l'image AFFICHÉE et non sur le lieu de l'appel :
+/// une session refusée au premier paquet arrive ici en `Ouverture`.
 fn fin_de_visionnage(erreur: &ErreurVisionnage) -> FinVue {
     match erreur {
         ErreurVisionnage::ImageIrreconstituable => FinVue::ImageIrreconstituable,

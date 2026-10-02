@@ -89,9 +89,10 @@ pub enum FinVue {
     /// courant : deux causes, un même message honnête.
     DecodeurRefuse,
     /// Le décodeur de cette carte s'arrête en deçà de ce que le spectateur
-    /// annonce (`LARGEUR_ANNONCEE` × `HAUTEUR_ANNONCEE` dans `sky-partage`).
-    /// Levée À L'OUVERTURE, avant toute connexion : ce n'est PAS l'écran de
-    /// l'hôte qui est en cause, et le message ne doit pas le dire.
+    /// annonce (`LARGEUR_ANNONCEE` × `HAUTEUR_ANNONCEE` dans `sky-partage`), à
+    /// l'ouverture — ou, depuis la vague finale (I3), en deçà de la taille codée
+    /// du flux reçu, au premier paquet. Le message dit ce qui manque à cette
+    /// carte, et n'accuse pas l'écran de l'ami.
     ResolutionTropGrande { largeur: u32, hauteur: u32, largeur_max: u32, hauteur_max: u32 },
     /// Aucune image clé malgré les demandes : le flux ne se répare pas.
     ImageIrreconstituable,
