@@ -34,16 +34,16 @@ use nvidia_video_codec_sdk::sys::nvEncodeAPI::{
     NV_ENC_CODEC_HEVC_GUID, NV_ENC_CONFIG, NV_ENC_CONFIG_H264_VUI_PARAMETERS, NV_ENC_CONFIG_VER,
     NV_ENC_CREATE_BITSTREAM_BUFFER, NV_ENC_CREATE_BITSTREAM_BUFFER_VER, NV_ENC_DEVICE_TYPE,
     NV_ENC_H264_PROFILE_HIGH_444_GUID, NV_ENC_H264_PROFILE_HIGH_GUID,
-    NV_ENC_HEVC_PROFILE_FREXT_GUID, NV_ENC_INITIALIZE_PARAMS, NV_ENC_INITIALIZE_PARAMS_VER,
-    NV_ENC_INPUT_RESOURCE_TYPE, NV_ENC_LOCK_BITSTREAM, NV_ENC_LOCK_BITSTREAM_VER,
-    NV_ENC_MAP_INPUT_RESOURCE, NV_ENC_MAP_INPUT_RESOURCE_VER, NV_ENC_MULTI_PASS,
-    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS, NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
-    NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_FLAGS, NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_VER,
-    NV_ENC_PIC_STRUCT, NV_ENC_PIC_TYPE, NV_ENC_PRESET_CONFIG, NV_ENC_PRESET_CONFIG_VER,
-    NV_ENC_PRESET_P4_GUID, NV_ENC_REGISTER_RESOURCE, NV_ENC_REGISTER_RESOURCE_VER,
-    NV_ENC_SEQUENCE_PARAM_PAYLOAD, NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER, NV_ENC_TUNING_INFO,
-    NV_ENC_VUI_COLOR_PRIMARIES, NV_ENC_VUI_MATRIX_COEFFS, NV_ENC_VUI_TRANSFER_CHARACTERISTIC,
-    NV_ENC_VUI_VIDEO_FORMAT,
+    NV_ENC_HEVC_PROFILE_FREXT_GUID, NV_ENC_HEVC_PROFILE_MAIN_GUID, NV_ENC_INITIALIZE_PARAMS,
+    NV_ENC_INITIALIZE_PARAMS_VER, NV_ENC_INPUT_RESOURCE_TYPE, NV_ENC_LOCK_BITSTREAM,
+    NV_ENC_LOCK_BITSTREAM_VER, NV_ENC_MAP_INPUT_RESOURCE, NV_ENC_MAP_INPUT_RESOURCE_VER,
+    NV_ENC_MULTI_PASS, NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS,
+    NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER, NV_ENC_PARAMS_RC_MODE, NV_ENC_PIC_FLAGS,
+    NV_ENC_PIC_PARAMS, NV_ENC_PIC_PARAMS_VER, NV_ENC_PIC_STRUCT, NV_ENC_PIC_TYPE,
+    NV_ENC_PRESET_CONFIG, NV_ENC_PRESET_CONFIG_VER, NV_ENC_PRESET_P4_GUID,
+    NV_ENC_REGISTER_RESOURCE, NV_ENC_REGISTER_RESOURCE_VER, NV_ENC_SEQUENCE_PARAM_PAYLOAD,
+    NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER, NV_ENC_TUNING_INFO, NV_ENC_VUI_COLOR_PRIMARIES,
+    NV_ENC_VUI_MATRIX_COEFFS, NV_ENC_VUI_TRANSFER_CHARACTERISTIC, NV_ENC_VUI_VIDEO_FORMAT,
 };
 use sky_capture::CapturedFrame;
 use windows::core::Interface;
@@ -613,6 +613,11 @@ fn parametres_codec(codec: Codec) -> (GUID, GUID, u32) {
     match codec {
         Codec::H264_420 => (NV_ENC_CODEC_H264_GUID, NV_ENC_H264_PROFILE_HIGH_GUID, 1),
         Codec::H264_444 => (NV_ENC_CODEC_H264_GUID, NV_ENC_H264_PROFILE_HIGH_444_GUID, 3),
+        // Profil Main (8 bits, 4:2:0) : `general_profile_idc` = 1 dans le SPS,
+        // celui que décodent presque toutes les cartes. GUID défini dans
+        // `nvidia-video-codec-sdk-0.4.0/src/sys/guid.rs` et déclaré dans
+        // l'en-tête embarqué `src/sys/headers/nvEncodeAPI.h`.
+        Codec::Hevc420 => (NV_ENC_CODEC_HEVC_GUID, NV_ENC_HEVC_PROFILE_MAIN_GUID, 1),
         Codec::Hevc444 => (NV_ENC_CODEC_HEVC_GUID, NV_ENC_HEVC_PROFILE_FREXT_GUID, 3),
         Codec::Av1_420 => (NV_ENC_CODEC_AV1_GUID, NV_ENC_AV1_PROFILE_MAIN_GUID, 1),
     }
@@ -632,9 +637,9 @@ mod tests {
     const LARGEUR: u32 = 1280;
     const HAUTEUR: u32 = 720;
 
-    /// Un encodeur HEVC 4:4:4 et l'image à lui donner, ou `None` quand cette
-    /// machine n'a pas d'encodeur NVIDIA HEVC 4:4:4 : les tests en sortent alors
-    /// sans rien prouver, et le disent sur la sortie d'erreur.
+    /// Un encodeur du `codec` demandé et l'image à lui donner, ou `None` quand
+    /// cette machine n'a pas d'encodeur NVIDIA pour ce codec : les tests en
+    /// sortent alors sans rien prouver, et le disent sur la sortie d'erreur.
     ///
     /// **Toute autre erreur de création fait échouer le test.** Sans cette
     /// distinction, un encodeur que notre code viendrait de casser serait pris
@@ -645,11 +650,14 @@ mod tests {
     /// Sans fenêtre ni capture : le périphérique et la texture sont fabriqués
     /// ici, et l'image est tenue avec l'encodeur parce qu'elle doit venir du
     /// même périphérique que lui.
-    fn encodeur_de_test() -> Option<(NvencEncoder, CapturedFrame)> {
+    fn encodeur_de_test(codec: Codec) -> Option<(NvencEncoder, CapturedFrame)> {
         match crate::probe_hardware() {
-            Ok(caps) if caps.codecs.contains(&Codec::Hevc444) => {}
+            Ok(caps) if caps.codecs.contains(&codec) => {}
             Ok(_) => {
-                eprintln!("test ignoré : pas d'encodage HEVC 4:4:4 sur cette machine");
+                eprintln!(
+                    "test ignoré : pas d'encodage {} sur cette machine",
+                    codec.label()
+                );
                 return None;
             }
             Err(e) => {
@@ -657,10 +665,10 @@ mod tests {
                 return None;
             }
         }
-        Some(construire_encodeur_de_test().expect("création de l'encodeur de test"))
+        Some(construire_encodeur_de_test(codec).expect("création de l'encodeur de test"))
     }
 
-    fn construire_encodeur_de_test() -> anyhow::Result<(NvencEncoder, CapturedFrame)> {
+    fn construire_encodeur_de_test(codec: Codec) -> anyhow::Result<(NvencEncoder, CapturedFrame)> {
         let mut peripherique: Option<ID3D11Device> = None;
         unsafe {
             D3D11CreateDevice(
@@ -678,14 +686,7 @@ mod tests {
         .context("D3D11CreateDevice")?;
         let peripherique = peripherique.ok_or_else(|| anyhow!("aucun périphérique rendu"))?;
 
-        let encodeur = NvencEncoder::new(
-            &peripherique,
-            Codec::Hevc444,
-            LARGEUR,
-            HAUTEUR,
-            60,
-            20_000_000,
-        )?;
+        let encodeur = NvencEncoder::new(&peripherique, codec, LARGEUR, HAUTEUR, 60, 20_000_000)?;
         let image = image_de_test(&peripherique)?;
         Ok((encodeur, image))
     }
@@ -757,9 +758,97 @@ mod tests {
         types_de_nal(flux).iter().any(|t| *t == 19 || *t == 20)
     }
 
+    /// Types de NAL H.264 de tous les codes de départ `00 00 01` du flux : le
+    /// type occupe les cinq bits de poids faible de l'octet qui suit le code.
+    /// IDR = 5, SPS = 7, PPS = 8.
+    fn types_de_nal_h264(flux: &[u8]) -> Vec<u8> {
+        let mut types = Vec::new();
+        let mut i = 0;
+        while i + 3 < flux.len() {
+            if flux[i] == 0 && flux[i + 1] == 0 && flux[i + 2] == 1 {
+                types.push(flux[i + 3] & 0x1f);
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        types
+    }
+
+    /// `general_profile_idc` du premier SPS HEVC (NAL 33) du flux.
+    ///
+    /// Après le code de départ et l'en-tête NAL de 2 octets vient un octet
+    /// `sps_video_parameter_set_id(4) | sps_max_sub_layers_minus1(3) |
+    /// temporal_id_nesting(1)`, puis `general_profile_space(2) |
+    /// general_tier_flag(1) | general_profile_idc(5)`. Les octets d'émulation
+    /// `00 00 03` ne peuvent pas apparaître avant ces deux octets.
+    fn profil_hevc_du_sps(flux: &[u8]) -> Option<u8> {
+        let mut i = 0;
+        while i + 3 < flux.len() {
+            if flux[i] == 0 && flux[i + 1] == 0 && flux[i + 2] == 1 {
+                if (flux[i + 3] >> 1) & 0x3f == 33 {
+                    // Code de départ (3) + en-tête NAL (2) + 1 octet, puis le profil.
+                    return flux.get(i + 3 + 2 + 1).map(|o| o & 0x1f);
+                }
+                i += 4;
+            } else {
+                i += 1;
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn le_hevc_420_produit_un_flux_main_avec_ses_entetes() {
+        let Some((encodeur, _)) = encodeur_de_test(Codec::Hevc420) else {
+            return;
+        };
+        let entetes = encodeur.entetes_de_sequence().expect("en-têtes");
+        let types = types_de_nal(&entetes);
+        assert!(types.contains(&32), "VPS absent : {types:?}");
+        assert!(types.contains(&33), "SPS absent : {types:?}");
+        assert!(types.contains(&34), "PPS absent : {types:?}");
+        // Main = 1 ; Main 4:4:4 (extensions de gamme) = 4. C'est ce que lit un
+        // décodeur pour savoir s'il sait lire le flux.
+        assert_eq!(
+            profil_hevc_du_sps(&entetes),
+            Some(1),
+            "le SPS doit annoncer le profil Main (general_profile_idc = 1)"
+        );
+    }
+
+    #[test]
+    fn le_h264_force_une_image_cle_avec_ses_entetes() {
+        let Some((mut encodeur, image)) = encodeur_de_test(Codec::H264_420) else {
+            return;
+        };
+        let _ = encodeur.encode(&image).expect("première image");
+        let ordinaire = encodeur
+            .encode(&image)
+            .expect("deuxième image")
+            .expect("un paquet");
+        assert!(
+            !types_de_nal_h264(&ordinaire.data).contains(&5),
+            "la deuxième image ne devrait pas être un IDR"
+        );
+
+        encodeur.forcer_image_cle();
+        let forcee = encodeur
+            .encode(&image)
+            .expect("troisième image")
+            .expect("un paquet");
+        let types = types_de_nal_h264(&forcee.data);
+        for (type_nal, nom) in [(5, "IDR"), (7, "SPS"), (8, "PPS")] {
+            assert!(
+                types.contains(&type_nal),
+                "l'image forcée doit porter son {nom} : {types:?}"
+            );
+        }
+    }
+
     #[test]
     fn les_entetes_de_sequence_contiennent_vps_sps_et_pps() {
-        let Some((encodeur, _)) = encodeur_de_test() else {
+        let Some((encodeur, _)) = encodeur_de_test(Codec::Hevc444) else {
             return;
         };
         let entetes = encodeur.entetes_de_sequence().expect("en-têtes");
@@ -771,7 +860,7 @@ mod tests {
 
     #[test]
     fn forcer_une_image_cle_produit_un_idr_a_l_image_suivante() {
-        let Some((mut encodeur, image)) = encodeur_de_test() else {
+        let Some((mut encodeur, image)) = encodeur_de_test(Codec::Hevc444) else {
             return;
         };
         // Une première image, qui est déjà un IDR.

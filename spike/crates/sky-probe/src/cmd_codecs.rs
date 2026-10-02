@@ -10,7 +10,7 @@
 //!
 //! On utilise donc la texture synthétique de Q2 : son contenu ne dépend que
 //! du nombre d'appels à `prochaine_image`, donc en recréant la texture (donc
-//! son compteur à 0) pour chaque codec, les quatre flux voient exactement la
+//! son compteur à 0) pour chaque codec, tous les flux voient exactement la
 //! même séquence d'images, image par image. La comparaison porte alors
 //! uniquement sur le codec et le sous-échantillonnage chroma — jamais sur
 //! une différence de scène.
@@ -32,7 +32,7 @@ use sky_encode::{nvenc::NvencEncoder, Codec};
 use crate::cmd_encode::{ecrire_reference_brute, encoder_synthetique, TextureSynthetique, FPS};
 
 /// Marge de sécurité (en images) ajoutée à la référence brute au-delà de
-/// `seconds * FPS`, pour ne jamais être le flux le plus court des cinq — un
+/// `seconds * FPS`, pour ne jamais être le flux le plus court — un
 /// éventuel écart de calage viendrait alors d'un encodage, pas de la
 /// référence. Une jitter de contrôle de boucle de quelques images sur 15 s à
 /// 60 i/s est largement couverte.
@@ -42,6 +42,7 @@ pub fn run(seconds: u64, bitrate_mbps: u32, monitor: usize) -> anyhow::Result<()
     let combinaisons = [
         (Codec::H264_420, "cmp-h264-420.h264"),
         (Codec::H264_444, "cmp-h264-444.h264"),
+        (Codec::Hevc420, "cmp-hevc-420.h265"),
         (Codec::Hevc444, "cmp-hevc-444.h265"),
         (Codec::Av1_420, "cmp-av1-420.ivf"),
     ];
@@ -55,9 +56,9 @@ pub fn run(seconds: u64, bitrate_mbps: u32, monitor: usize) -> anyhow::Result<()
     let premiere = attendre_premiere_image(&mut cap)?;
     let (largeur, hauteur) = (premiere.width, premiere.height);
 
-    println!("=== Q3 : comparatif des 4 codecs, à débit égal ===");
+    println!("=== Q3 : comparatif des 5 codecs, à débit égal ===");
     println!("Résolution         : {largeur}x{hauteur}");
-    println!("Débit visé         : {bitrate_mbps} Mbps (identique pour les 4 combinaisons)");
+    println!("Débit visé         : {bitrate_mbps} Mbps (identique pour les 5 combinaisons)");
     println!("Durée par flux      : {seconds} s à {FPS} i/s");
     println!(
         "Scène               : texture synthétique déterministe (panneau de texte fin, \
@@ -93,7 +94,7 @@ pub fn run(seconds: u64, bitrate_mbps: u32, monitor: usize) -> anyhow::Result<()
 
         // Recréée à chaque codec : son compteur interne `n` repart de 0, ce
         // qui garantit que ce codec voit la MÊME séquence d'images que les
-        // trois autres, image par image — pas une suite décalée.
+        // quatre autres, image par image — pas une suite décalée.
         let mut synth = TextureSynthetique::new(cap.d3d_device(), largeur, hauteur)
             .context("création de la texture synthétique")?;
 

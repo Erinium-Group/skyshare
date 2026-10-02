@@ -39,7 +39,7 @@ enum Cmd {
     Encode {
         #[arg(long, default_value_t = 20)]
         seconds: u64,
-        /// h264420 | h264444 | hevc444 | av1420
+        /// h264420 | h264444 | hevc420 | hevc444 | av1420
         #[arg(long, default_value = "hevc444", value_parser = cmd_encode::parse_codec)]
         codec: sky_encode::Codec,
         #[arg(long, default_value_t = 30)]
@@ -52,7 +52,7 @@ enum Cmd {
         #[arg(long, default_value = "ecran", value_parser = cmd_encode::parse_source)]
         source: cmd_encode::Source,
     },
-    /// Compare les 4 combinaisons codec/chroma à débit égal, sur la même
+    /// Compare les 5 combinaisons codec/chroma à débit égal, sur la même
     /// scène synthétique déterministe (Q3)
     Codecs {
         #[arg(long, default_value_t = 15)]
@@ -67,7 +67,7 @@ enum Cmd {
     Host {
         #[arg(long, default_value_t = 30)]
         seconds: u64,
-        /// h264420 | h264444 | hevc444 | av1420
+        /// h264420 | h264444 | hevc420 | hevc444 | av1420
         #[arg(long, default_value = "hevc444", value_parser = cmd_encode::parse_codec)]
         codec: sky_encode::Codec,
         /// Débit cible de la session NVENC — aussi le plafond du Pacer.

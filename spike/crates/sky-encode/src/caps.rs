@@ -7,6 +7,9 @@
 pub enum Codec {
     H264_420,
     H264_444,
+    /// HEVC Main 4:2:0 : le profil que décodent presque toutes les cartes
+    /// (Intel, AMD, NVIDIA), là où le 4:4:4 est rare côté réception.
+    Hevc420,
     Hevc444,
     Av1_420,
 }
@@ -16,6 +19,7 @@ impl Codec {
         match self {
             Codec::H264_420 => "H.264 4:2:0",
             Codec::H264_444 => "H.264 4:4:4",
+            Codec::Hevc420 => "HEVC 4:2:0",
             Codec::Hevc444 => "HEVC 4:4:4",
             Codec::Av1_420 => "AV1 4:2:0",
         }
@@ -35,14 +39,15 @@ pub struct EncoderCaps {
 /// Choisit le meilleur codec disponible.
 ///
 /// `prefer_text` = true privilégie la netteté du texte (4:4:4) sur l'efficacité.
-/// Ordre : HEVC 4:4:4 > H.264 4:4:4 > AV1 4:2:0 > H.264 4:2:0
-/// Sans exigence de texte : AV1 4:2:0 > HEVC 4:4:4 > H.264 4:4:4 > H.264 4:2:0
+/// Ordre : HEVC 4:4:4 > H.264 4:4:4 > AV1 4:2:0 > HEVC 4:2:0 > H.264 4:2:0
+/// Sans exigence de texte : AV1 4:2:0 > HEVC 4:4:4 > H.264 4:4:4 > HEVC 4:2:0 > H.264 4:2:0
 pub fn pick_best(caps: &EncoderCaps, prefer_text: bool) -> Option<Codec> {
     let ordre: &[Codec] = if prefer_text {
         &[
             Codec::Hevc444,
             Codec::H264_444,
             Codec::Av1_420,
+            Codec::Hevc420,
             Codec::H264_420,
         ]
     } else {
@@ -50,6 +55,7 @@ pub fn pick_best(caps: &EncoderCaps, prefer_text: bool) -> Option<Codec> {
             Codec::Av1_420,
             Codec::Hevc444,
             Codec::H264_444,
+            Codec::Hevc420,
             Codec::H264_420,
         ]
     };
@@ -82,7 +88,7 @@ pub enum EncodeError {
 use std::ffi::c_void;
 
 use nvidia_video_codec_sdk::sys::nvEncodeAPI::{
-    NVENCAPI_VERSION, NVENCSTATUS, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_AV1_GUID,
+    GUID, NVENCAPI_VERSION, NVENCSTATUS, NV_ENC_BUFFER_FORMAT, NV_ENC_CODEC_AV1_GUID,
     NV_ENC_CODEC_H264_GUID, NV_ENC_CODEC_HEVC_GUID, NV_ENC_DEVICE_TYPE,
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS, NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER,
 };
@@ -161,29 +167,51 @@ fn probe_hardware_avec(pilote_cuda: &str) -> Result<EncoderCaps, EncodeError> {
     let raw = raw?;
     destroy_result?;
 
-    let mut codecs = Vec::new();
-    for (guid, formats) in raw {
-        let a_444 = formats.iter().any(|f| {
-            matches!(
-                *f,
-                NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_YUV444
-                    | NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_YUV444_10BIT
-            )
-        });
+    let par_codec: Vec<(GUID, bool)> = raw
+        .into_iter()
+        .map(|(guid, formats)| {
+            let a_444 = formats.iter().any(|f| {
+                matches!(
+                    *f,
+                    NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_YUV444
+                        | NV_ENC_BUFFER_FORMAT::NV_ENC_BUFFER_FORMAT_YUV444_10BIT
+                )
+            });
+            (guid, a_444)
+        })
+        .collect();
 
+    Ok(EncoderCaps {
+        gpu_name,
+        codecs: codecs_annonces(&par_codec),
+    })
+}
+
+/// Traduit, pour chaque codec que la carte connaît, « GUID du codec, et la
+/// carte accepte-t-elle une entrée 4:4:4 ? » en combinaisons [`Codec`].
+///
+/// Fonction pure, extraite de [`probe_hardware_avec`] pour que les règles se
+/// testent sans carte. Le 4:2:0 est toujours annoncé avec le codec : tout
+/// encodeur NVENC H.264 ou HEVC sait produire du 4:2:0, seul le 4:4:4 dépend de
+/// la génération de la carte.
+fn codecs_annonces(par_codec: &[(GUID, bool)]) -> Vec<Codec> {
+    let mut codecs = Vec::new();
+    for &(guid, a_444) in par_codec {
         if guid == NV_ENC_CODEC_H264_GUID {
             codecs.push(Codec::H264_420);
             if a_444 {
                 codecs.push(Codec::H264_444);
             }
-        } else if guid == NV_ENC_CODEC_HEVC_GUID && a_444 {
-            codecs.push(Codec::Hevc444);
+        } else if guid == NV_ENC_CODEC_HEVC_GUID {
+            codecs.push(Codec::Hevc420);
+            if a_444 {
+                codecs.push(Codec::Hevc444);
+            }
         } else if guid == NV_ENC_CODEC_AV1_GUID {
             codecs.push(Codec::Av1_420);
         }
     }
-
-    Ok(EncoderCaps { gpu_name, codecs })
+    codecs
 }
 
 #[cfg(test)]
@@ -263,6 +291,58 @@ mod tests {
         );
         assert!(message.contains("Détail technique :"), "{message}");
         assert!(!message.contains("x264"), "{message}");
+    }
+
+    #[test]
+    fn une_carte_hevc_annonce_aussi_le_hevc_420() {
+        // La sonde pousse Hevc420 dès que le GUID HEVC est présent, avant Hevc444.
+        let codecs = codecs_annonces(&[(NV_ENC_CODEC_HEVC_GUID, true)]);
+        assert!(codecs.contains(&Codec::Hevc420));
+        assert!(codecs.contains(&Codec::Hevc444));
+    }
+
+    #[test]
+    fn une_carte_hevc_sans_444_annonce_le_hevc_420_seul() {
+        let codecs = codecs_annonces(&[(NV_ENC_CODEC_HEVC_GUID, false)]);
+        assert_eq!(codecs, vec![Codec::Hevc420]);
+    }
+
+    #[test]
+    fn le_hevc_420_n_est_pas_de_la_couleur_pleine_resolution() {
+        assert!(!Codec::Hevc420.is_444());
+        assert_eq!(Codec::Hevc420.label(), "HEVC 4:2:0");
+    }
+
+    #[test]
+    fn le_hevc_420_se_range_apres_les_444_et_avant_le_h264_420() {
+        // Sans AV1, pour que les deux ordres (texte et vidéo) se lisent pareil.
+        let caps = EncoderCaps {
+            gpu_name: "test".into(),
+            codecs: vec![
+                Codec::H264_420,
+                Codec::Hevc420,
+                Codec::H264_444,
+                Codec::Hevc444,
+            ],
+        };
+        for prefer_text in [true, false] {
+            let mut restant = caps.clone();
+            let mut rendus = Vec::new();
+            while let Some(c) = pick_best(&restant, prefer_text) {
+                rendus.push(c);
+                restant.codecs.retain(|x| *x != c);
+            }
+            assert_eq!(
+                rendus,
+                vec![
+                    Codec::Hevc444,
+                    Codec::H264_444,
+                    Codec::Hevc420,
+                    Codec::H264_420
+                ],
+                "ordre inattendu pour prefer_text = {prefer_text}"
+            );
+        }
     }
 
     #[test]

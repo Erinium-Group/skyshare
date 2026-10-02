@@ -47,10 +47,11 @@ pub fn parse_codec(s: &str) -> anyhow::Result<Codec> {
     {
         "h264" | "h264420" => Ok(Codec::H264_420),
         "h264444" => Ok(Codec::H264_444),
+        "hevc420" | "h265420" => Ok(Codec::Hevc420),
         "hevc" | "hevc444" | "h265444" => Ok(Codec::Hevc444),
         "av1" | "av1420" => Ok(Codec::Av1_420),
         autre => Err(anyhow!(
-            "codec inconnu « {autre} » (attendu : h264420, h264444, hevc444, av1420)"
+            "codec inconnu « {autre} » (attendu : h264420, h264444, hevc420, hevc444, av1420)"
         )),
     }
 }
@@ -220,7 +221,7 @@ fn encoder_ecran(
 /// Boucle d'encodage sur la texture synthétique, bridée à [`FPS`].
 ///
 /// `pub(crate)` : c'est la même boucle qu'utilise `cmd_codecs` (Q3) pour
-/// encoder les quatre combinaisons codec/chroma sur exactement la même
+/// encoder toutes les combinaisons codec/chroma sur exactement la même
 /// séquence d'images — `synth` détermine tout le contenu, et son compteur
 /// interne ne dépend que du nombre d'appels à `prochaine_image`.
 pub(crate) fn encoder_synthetique(
@@ -308,7 +309,7 @@ const MARGE_LIGNES: u32 = 64;
 ///
 /// `pub(crate)` : `cmd_codecs` (Q3) en recrée une par codec, pour que le
 /// compteur `n` reparte de 0 à chaque fois — c'est ce qui garantit que les
-/// quatre flux voient la même séquence d'images plutôt qu'une suite décalée.
+/// flux voient la même séquence d'images plutôt qu'une suite décalée.
 pub(crate) struct TextureSynthetique {
     atlas: ID3D11Texture2D,
     texture: ID3D11Texture2D,
@@ -419,7 +420,7 @@ fn desc_bgra(largeur: u32, hauteur: u32) -> D3D11_TEXTURE2D_DESC {
 /// une cible à 10 Mbps, ce qui aurait invalidé la comparaison « à débit
 /// égal ». Confiner le pire cas à un panneau réaliste laisse assez de
 /// surface plate (fond uni, ~0 bit après la première image) pour que le
-/// contrôleur de débit tienne sa cible sur les quatre codecs.
+/// contrôleur de débit tienne sa cible sur tous les codecs.
 const PANNEAU_X0: u32 = 200;
 const PANNEAU_Y0: u32 = 150;
 const PANNEAU_LARGEUR: u32 = 1200;
@@ -489,7 +490,7 @@ fn motif_detaille(largeur: u32, hauteur: u32) -> Vec<u8> {
 /// `pub(crate)` : sert de référence non compressée à `cmd_codecs` (Q3) pour
 /// le calcul de PSNR/SSIM. Recalculer le motif ici plutôt que de faire un
 /// aller-retour GPU garantit en plus l'exactitude bit à bit avec ce que les
-/// quatre encodeurs ont reçu, puisque c'est la même fonction `motif_detaille`
+/// encodeurs ont reçu, puisque c'est la même fonction `motif_detaille`
 /// et la même arithmétique de fenêtre que [`TextureSynthetique::prochaine_image`].
 pub(crate) fn ecrire_reference_brute(
     largeur: u32,
@@ -509,4 +510,24 @@ pub(crate) fn ecrire_reference_brute(
     }
     fichier.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_codec_reconnait_le_hevc_420_sous_ses_deux_noms() {
+        for nom in ["hevc420", "HEVC-4:2:0", "h265420", "h265_420"] {
+            assert_eq!(parse_codec(nom).expect(nom), Codec::Hevc420, "{nom}");
+        }
+        // « hevc » nu reste le 4:4:4 : le défaut historique ne bouge pas.
+        assert_eq!(parse_codec("hevc").unwrap(), Codec::Hevc444);
+    }
+
+    #[test]
+    fn parse_codec_liste_hevc420_dans_son_message_d_erreur() {
+        let message = parse_codec("vp9").unwrap_err().to_string();
+        assert!(message.contains("hevc420"), "{message}");
+    }
 }
