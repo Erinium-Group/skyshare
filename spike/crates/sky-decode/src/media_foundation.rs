@@ -362,37 +362,57 @@ impl DecodeurMf {
 
     /// Pousse UNE unité d'accès entière et rend l'image de CETTE unité, au même
     /// appel — le contrat de `sky-partage/src/doublure.rs::DecodeurFactice`, dont
-    /// dépend la garde d'affichage. Mesuré sur le chemin matériel : au plus une
-    /// image retenue (sonde) ; prouvé ici par
-    /// `tests/media_foundation.rs::*_chaque_unite_rend_sa_propre_image_a_sa_taille`.
-    /// `Ok(None)` : l'unité n'a rendu aucune image (en-têtes seuls).
+    /// dépend la garde d'affichage.
+    ///
+    /// Le contrat est GARANTI par le filtre d'horodatage ([`image_de_l_unite`]) :
+    /// seule sort l'image qui porte l'horodatage poussé. Un décodeur qui retient
+    /// une image (l'appel k rendrait k−1) échoue VISIBLEMENT, par une erreur qui
+    /// le dit, au lieu de faire afficher l'image d'une autre unité. Sur la
+    /// RTX 4060, le contrat est tenu sans que le filtre ait à refuser quoi que
+    /// ce soit : `tests/media_foundation.rs::*_chaque_unite_rend_sa_propre_image_a_sa_taille`.
+    /// Le cas du décodeur en retard a été produit sur ce même matériel, en
+    /// éteignant `MF_LOW_LATENCY` (mesuré, ronde de correction 1 de la tâche 5) :
+    /// le MFT HEVC rend alors, à l'appel k, l'image k−2, et le filtre en fait
+    /// une erreur à chaque appel ; le MFT H.264 ne rend rien sur 8 unités.
+    ///
+    /// `Ok(None)` : aucune image tirée (en-têtes seuls).
     pub fn decoder(
         &mut self,
         unite: &[u8],
         horodatage_ms: u64,
     ) -> Result<Option<ImageMf>, ErreurDecodeur> {
         let echantillon = echantillon_de(unite, horodatage_ms)?;
+        // Toutes les images tirées pendant cet appel, vidage compris : le
+        // filtre choisit parmi elles.
+        let mut tirees = Vec::new();
         let mut refus = 0;
         loop {
             match unsafe { self.transformation.ProcessInput(0, &echantillon, 0) } {
                 Ok(()) => break,
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
-                    // Une sortie attend : la vider (elle appartient à une unité
-                    // précédente, on ne la rend pas) puis réessayer.
+                    // Une sortie attend : la vider puis réessayer. Ces images
+                    // précèdent l'acceptation de l'unité : elles ne peuvent pas
+                    // être la sienne, et le filtre ne les rendra jamais.
                     refus += 1;
                     if refus > 16 {
                         return Err(mf("ProcessInput refuse toujours l'entrée", e));
                     }
-                    while self.tirer()?.is_some() {}
+                    while let Some(image) = self.tirer()? {
+                        tirees.push((image.horodatage_ms, image));
+                    }
                 }
                 Err(e) => return Err(mf("ProcessInput", e)),
             }
         }
-        let mut derniere = None;
         while let Some(image) = self.tirer()? {
-            derniere = Some(image);
+            tirees.push((image.horodatage_ms, image));
         }
-        Ok(derniere)
+        image_de_l_unite(horodatage_ms, tirees).map_err(|recus| {
+            ErreurDecodeur::MediaFoundation(format!(
+                "le décodeur rend l'image d'une autre unité : horodatage attendu \
+                 {horodatage_ms} ms, reçu {recus:?} ms"
+            ))
+        })
     }
 
     /// Tire une sortie du décodeur. `Ok(None)` : il demande plus d'entrée.
@@ -478,12 +498,42 @@ impl DecodeurMf {
     }
 }
 
+/// Le choix de l'image que rend `decoder`, sur les seuls horodatages : la
+/// dernière image tirée qui porte l'horodatage `attendu`. Les autres sont
+/// jetées.
+///
+/// - aucune image tirée : `Ok(None)` ;
+/// - des images tirées, aucune à l'horodatage attendu : `Err` avec les
+///   horodatages reçus — un décodeur en retard doit échouer, ni afficher
+///   faux, ni se taire.
+///
+/// L'égalité exacte est sûre : ms → 100 ns (×10 000) → ms (arrondi) est un
+/// aller-retour exact.
+fn image_de_l_unite<T>(attendu: u64, tirees: Vec<(u64, T)>) -> Result<Option<T>, Vec<u64>> {
+    if tirees.is_empty() {
+        return Ok(None);
+    }
+    let recus: Vec<u64> = tirees.iter().map(|(h, _)| *h).collect();
+    tirees
+        .into_iter()
+        .rev()
+        .find(|(h, _)| *h == attendu)
+        .map(|(_, image)| Some(image))
+        .ok_or(recus)
+}
+
 /// L'échantillon d'entrée d'une unité d'accès : une copie en mémoire centrale
 /// (le flux arrive du réseau), horodatée en unités de 100 ns.
 fn echantillon_de(unite: &[u8], horodatage_ms: u64) -> Result<IMFSample, ErreurDecodeur> {
     let longueur = u32::try_from(unite.len()).map_err(|_| {
         ErreurDecodeur::MediaFoundation(format!("unité d'accès démesurée ({} octets)", unite.len()))
     })?;
+    let temps = i64::try_from(horodatage_ms)
+        .ok()
+        .and_then(|ms| ms.checked_mul(10_000))
+        .ok_or_else(|| {
+            ErreurDecodeur::MediaFoundation(format!("horodatage démesuré ({horodatage_ms} ms)"))
+        })?;
     unsafe {
         let tampon = MFCreateMemoryBuffer(longueur).map_err(|e| mf("MFCreateMemoryBuffer", e))?;
         let mut p: *mut u8 = std::ptr::null_mut();
@@ -502,7 +552,7 @@ fn echantillon_de(unite: &[u8], horodatage_ms: u64) -> Result<IMFSample, ErreurD
             .AddBuffer(&tampon)
             .map_err(|e| mf("IMFSample::AddBuffer", e))?;
         echantillon
-            .SetSampleTime(horodatage_ms as i64 * 10_000)
+            .SetSampleTime(temps)
             .map_err(|e| mf("SetSampleTime", e))?;
         // Une image à 60 im/s : la durée n'est qu'indicative pour le décodeur.
         echantillon
@@ -512,8 +562,9 @@ fn echantillon_de(unite: &[u8], horodatage_ms: u64) -> Result<IMFSample, ErreurD
     }
 }
 
-/// Une image décodée par Media Foundation : une tranche d'un tableau de
-/// textures NV12 lié au décodeur.
+/// Une image décodée par Media Foundation : une tranche d'une texture NV12
+/// (tableau en H.264, texture d'une seule tranche en HEVC, relevé RTX 4060)
+/// liée au décodeur. Son contenu tient tant que l'`ImageMf` vit.
 pub struct ImageMf {
     /// Taille d'AFFICHAGE (1080 lignes pour un flux codé sur 1088), jamais nulle.
     pub largeur: u32,
@@ -522,12 +573,19 @@ pub struct ImageMf {
     texture: ID3D11Texture2D,
     tranche: u32,
     /// Tant que l'échantillon vit, le décodeur ne réattribue pas la tranche.
+    /// Mesuré sur RTX 4060 (`tests/media_foundation.rs::*_une_image_gardee_ne_bouge_pas`) :
+    /// trois images gardées pendant 40 décodages restent intactes à l'octet ;
+    /// le MFT H.264 (un tableau de 8 tranches) contourne les tranches gardées,
+    /// le MFT HEVC (une texture d'une tranche par image, 6 en rotation) les
+    /// textures gardées. Sans ce champ (échantillon relâché aussitôt), les
+    /// images gardées sont réécrites dans les deux codecs. Combien d'images
+    /// peuvent rester gardées avant que le décodeur ne cale : non mesuré.
     _echantillon: IMFSample,
 }
 
 impl ImageMf {
-    /// Le tableau de textures NV12 du décodeur, dont l'image occupe
-    /// [`ImageMf::tranche`]. Non lisible par un nuanceur : à copier.
+    /// La texture NV12 du décodeur, dont l'image occupe [`ImageMf::tranche`].
+    /// Non lisible par un nuanceur : à copier.
     pub fn texture(&self) -> &ID3D11Texture2D {
         &self.texture
     }
@@ -707,6 +765,50 @@ mod tests {
             !mf_sait_decoder(&appareil, CodecMf::Hevc, 16384, 16384),
             "HEVC 16384×16384"
         );
+    }
+
+    /// Ronde de correction 1, IMPORTANT 1 : seule sort l'image de l'unité
+    /// poussée. Neutralisation : faire rendre à `image_de_l_unite` la dernière
+    /// image tirée quel que soit son horodatage — `un_decodeur_en_retard…` et
+    /// `l_image_de_l_unite_est_choisie…` rougissent.
+    #[test]
+    fn sans_image_tiree_l_unite_ne_rend_rien() {
+        assert_eq!(image_de_l_unite::<&str>(7, Vec::new()), Ok(None));
+    }
+
+    #[test]
+    fn l_image_de_l_unite_est_choisie_parmi_les_images_tirees() {
+        assert_eq!(image_de_l_unite(7, vec![(7, "k")]), Ok(Some("k")));
+        // Une image en retard sort AVANT celle de l'unité : elle est jetée.
+        assert_eq!(
+            image_de_l_unite(7, vec![(6, "k-1"), (7, "k")]),
+            Ok(Some("k"))
+        );
+        // Et APRÈS : jetée aussi, la dernière tirée n'est pas la bonne.
+        assert_eq!(
+            image_de_l_unite(7, vec![(7, "k"), (6, "k-1")]),
+            Ok(Some("k"))
+        );
+    }
+
+    #[test]
+    fn un_decodeur_en_retard_d_une_image_echoue_au_lieu_d_afficher_faux() {
+        // L'appel k ne rend que k−1 : c'est une erreur, ni l'image de k−1
+        // (afficher faux), ni `Ok(None)` (se taire).
+        assert_eq!(image_de_l_unite(7, vec![(6, "k-1")]), Err(vec![6]));
+    }
+
+    /// Un horodatage qui déborderait en unités de 100 ns est refusé, jamais
+    /// tronqué. Neutralisation : revenir à `horodatage_ms as i64 * 10_000` —
+    /// débordement (panique en débogage), ce test rougit.
+    #[test]
+    fn un_horodatage_demesure_est_refuse() {
+        let _plateforme = Plateforme::demarrer().expect("Media Foundation");
+        assert!(matches!(
+            echantillon_de(&[0], u64::MAX / 10_000),
+            Err(ErreurDecodeur::MediaFoundation(_))
+        ));
+        assert!(echantillon_de(&[0], 1_000).is_ok(), "contrôle positif");
     }
 
     /// Constat 2 de la revue de la tâche 4 : jamais une taille nulle. Un type

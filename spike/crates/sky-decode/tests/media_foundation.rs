@@ -19,10 +19,19 @@
 //! - `decoder` rendant `Ok(None)` à l'unité 0 ;
 //! - le motif attendu inversé : 100 % de pixels mal classés (le témoin de
 //!   contenu discrimine).
+//!
+//! Ronde de correction 1 :
+//! - le filtre d'horodatage de `decoder` retiré (dernière image tirée rendue
+//!   telle quelle) : ces tests-ci RESTENT VERTS, la RTX 4060 ne retenant aucune
+//!   image en faible latence ; ce sont les tests purs de
+//!   `media_foundation::tests` (`image_de_l_unite`) qui rougissent ;
+//! - `ImageMf` sans son échantillon (relâché aussitôt) : les deux
+//!   `*_une_image_gardee_ne_bouge_pas` rougissent, 2 073 600 octets changés.
 
 use sky_capture::CapturedFrame;
 use sky_decode::{creer_appareil_video, CodecMf, DecodeurMf};
 use sky_encode::{Codec, NvencEncoder};
+use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
     D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
@@ -55,19 +64,33 @@ const SEUIL_LUMINANCE: u8 = 52;
 /// d'une autre unité les inverse presque tous.
 const PART_MAL_CLASSEE_TOLEREE: f64 = 0.02;
 
-fn chaque_unite_rend_sa_propre_image(codec_nvenc: Codec, codec_mf: CodecMf) {
-    let (appareil, _) = creer_appareil_video().expect("périphérique Direct3D 11 matériel");
-    let mut encodeur = NvencEncoder::new(&appareil, codec_nvenc, LARGEUR, HAUTEUR, 60, DEBIT_BPS)
+/// `nombre` unités NVENC encodées sur `appareil`. Les `alternees` premières
+/// alternent les deux motifs (rouge en tête aux rangs pairs) ; les suivantes
+/// sont NOIRES, d'un contenu qu'aucune des premières n'a (le booléen rendu ne
+/// les concerne pas). L'unité 0 est celle que NVENC produit en premier :
+/// en-têtes de séquence et IDR dans le même paquet, exactement ce que l'hôte
+/// écrit sur la piste.
+fn paquets_alternes(
+    appareil: &ID3D11Device,
+    codec_nvenc: Codec,
+    nombre: usize,
+    alternees: usize,
+) -> Vec<(bool, Vec<u8>)> {
+    let mut encodeur = NvencEncoder::new(appareil, codec_nvenc, LARGEUR, HAUTEUR, 60, DEBIT_BPS)
         .unwrap_or_else(|e| panic!("ce test exige NVENC ({codec_nvenc:?}) : {e:#}"));
-    let rouge_en_tete = texture_de_bandes(&appareil, true).expect("texture rouge en tête");
-    let bleu_en_tete = texture_de_bandes(&appareil, false).expect("texture bleu en tête");
-
-    // L'unité 0 est celle que NVENC produit en premier : en-têtes de séquence
-    // et IDR dans le même paquet, exactement ce que l'hôte écrit sur la piste.
-    let paquets: Vec<(bool, Vec<u8>)> = (0..IMAGES)
+    let rouge_en_tete = texture_de_bandes(appareil, Some(true)).expect("texture rouge en tête");
+    let bleu_en_tete = texture_de_bandes(appareil, Some(false)).expect("texture bleu en tête");
+    let noire = texture_de_bandes(appareil, None).expect("texture noire");
+    (0..nombre)
         .map(|rang| {
             let rouge = rang % 2 == 0;
-            let texture = if rouge { &rouge_en_tete } else { &bleu_en_tete };
+            let texture = if rang >= alternees {
+                &noire
+            } else if rouge {
+                &rouge_en_tete
+            } else {
+                &bleu_en_tete
+            };
             let image = CapturedFrame {
                 texture: texture.clone(),
                 width: LARGEUR,
@@ -80,8 +103,12 @@ fn chaque_unite_rend_sa_propre_image(codec_nvenc: Codec, codec_mf: CodecMf) {
                 .expect("NVENC rend un paquet par image");
             (rouge, paquet.data)
         })
-        .collect();
+        .collect()
+}
 
+fn chaque_unite_rend_sa_propre_image(codec_nvenc: Codec, codec_mf: CodecMf) {
+    let (appareil, _) = creer_appareil_video().expect("périphérique Direct3D 11 matériel");
+    let paquets = paquets_alternes(&appareil, codec_nvenc, IMAGES, IMAGES);
     let mut decodeur = DecodeurMf::nouveau(codec_mf, &appareil, LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)
         .unwrap_or_else(|e| panic!("ce test exige Media Foundation matériel ({codec_mf:?}) : {e}"));
     for (rang, (rouge, paquet)) in paquets.iter().enumerate() {
@@ -126,6 +153,82 @@ fn h264_chaque_unite_rend_sa_propre_image_a_sa_taille() {
     chaque_unite_rend_sa_propre_image(Codec::H264_420, CodecMf::H264);
 }
 
+/// Nombre d'images gardées vivantes ensemble : k, k+1, k+2.
+const GARDEES: usize = 3;
+/// Nombre total d'unités décodées pendant que les `GARDEES` premières restent
+/// vivantes : bien plus que le tableau de textures du MFT H.264 (8 tranches au
+/// moins, relevé), pour qu'une tranche relâchée trop tôt soit réécrite.
+const UNITES_DECODEES: usize = 40;
+
+/// Une `ImageMf` gardée pendant qu'on décode les unités suivantes garde-t-elle
+/// son contenu ? (ronde de correction 1, IMPORTANT 3 : la doc d'`ImageMf`
+/// l'affirmait sans mesure, alors que le HEVC rend toujours la tranche 0.)
+///
+/// Les `GARDEES` premières images restent vivantes pendant le décodage de
+/// `UNITES_DECODEES` unités ; les autres sont relâchées aussitôt rendues. La
+/// luminance de chaque image gardée est copiée aussitôt rendue, puis relue à la
+/// fin : les deux copies doivent être identiques à l'octet, et la seconde doit
+/// encore porter le motif de SON unité (les motifs alternent : une tranche
+/// réécrite par une autre unité aurait souvent le motif inverse). Relève aussi
+/// la texture et la tranche de chaque image (`--nocapture`).
+fn une_image_gardee_ne_bouge_pas(codec_nvenc: Codec, codec_mf: CodecMf) {
+    let (appareil, _) = creer_appareil_video().expect("périphérique Direct3D 11 matériel");
+    // Les unités qui suivent les gardées sont noires : une tranche réutilisée
+    // sous une image gardée change forcément d'octets. (Avec des motifs
+    // alternés partout, le cycle du MFT — 8 tranches en H.264, 6 textures en
+    // HEVC, relevé — étant pair, une réécriture reproduisait le même motif et
+    // passait inaperçue : mesuré, neutralisation C du rapport.)
+    let paquets = paquets_alternes(&appareil, codec_nvenc, UNITES_DECODEES, GARDEES);
+    let mut decodeur = DecodeurMf::nouveau(codec_mf, &appareil, LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)
+        .unwrap_or_else(|e| panic!("ce test exige Media Foundation matériel ({codec_mf:?}) : {e}"));
+    let mut gardees = Vec::new();
+    for (rang, (rouge, paquet)) in paquets.iter().enumerate() {
+        let image = decodeur
+            .decoder(paquet, rang as u64)
+            .expect("décodage")
+            .unwrap_or_else(|| panic!("l'unité {rang} n'a rendu aucune image au même appel"));
+        println!(
+            "{codec_mf:?} unité {rang} : texture {:?}, tranche {}",
+            image.texture().as_raw(),
+            image.tranche()
+        );
+        if rang < GARDEES {
+            let avant = image.copier_luminance().expect("copie de test");
+            gardees.push((*rouge, image, avant));
+        }
+    }
+    for (rang, (rouge, image, avant)) in gardees.iter().enumerate() {
+        let apres = image.copier_luminance().expect("copie de test");
+        let differents = avant.iter().zip(&apres).filter(|(a, b)| a != b).count();
+        let part = part_mal_classee_luminance(&apres, *rouge);
+        println!(
+            "{codec_mf:?} unité {rang} relue après {} décodages : {differents} octets changés, \
+             mal classés {:.3} %",
+            UNITES_DECODEES - 1 - rang,
+            part * 100.0
+        );
+        assert_eq!(
+            differents, 0,
+            "l'image de l'unité {rang}, gardée vivante, a changé pendant le décodage des suivantes"
+        );
+        assert!(
+            part <= PART_MAL_CLASSEE_TOLEREE,
+            "l'image gardée de l'unité {rang} porte le contenu de l'autre motif ({:.1} %)",
+            part * 100.0
+        );
+    }
+}
+
+#[test]
+fn hevc_420_une_image_gardee_ne_bouge_pas() {
+    une_image_gardee_ne_bouge_pas(Codec::Hevc420, CodecMf::Hevc);
+}
+
+#[test]
+fn h264_une_image_gardee_ne_bouge_pas() {
+    une_image_gardee_ne_bouge_pas(Codec::H264_420, CodecMf::H264);
+}
+
 /// Couleur attendue d'une ligne du motif « rouge en tête » : `true` pour rouge.
 fn ligne_rouge(y: u32) -> bool {
     (y / BANDE).is_multiple_of(2)
@@ -146,21 +249,26 @@ fn part_mal_classee_luminance(luminance: &[u8], rouge_en_tete: bool) -> f64 {
     mal_classes as f64 / (LARGEUR * HAUTEUR) as f64
 }
 
-/// Bandes de [`BANDE`] lignes, rouge en tête si `rouge_en_tete`, bleu sinon
-/// (recopie de `aller_retour.rs`).
+/// Bandes de [`BANDE`] lignes, rouge en tête si `Some(true)`, bleu en tête si
+/// `Some(false)` (recopie de `aller_retour.rs`) ; toute noire si `None`.
 fn texture_de_bandes(
     peripherique: &ID3D11Device,
-    rouge_en_tete: bool,
+    rouge_en_tete: Option<bool>,
 ) -> windows::core::Result<ID3D11Texture2D> {
     // BGRA, comme les textures du pool de capture.
     let mut pixels = vec![0u8; (LARGEUR * HAUTEUR * 4) as usize];
     for y in 0..HAUTEUR {
-        let rouge = ligne_rouge(y) == rouge_en_tete;
+        // (bleu, rouge) de la ligne.
+        let (b, r) = match rouge_en_tete {
+            Some(tete) if ligne_rouge(y) == tete => (0, 255),
+            Some(_) => (255, 0),
+            None => (0, 0),
+        };
         for x in 0..LARGEUR {
             let i = ((y * LARGEUR + x) * 4) as usize;
-            pixels[i] = if rouge { 0 } else { 255 }; // B
+            pixels[i] = b; // B
             pixels[i + 1] = 0; // G
-            pixels[i + 2] = if rouge { 255 } else { 0 }; // R
+            pixels[i + 2] = r; // R
             pixels[i + 3] = 255; // A
         }
     }
