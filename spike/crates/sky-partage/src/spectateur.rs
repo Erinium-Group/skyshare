@@ -57,8 +57,9 @@ const ECHECS_DECODAGE_AVANT_ABANDON: u32 = 120;
 /// deux, soient redemandées ; assez peu pour qu'un spectateur ne contemple pas
 /// « En attente de l'image… » sans fin. Ce plafond couvre ce que
 /// `ECHECS_DECODAGE_AVANT_ABANDON` ne voit pas : un décodeur qui ne REFUSE rien
-/// mais ne rend rien d'affichable — en-têtes de séquence perdus (`Ok(None)` à
-/// chaque unité), ou hôte qui n'honore pas les demandes.
+/// mais ne rend rien d'affichable — en-têtes de séquence perdus, si NVDEC rend
+/// alors `Ok(None)` à chaque unité (non distingué d'un refus par la mesure de
+/// la tâche 7), ou hôte qui n'honore pas les demandes.
 const ATTENTE_IMAGE_CLE_MAX: Duration = Duration::from_secs(10);
 
 /// Pause sur `LinkEvent::Idle` dans la boucle de réception.
@@ -398,9 +399,11 @@ impl<D: Decodage, A: Afficheur> Visionnage<D, A> {
         // Sans droit d'afficher, on demande une image clé QUEL QUE SOIT le
         // résultat du décodage — et donc AVANT lui. Le cas qui l'exige : des
         // en-têtes de séquence perdus. L'hôte ne les joint qu'une fois ; sans
-        // eux NVDEC rend `Ok(None)` à chaque unité (0 image sur 9 paquets,
-        // mesuré à la tâche 7), ne refuse rien, et aucun autre chemin ne
-        // demanderait quoi que ce soit : « En attente » à vie. Une image clé
+        // eux NVDEC ne rend aucune image (0 sur 9 paquets, mesuré à la tâche 7)
+        // — mais le test compte des images, il ne distingue pas `Ok(None)` d'un
+        // refus. Dans le cas `Ok(None)`, rien n'est refusé, et aucun autre
+        // chemin ne demanderait quoi que ce soit : « En attente » à vie. Dans le
+        // cas d'un refus, la demande part aussi, par `abandonner`. Une image clé
         // forcée porte ses propres en-têtes (mesuré à la tâche 7), donc la
         // demander suffit. Même raisonnement après un trou : un trou est un
         // trou, qu'il produise une image ou non.
@@ -1095,9 +1098,10 @@ mod tests {
     #[test]
     fn sans_en_tetes_un_flux_qui_ne_rend_rien_demande_une_image_cle() {
         // C1. L'hôte ne joint les en-têtes de séquence qu'UNE fois. S'ils se
-        // perdent, NVDEC n'a pas de SPS et rend `Ok(None)` à chaque unité (0 image
-        // sur 9 paquets, mesuré à la tâche 7) : aucun refus, donc aucun plafond
-        // atteint. Une image clé forcée porte ses propres en-têtes — la demander
+        // perdent, NVDEC n'a pas de SPS et ne rend aucune image (0 sur 9 paquets,
+        // mesuré à la tâche 7, sans distinguer `Ok(None)` d'un refus). Ce test
+        // couvre le cas `Ok(None)` : aucun refus, donc aucun plafond atteint.
+        // Une image clé forcée porte ses propres en-têtes — la demander
         // suffit à réparer. Ici aucun trou n'est signalé : seul le fait de n'avoir
         // jamais vu d'image clé doit déclencher la demande.
         let t0 = Instant::now();

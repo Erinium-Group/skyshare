@@ -163,11 +163,14 @@ impl ImageDecodee {
             let u = plan_u[i] as f64;
             let v = plan_v[i] as f64;
 
-            // BT.601 PLEINE ÉCHELLE, et non BT.709. Mesuré le 27/09/2026 sur le
-            // flux du jalon 0 : BT.601 pleine échelle donne 89,78 dB contre la
-            // référence, BT.709 plafonne à 36 dB. Si quelqu'un « corrige » vers
-            // BT.709 parce que c'est ce qu'on attend d'un flux HD, le test de
-            // référence rougira — c'est voulu.
+            // BT.601 PLEINE ÉCHELLE, et non BT.709. Mesuré sur le flux du jalon
+            // 0 contre sa référence : CE chemin `f64` donne 85,50 dB (écart
+            // maximal 1 niveau, test de référence de ce crate), BT.709 plafonne
+            // à 36,13 dB. Les 89,78 dB souvent cités sont ceux de la sonde du
+            // 27/09, par un autre chemin de conversion (virgule fixe) : ce
+            // commentaire les attribuait à tort à celui-ci. Si quelqu'un
+            // « corrige » vers BT.709 parce que c'est ce qu'on attend d'un flux
+            // HD, le test de référence rougira — c'est voulu.
             let r = y + 1.402 * (v - 128.0);
             let g = y - 0.344_136 * (u - 128.0) - 0.714_136 * (v - 128.0);
             let b = y + 1.772 * (u - 128.0);

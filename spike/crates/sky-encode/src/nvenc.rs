@@ -351,7 +351,12 @@ impl NvencEncoder {
     /// À placer **en tête du flux d'un spectateur, avant la première image qu'on
     /// lui envoie** : sous GOP infini l'encodeur n'émet ces en-têtes qu'avec le
     /// tout premier IDR, que le spectateur n'a jamais reçu s'il arrive après. Sans
-    /// eux le décodeur refuse le flux entier et l'écran reste noir.
+    /// eux le décodeur ne rend **aucune image** (mesuré : 0 sur 9 paquets,
+    /// `sky-decode/tests/aller_retour.rs`) — sans qu'on ait distingué un refus
+    /// d'un `Ok(None)`. Le spectateur montre alors « En attente de l'image… » et
+    /// demande une image clé, qui porte ses propres en-têtes. Ce commentaire
+    /// disait « le décodeur refuse le flux entier et l'écran reste noir » :
+    /// c'était le symptôme supposé avant le jalon 2.
     ///
     /// Ne dépend d'aucune image : peut être appelé dès la création de l'encodeur,
     /// et autant de fois qu'il y a de spectateurs.

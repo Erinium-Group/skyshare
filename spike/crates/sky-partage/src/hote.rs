@@ -4,7 +4,10 @@
 //! `Fin`, chaque `?` est resté un `?`.
 //!
 //! `WgcCapture::next_frame()` → `NvencEncoder::encode()` → `PeerLink::ecrire_image()`,
-//! avec le débit réellement piloté par `Pacer::target_bps()`.
+//! avec un budget d'octets tiré de `Pacer::target_bps()`. Ce budget ne fait que
+//! sauter des images entières, et sur le chemin nominal observé la cible reste
+//! au plafond (voir la LIMITE CONNUE dans `diffuser`) : le débit n'est pas
+//! « réellement piloté », comme ce commentaire l'affirmait.
 
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
@@ -502,8 +505,9 @@ fn diffuser(
                 // travail du paquetiseur RFC 7798 de `str0m` (décision D1) :
                 // l'en-tête maison de 9 octets et la relance morceau par morceau
                 // n'ont plus d'objet, puisqu'il n'y a plus de tampon d'émission
-                // à saturer — mesuré, 0 refus d'écriture sur 21552 envois à
-                // 100 Mbps, contre 16 % sur le canal de données au jalon 0.
+                // à saturer — mesuré par la sonde du 27/09 EN BOUCLE LOCALE,
+                // 0 refus d'écriture sur 21552 envois à 100 Mbps, contre 16 %
+                // sur le canal de données au jalon 0, entre deux réseaux.
                 //
                 // L'horodatage est une durée depuis le début de la diffusion, en
                 // millisecondes : c'est ce que porte l'horloge RTP, et le
@@ -753,8 +757,9 @@ impl EnvoiVideo {
                     // `ecrire_image` ne fait que confier l'unité au paquetiseur :
                     // les octets ne partent sur le socket que pendant `poll`.
                     // Servir le lien après chaque image est aussi ce qui évite
-                    // le refus ci-dessous (mesuré : 0 refus sur 21552 écritures
-                    // à 100 Mbps avec ce service, des refus sans lui).
+                    // le refus ci-dessous (mesuré par la sonde du 27/09, en boucle
+                    // locale : 0 refus sur 21552 écritures à 100 Mbps avec ce
+                    // service, des refus sans lui).
                     if let Some(raison) = self.servir(lien, encodeur)? {
                         return Ok(IssueEnvoi::FluxInterrompu(raison));
                     }

@@ -1,10 +1,13 @@
 //! Le test le plus important du jalon 2.
 //!
-//! Il discrimine réellement, et c'est mesuré : la sonde du 27/09/2026 a établi
-//! qu'une conversion 4:2:0 parasite fait perdre 19 à 20 dB, et qu'une matrice
-//! BT.709 au lieu de BT.601 plafonne à 36 dB — là où le décodage juste donne
-//! 89,78 dB contre cette même référence. Le seuil de 80 dB sépare donc les deux
-//! erreurs les plus probables de tout le jalon.
+//! Il discrimine réellement, et c'est mesuré par ses propres neutralisations
+//! (tâche 2) : une conversion 4:2:0 parasite fait tomber le PSNR à 15,06 dB
+//! absolus, une matrice BT.709 au lieu de BT.601 à 36,13 dB — là où le décodage
+//! juste donne 85,50 dB ici (89,78 dB par le chemin de la sonde du 27/09). Le
+//! seuil de 80 dB sépare donc les deux erreurs les plus probables de tout le
+//! jalon. Cet en-tête disait qu'une conversion 4:2:0 « fait perdre 19 à 20 dB » :
+//! c'était le plancher ABSOLU des codecs 4:2:0 du jalon 0, pas un écart (spec du
+//! jalon 2, §2).
 //!
 //! **Cette implémentation-ci mesure 85,50 dB, et ce n'est pas une régression.**
 //! Les deux nombres mesurent la même propriété par deux chemins de conversion

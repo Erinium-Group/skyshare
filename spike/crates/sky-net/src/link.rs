@@ -155,14 +155,15 @@ pub enum LinkEvent {
         /// celle-ci : le flux a un trou, et cette image ne se décode
         /// peut-être pas.
         ///
-        /// **Sans appelant tant que la tâche 9 ne l'a pas branché, et à
-        /// conserver quand même.** Sous GOP infini — un seul IDR pour 901
+        /// **Branché par le spectateur** (`sky-partage/src/spectateur.rs`,
+        /// `Visionnage::sur_image`) depuis la tâche 9. Sous GOP infini — un seul IDR pour 901
         /// images, mesuré au jalon 0 — c'est le SEUL moyen d'apprendre qu'un
         /// morceau manque et qu'il faut demander une image clé
         /// (`MessageControle::DemandeImageCle`). Sans lui, le spectateur ne
-        /// découvrirait la perte qu'en échouant à décoder : plus tard, et par la
-        /// cascade de « ref POC introuvable » que `sky-partage/src/hote.rs`
-        /// décrit. Qui le supprimerait comme inutilisé rouvrirait ce trou.
+        /// découvrirait la perte que si le décodeur échouait — or, mesuré au
+        /// jalon 2 (`sky-decode/tests/aller_retour.rs`), NVDEC rend des images
+        /// sans aucune erreur sur un flux privé de son point d'accès : la perte
+        /// pourrait ne jamais se signaler. Qui le supprimerait rouvrirait ce trou.
         sans_perte: bool,
     },
     /// Un message de contrôle est arrivé sur le canal de données.
@@ -777,7 +778,8 @@ impl PeerLink {
     /// tampon d'émission SCTP se remplissant sans que le retard soit
     /// récupérable. Sur la piste média, la sonde du 27/09/2026 n'a mesuré
     /// **aucun refus** — 0 sur 2593 écritures à 12 Mbps, 0 sur 21552 à
-    /// 100 Mbps.
+    /// 100 Mbps — **en boucle locale** : la comparaison avec les 16 % n'est pas
+    /// faite à réseau égal.
     ///
     /// # Le seul refus possible, et le geste attendu de l'appelant
     ///
@@ -790,9 +792,11 @@ impl PeerLink {
     /// d'affilée sont normaux quand on a beaucoup de retard. Toute autre erreur
     /// rend `EcritureRefusee` et n'a pas de relance connue.
     ///
-    /// Une boucle qui sert le réseau après chaque image ne rencontre jamais ce
-    /// refus ; c'est déjà ce que fait `hote.rs` pour le canal de données, et pour
-    /// une raison mesurée.
+    /// La sonde du 27/09/2026 n'a mesuré **aucun** refus (0 sur 21552
+    /// écritures à 100 Mbps), **en boucle locale**, avec une boucle qui sert le
+    /// réseau entre deux images — ce que fait `hote.rs`. C'est une mesure, pas
+    /// une garantie : ce commentaire disait « ne rencontre jamais », et
+    /// renvoyait au canal de données, que la vidéo n'emprunte plus.
     pub fn ecrire_image(&mut self, unite: &[u8], horodatage_ms: u64) -> Result<(), ErreurEnvoi> {
         let mid = self.piste.ok_or(ErreurEnvoi::PisteFermee)?;
         // Avant `writer`, qui emprunte `self.rtc` : `maintenant` emprunte `self`.

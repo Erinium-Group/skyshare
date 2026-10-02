@@ -33,9 +33,15 @@ pub fn etablir(link: &mut PeerLink, arret: &Arret) -> anyhow::Result<Etablisseme
         match link.poll()? {
             LinkEvent::Failed(raison) => return Ok(Etablissement::Rompu(raison)),
             // Une image arrivée pendant l'établissement est jetée : rien ne
-            // l'affiche encore, et surtout le correspondant ne peut pas en avoir
-            // envoyé une utile avant que le canal soit ouvert. La liste reste
-            // exhaustive, sans joker : une variante de plus doit casser ici.
+            // l'affiche encore. Elle PEUT être utile — l'hôte commence à
+            // diffuser dès que SON canal est ouvert, qui peut l'être avant le
+            // nôtre, et ce peut être l'IDR initial. La perdre n'est pas
+            // définitif : la première unité reçue ensuite porte un trou
+            // (`sans_perte == false`) ou n'est pas une image clé, et le
+            // spectateur demande alors une image clé. Ce commentaire disait que
+            // le correspondant « ne peut pas » en avoir envoyé une utile.
+            // La liste reste exhaustive, sans joker : une variante de plus doit
+            // casser ici.
             LinkEvent::Connected
             | LinkEvent::Controle(_)
             | LinkEvent::Image { .. }
