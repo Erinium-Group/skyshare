@@ -560,8 +560,19 @@ impl Fenetre {
         Ok(())
     }
 
-    /// Recrée la chaîne et la cible à la nouvelle taille. L'ancienne cible n'est
-    /// remplacée qu'une fois la nouvelle construite : un échec la laisse intacte.
+    /// Recrée la chaîne et la cible à la nouvelle taille.
+    ///
+    /// **Un échec ne laisse PAS l'état intact**, contrairement à ce que ce
+    /// commentaire affirmait (mineur 20 de la tâche 3). L'ancienne cible n'est
+    /// remplacée qu'une fois la nouvelle construite, mais `ResizeBuffers` a déjà
+    /// eu lieu : si `creer_cible` échoue, la chaîne est à la NOUVELLE taille et
+    /// la cible à l'ancienne, `largeur`/`hauteur` gardant l'ancienne. Le
+    /// `CopyResource` de `presenter` relie alors deux textures de tailles
+    /// différentes, ce que la documentation de Direct3D 11 interdit (dimensions
+    /// identiques exigées) ; la revue finale en déduit qu'il ne copie rien —
+    /// jamais provoqué ici. L'image présentée ne changerait alors plus jusqu'au
+    /// redimensionnement suivant réussi. Rare (`creer_cible` n'échoue que sur une mémoire vidéo
+    /// épuisée ou un appareil perdu) et non corrigé à ce jalon.
     fn redimensionner(&mut self, largeur: u32, hauteur: u32) -> anyhow::Result<()> {
         // Aucune référence au tampon arrière n'est conservée entre deux
         // présentations, donc `ResizeBuffers` n'est pas gêné.
