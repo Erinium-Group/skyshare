@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use sky_decode::{ErreurDecodeur, SurfaceCuda};
+use sky_decode::{ErreurDecodeur, SourceImage, SurfaceCuda};
 use sky_net::{ErreurEnvoi, LinkEvent, MessageControle};
 use sky_rendu::{EtatVisionnage, EvenementFenetre, ImageAAfficher};
 
@@ -148,8 +148,8 @@ impl ImageAAfficher for ImageFactice {
         self.hauteur
     }
 
-    fn surface(&self) -> SurfaceCuda {
-        SurfaceCuda { pointeur: 0, pas: 0, hauteur_surface: 0 }
+    fn source(&self) -> SourceImage<'_> {
+        SourceImage::Cuda444(SurfaceCuda { pointeur: 0, pas: 0, hauteur_surface: 0 })
     }
 }
 

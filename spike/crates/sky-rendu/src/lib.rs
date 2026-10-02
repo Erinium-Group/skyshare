@@ -21,10 +21,13 @@ mod fenetre;
 mod image_de_test;
 mod interop;
 mod nuanceur;
+mod nv12;
 
 pub use etat::EtatVisionnage;
 pub use fenetre::{EvenementFenetre, Fenetre};
-pub use image_de_test::{image_de_test_unie, ImageUnie};
+// RÉSERVÉ AUX TESTS ET AUX MESURES (voir l'en-tête du module) : des images
+// unies fabriquées sans décodeur, 4:4:4 et NV12.
+pub use image_de_test::{image_de_test_nv12, image_de_test_unie, ImageNv12DeTest, ImageUnie};
 pub use interop::ImageAAfficher;
 
 /// Le nombre de cartes que le pilote CUDA voit, ou 0 s'il n'est pas là.

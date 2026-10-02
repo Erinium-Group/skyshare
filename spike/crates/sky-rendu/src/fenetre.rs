@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 
 use anyhow::{anyhow, Context};
+use sky_decode::SourceImage;
 use windows::core::{w, Interface, HSTRING};
 use windows::Win32::Foundation::{
     GetLastError, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM,
@@ -23,8 +24,9 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows::Win32::Graphics::Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
-    D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
+    ID3D11Device, ID3D11DeviceContext, ID3D11PixelShader, ID3D11RenderTargetView,
+    ID3D11ShaderResourceView, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_VIEWPORT,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -56,6 +58,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::etat::{dessiner, EtatVisionnage};
 use crate::interop::{ImageAAfficher, Pont};
 use crate::nuanceur::{rectangle_centre, Programme};
+use crate::nv12::PontNv12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EvenementFenetre {
@@ -100,6 +103,10 @@ pub struct Fenetre {
     /// image et refaites quand sa taille change : l'enregistrement coûte, le
     /// téléversement non.
     pont: Option<Pont>,
+    /// La texture NV12 lisible par le nuanceur, où l'image Media Foundation est
+    /// copiée. Créée à la première image NV12 et refaite quand sa taille change,
+    /// comme `pont`.
+    pont_nv12: Option<PontNv12>,
     largeur: u32,
     hauteur: u32,
     /// Pour repeindre après un redimensionnement. `None` dès qu'une image a été
@@ -163,34 +170,75 @@ impl Fenetre {
 
     /// Affiche une image décodée, puis présente.
     ///
-    /// Le chemin est intégralement GPU : la surface CUDA est copiée de
-    /// périphérique à périphérique dans trois textures (voir `interop.rs`), que le
-    /// nuanceur recombine et convertit en RVB. Aucun octet de pixel ne passe par
-    /// la mémoire centrale — `ImageDecodee::copier_vers_memoire_centrale` n'est
-    /// jamais appelée d'ici (décision D5).
+    /// Le chemin est intégralement GPU, et il y en a deux selon la source :
+    /// - 4:4:4 (NVDEC) : la surface CUDA est copiée de périphérique à
+    ///   périphérique dans trois textures (voir `interop.rs`) ;
+    /// - NV12 (Media Foundation) : la tranche de texture du décodeur est copiée
+    ///   par Direct3D 11 dans une texture lisible (voir `nv12.rs`).
+    ///
+    /// Un nuanceur par source recombine les plans et les convertit en RVB, par
+    /// la même matrice (spec D6). Aucun octet de pixel ne passe par la mémoire
+    /// centrale — ni `ImageDecodee::copier_vers_memoire_centrale` ni
+    /// `ImageMf::copier_luminance` ne sont appelées d'ici (décision D5).
     ///
     /// À appeler dès qu'une image est reçue : `cuvidDecodePicture` peut bloquer le
     /// fil appelant quand les quatre surfaces de sortie de NVDEC sont épuisées
     /// (`cuviddec.h:1036`), et une `ImageDecodee` vivante en immobilise une.
     pub fn afficher(&mut self, image: &dyn ImageAAfficher) -> anyhow::Result<()> {
         let taille = (image.largeur(), image.hauteur());
-        let a_jour = self
-            .pont
-            .as_ref()
-            .is_some_and(|pont| (pont.largeur(), pont.hauteur()) == taille);
-        if !a_jour {
-            // Relâcher l'ancien avant d'allouer le nouveau : chacun immobilise
-            // trois textures et autant d'enregistrements CUDA.
-            self.pont = None;
-            self.pont = Some(Pont::nouveau(&self.appareil, taille.0, taille.1)?);
+        match image.source() {
+            SourceImage::Cuda444(surface) => {
+                let a_jour = self
+                    .pont
+                    .as_ref()
+                    .is_some_and(|pont| (pont.largeur(), pont.hauteur()) == taille);
+                if !a_jour {
+                    // Relâcher l'ancien avant d'allouer le nouveau : chacun
+                    // immobilise trois textures et autant d'enregistrements CUDA.
+                    self.pont = None;
+                    self.pont = Some(Pont::nouveau(&self.appareil, taille.0, taille.1)?);
+                }
+                let pont = self
+                    .pont
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("pont d'interopérabilité absent"))?;
+                pont.televerser(taille, surface)?;
+                let vues = pont.vues();
+                self.dessiner_image(taille, &self.programme.pixels, &vues);
+            }
+            SourceImage::Nv12 { texture, tranche } => {
+                let a_jour = self
+                    .pont_nv12
+                    .as_ref()
+                    .is_some_and(|pont| (pont.largeur(), pont.hauteur()) == taille);
+                if !a_jour {
+                    self.pont_nv12 = None;
+                    self.pont_nv12 = Some(PontNv12::nouveau(&self.appareil, taille.0, taille.1)?);
+                }
+                let pont = self
+                    .pont_nv12
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("texture NV12 lisible absente"))?;
+                pont.televerser(&self.contexte, texture, tranche)?;
+                let vues = pont.vues();
+                self.dessiner_image(taille, &self.programme.pixels_nv12, &vues);
+            }
         }
-        let pont = self
-            .pont
-            .as_mut()
-            .ok_or_else(|| anyhow!("pont d'interopérabilité absent"))?;
-        pont.televerser(image)?;
-        let vues = pont.vues();
+        // Une image remplace l'état : il n'y a plus rien à repeindre après un
+        // redimensionnement, la prochaine image s'en chargera à la bonne taille.
+        self.dernier_etat = None;
+        self.presenter()
+    }
 
+    /// Dessine dans la cible une image de `taille`, lue par le nuanceur de
+    /// pixels `pixels` dans les `vues` (liées à partir de `t0`). La seule
+    /// séquence de dessin d'image, pour les deux sources.
+    fn dessiner_image(
+        &self,
+        taille: (u32, u32),
+        pixels: &ID3D11PixelShader,
+        vues: &[Option<ID3D11ShaderResourceView>],
+    ) {
         let (x, y, largeur, hauteur) = rectangle_centre(taille, (self.largeur, self.hauteur));
         unsafe {
             let cibles = [Some(self.cible.vue_rendu.clone())];
@@ -212,22 +260,18 @@ impl Fenetre {
             self.contexte
                 .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
             self.contexte.VSSetShader(&self.programme.sommets, None);
-            self.contexte.PSSetShader(&self.programme.pixels, None);
-            self.contexte.PSSetShaderResources(0, Some(&vues));
+            self.contexte.PSSetShader(pixels, None);
+            self.contexte.PSSetShaderResources(0, Some(vues));
             self.contexte
                 .PSSetSamplers(0, Some(&[Some(self.programme.echantillonneur.clone())]));
             self.contexte.Draw(4, 0);
-            // Détacher les vues : la prochaine image réécrit ces textures par
-            // CUDA, et Direct3D refuse de prêter une ressource encore liée en
-            // lecture au nuanceur.
-            self.contexte
-                .PSSetShaderResources(0, Some(&[None, None, None]));
+            // Détacher autant de vues qu'on en a lié : la prochaine image réécrit
+            // ces textures (par CUDA ou par une copie Direct3D), et Direct3D
+            // refuse de prêter une ressource encore liée en lecture au nuanceur.
+            let detachees: Vec<Option<ID3D11ShaderResourceView>> = vec![None; vues.len()];
+            self.contexte.PSSetShaderResources(0, Some(&detachees));
             self.contexte.OMSetRenderTargets(None, None);
         }
-        // Une image remplace l'état : il n'y a plus rien à repeindre après un
-        // redimensionnement, la prochaine image s'en chargera à la bonne taille.
-        self.dernier_etat = None;
-        self.presenter()
     }
 
     /// RÉSERVÉ AUX TESTS ET AUX MESURES : le pixel au centre de la cible, en RVB.
@@ -388,6 +432,7 @@ impl Fenetre {
             cible,
             programme,
             pont: None,
+            pont_nv12: None,
             largeur,
             hauteur,
             dernier_etat: None,
@@ -853,6 +898,41 @@ mod tests {
             )
             .expect("SetWindowPos");
         }
+    }
+
+    /// Constat de la revue de la tâche 4 : la fenêtre doit travailler sur LE
+    /// périphérique de `sky_decode::creer_appareil_video` — API vidéo et
+    /// protection multi-fil, que le décodage Media Foundation exige sur le même
+    /// périphérique que l'affichage (sans quoi la copie NV12 n'aurait rien à
+    /// lire). Le test de `creer_appareil_video` vérifie la fonction ; celui-ci
+    /// vérifie que la fenêtre l'appelle.
+    ///
+    /// Neutralisations mesurées (tâche 6) : une `Fenetre` qui recrée son propre
+    /// périphérique par `D3D11CreateDevice` (adaptateur par défaut, sans
+    /// protection multi-fil) — (1) BGRA seul : ce test rougit sur les drapeaux
+    /// (0x20) ; (2) BGRA et VIDEO_SUPPORT : il rougit sur la protection. Seul ce
+    /// test rougit dans les deux cas.
+    #[test]
+    fn la_fenetre_travaille_sur_le_peripherique_video_protege() {
+        use windows::Win32::Graphics::Direct3D10::ID3D10Multithread;
+        use windows::Win32::Graphics::Direct3D11::D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+
+        let fenetre = ouvrir_pour_test(320, 200);
+        let drapeaux = unsafe { fenetre.appareil().GetCreationFlags() };
+        assert_ne!(
+            drapeaux & D3D11_CREATE_DEVICE_VIDEO_SUPPORT.0,
+            0,
+            "le périphérique de la fenêtre n'a pas D3D11_CREATE_DEVICE_VIDEO_SUPPORT \
+             (drapeaux 0x{drapeaux:X}) : ce n'est pas celui de creer_appareil_video"
+        );
+        let multi: ID3D10Multithread = fenetre
+            .appareil()
+            .cast()
+            .expect("ID3D10Multithread");
+        assert!(
+            unsafe { multi.GetMultithreadProtected() }.as_bool(),
+            "le périphérique de la fenêtre n'est pas protégé contre les accès concurrents"
+        );
     }
 
     #[test]

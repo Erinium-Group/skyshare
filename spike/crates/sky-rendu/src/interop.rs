@@ -28,7 +28,7 @@ use cudarc::driver::sys as cu;
 use cudarc::driver::CudaContext;
 use libloading::os::windows::{Library as WinLibrary, LOAD_LIBRARY_SEARCH_SYSTEM32};
 use libloading::Library;
-use sky_decode::SurfaceCuda;
+use sky_decode::{SourceImage, SurfaceCuda};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11ShaderResourceView, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE,
@@ -36,22 +36,24 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8_UNORM, DXGI_SAMPLE_DESC};
 
-/// Ce que le pont sait afficher : une image YUV 4:4:4 encore sur le GPU.
+/// Ce que la fenêtre sait afficher : une image décodée, 4:4:4 en mémoire CUDA
+/// (NVDEC) ou NV12 en texture Direct3D 11 (Media Foundation), encore sur le GPU.
 ///
-/// Un trait plutôt que le type concret `ImageDecodee` pour une raison précise :
+/// Un trait plutôt que les types concrets du décodeur pour une raison précise :
 /// `ImageDecodee::nouvelle` est `pub(crate)` dans `sky-decode` et exige une
-/// session NVDEC vivante, donc **aucun code hors de `sky-decode` ne peut en
-/// fabriquer une**. Le test de couleur a pourtant besoin d'une surface dont il
-/// connaisse la couleur exacte, sans décoder — sinon il mesurerait le décodage,
-/// que la tâche 2 mesure déjà. Le trait laisse `afficher` traverser exactement le
-/// même chemin pour l'image du décodeur et pour celle du test.
+/// session NVDEC vivante, et une `ImageMf` exige un décodeur Media Foundation —
+/// donc **aucun code hors de `sky-decode` ne peut en fabriquer une**. Les tests
+/// de couleur ont pourtant besoin d'une image dont ils connaissent la couleur
+/// exacte, sans décoder — sinon ils mesureraient le décodage. Le trait laisse
+/// `afficher` traverser exactement le même chemin pour l'image du décodeur et
+/// pour celle du test.
 pub trait ImageAAfficher {
     /// Largeur d'affichage en pixels.
     fn largeur(&self) -> u32;
     /// Hauteur d'affichage en pixels.
     fn hauteur(&self) -> u32;
-    /// La poignée de surface GPU, sans aucun octet de pixel.
-    fn surface(&self) -> SurfaceCuda;
+    /// D'où lire l'image : une poignée GPU, sans aucun octet de pixel.
+    fn source(&self) -> SourceImage<'_>;
 }
 
 impl ImageAAfficher for sky_decode::ImageDecodee {
@@ -61,8 +63,23 @@ impl ImageAAfficher for sky_decode::ImageDecodee {
     fn hauteur(&self) -> u32 {
         self.hauteur
     }
-    fn surface(&self) -> SurfaceCuda {
-        sky_decode::ImageDecodee::surface(self)
+    fn source(&self) -> SourceImage<'_> {
+        SourceImage::Cuda444(sky_decode::ImageDecodee::surface(self))
+    }
+}
+
+impl ImageAAfficher for sky_decode::ImageMf {
+    fn largeur(&self) -> u32 {
+        self.largeur
+    }
+    fn hauteur(&self) -> u32 {
+        self.hauteur
+    }
+    fn source(&self) -> SourceImage<'_> {
+        SourceImage::Nv12 {
+            texture: self.texture(),
+            tranche: self.tranche(),
+        }
     }
 }
 
@@ -205,13 +222,18 @@ impl Pont {
         ]
     }
 
-    /// Copie la surface décodée dans les textures, sans repasser par l'hôte.
-    pub(crate) fn televerser(&mut self, image: &dyn ImageAAfficher) -> anyhow::Result<()> {
-        if (image.largeur(), image.hauteur()) != (self.largeur, self.hauteur) {
+    /// Copie la surface décodée, d'une image `taille`, dans les textures, sans
+    /// repasser par l'hôte.
+    pub(crate) fn televerser(
+        &mut self,
+        taille: (u32, u32),
+        surface: SurfaceCuda,
+    ) -> anyhow::Result<()> {
+        if taille != (self.largeur, self.hauteur) {
             return Err(anyhow!(
                 "image {}×{} pour un pont {}×{}",
-                image.largeur(),
-                image.hauteur(),
+                taille.0,
+                taille.1,
                 self.largeur,
                 self.hauteur
             ));
@@ -221,7 +243,6 @@ impl Pont {
         // Même précaution que `SessionNvdec::rendre_contexte_courant`.
         self.contexte.bind_to_thread().context("contexte CUDA")?;
 
-        let surface = image.surface();
         let mut ressources = [
             self.plans[0].ressource,
             self.plans[1].ressource,

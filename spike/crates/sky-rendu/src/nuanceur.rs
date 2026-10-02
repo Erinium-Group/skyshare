@@ -1,10 +1,17 @@
-//! Le nuanceur qui convertit les trois plans YUV en pixels RVB, et sa
-//! compilation.
+//! Les nuanceurs qui convertissent une image YUV en pixels RVB — trois plans
+//! 4:4:4, ou les deux plans d'une texture NV12 —, et leur compilation.
 //!
-//! Le HLSL est une chaîne littérale et non un fichier chargé à l'exécution : la
-//! build empaquetée doit rester autonome. La compilation passe par `D3DCompile`
-//! (`d3dcompiler_47.dll`, livrée avec Windows) au moment où la fenêtre s'ouvre,
-//! une fois par processus.
+//! Le HLSL est fait de chaînes littérales et non de fichiers chargés à
+//! l'exécution : la build empaquetée doit rester autonome. La compilation passe
+//! par `D3DCompile` (`d3dcompiler_47.dll`, livrée avec Windows) au moment où la
+//! fenêtre s'ouvre, une fois par fenêtre.
+//!
+//! **Deux sources, une seule matrice** (spec D6). `COMMUN` porte le nuanceur de
+//! sommets et `yuv_vers_rgb` ; chaque nuanceur de pixels est compilé depuis
+//! `COMMUN` suivi de sa propre partie. Deux sources et non une : les textures
+//! des deux nuanceurs de pixels occupent les mêmes registres (`t0`, `t1`), et
+//! le compilateur refuse deux ressources liées au même registre dans une même
+//! source (repris du brief de la tâche 6, non éprouvé ici).
 
 use anyhow::{anyhow, Context};
 use windows::core::{s, PCSTR};
@@ -16,15 +23,9 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_TEXTURE_ADDRESS_CLAMP,
 };
 
-/// Le programme complet : nuanceur de sommets `sommet`, nuanceur de pixels
-/// `pixel`.
-const SOURCE: &str = r#"
-// Trois plans à un canal : c'est la forme que NVDEC rend (4:4:4 planaire), et
-// l'échantillonnage les recombine sans qu'aucun noyau CUDA n'ait à entrelacer
-// quoi que ce soit. Voir l'en-tête de `interop.rs`.
-Texture2D<float> plan_y : register(t0);
-Texture2D<float> plan_u : register(t1);
-Texture2D<float> plan_v : register(t2);
+/// Ce que les deux programmes partagent : le nuanceur de sommets `sommet`,
+/// l'échantillonneur et la matrice `yuv_vers_rgb` — qui n'existe qu'ici.
+const COMMUN: &str = r#"
 SamplerState echantillonneur : register(s0);
 
 struct Sortie {
@@ -66,6 +67,16 @@ float3 yuv_vers_rgb(float3 yuv) {
         y + 1.772 * u
     ) / 255.0;
 }
+"#;
+
+/// Le nuanceur de pixels `pixel` du 4:4:4 (NVDEC), à compiler après `COMMUN`.
+const PIXEL_444: &str = r#"
+// Trois plans à un canal : c'est la forme que NVDEC rend (4:4:4 planaire), et
+// l'échantillonnage les recombine sans qu'aucun noyau CUDA n'ait à entrelacer
+// quoi que ce soit. Voir l'en-tête de `interop.rs`.
+Texture2D<float> plan_y : register(t0);
+Texture2D<float> plan_u : register(t1);
+Texture2D<float> plan_v : register(t2);
 
 float4 pixel(Sortie entree) : SV_Target {
     float3 yuv = float3(
@@ -80,23 +91,50 @@ float4 pixel(Sortie entree) : SV_Target {
 }
 "#;
 
+/// Le nuanceur de pixels `pixel_nv12` (Media Foundation), à compiler après
+/// `COMMUN`. Les deux vues portent sur la même texture NV12 (`nv12.rs`) : Y à
+/// pleine résolution, UV entrelacés à demi-résolution — mêmes coordonnées
+/// normalisées, donc chaque pixel lit la chrominance à sa position (interpolée
+/// entre échantillons voisins par le filtrage linéaire).
+const PIXEL_NV12: &str = r#"
+Texture2D<float> nv12_y : register(t0);
+Texture2D<float2> nv12_uv : register(t1);
+
+float4 pixel_nv12(Sortie entree) : SV_Target {
+    float y = nv12_y.Sample(echantillonneur, entree.coordonnees);
+    float2 uv = nv12_uv.Sample(echantillonneur, entree.coordonnees);
+    return float4(saturate(yuv_vers_rgb(float3(y, uv.x, uv.y))), 1.0);
+}
+"#;
+
 /// Les objets de pipeline que le rendu d'image réclame.
 pub(crate) struct Programme {
     pub(crate) sommets: ID3D11VertexShader,
+    /// Le nuanceur de pixels du 4:4:4 (trois plans, `t0` à `t2`).
     pub(crate) pixels: ID3D11PixelShader,
+    /// Le nuanceur de pixels du NV12 (deux vues, `t0` et `t1`).
+    pub(crate) pixels_nv12: ID3D11PixelShader,
     pub(crate) echantillonneur: ID3D11SamplerState,
 }
 
 impl Programme {
     pub(crate) fn compiler(appareil: &ID3D11Device) -> anyhow::Result<Self> {
-        let code_sommets = compiler_etage(s!("sommet"), s!("vs_5_0"))?;
-        let code_pixels = compiler_etage(s!("pixel"), s!("ps_5_0"))?;
+        let source_444 = format!("{COMMUN}{PIXEL_444}");
+        let source_nv12 = format!("{COMMUN}{PIXEL_NV12}");
+        let code_sommets = compiler_etage(&source_444, s!("sommet"), s!("vs_5_0"))?;
+        let code_pixels = compiler_etage(&source_444, s!("pixel"), s!("ps_5_0"))?;
+        let code_pixels_nv12 = compiler_etage(&source_nv12, s!("pixel_nv12"), s!("ps_5_0"))?;
         let mut sommets = None;
         unsafe { appareil.CreateVertexShader(octets(&code_sommets), None, Some(&mut sommets)) }
             .context("création du nuanceur de sommets")?;
         let mut pixels = None;
         unsafe { appareil.CreatePixelShader(octets(&code_pixels), None, Some(&mut pixels)) }
             .context("création du nuanceur de pixels")?;
+        let mut pixels_nv12 = None;
+        unsafe {
+            appareil.CreatePixelShader(octets(&code_pixels_nv12), None, Some(&mut pixels_nv12))
+        }
+        .context("création du nuanceur de pixels NV12")?;
 
         // Filtrage linéaire : l'image est mise à l'échelle dès que la fenêtre ne
         // fait pas exactement la taille du flux, et un filtrage au plus proche y
@@ -123,20 +161,22 @@ impl Programme {
         Ok(Self {
             sommets: sommets.ok_or_else(|| anyhow!("nuanceur de sommets nul"))?,
             pixels: pixels.ok_or_else(|| anyhow!("nuanceur de pixels nul"))?,
+            pixels_nv12: pixels_nv12.ok_or_else(|| anyhow!("nuanceur de pixels NV12 nul"))?,
             echantillonneur: echantillonneur.ok_or_else(|| anyhow!("échantillonneur nul"))?,
         })
     }
 }
 
-/// Compile un étage et rend son code objet. Le message du compilateur HLSL est
-/// remonté tel quel : sans lui, une erreur de nuanceur n'est qu'un code HRESULT.
-fn compiler_etage(point_d_entree: PCSTR, cible: PCSTR) -> anyhow::Result<ID3DBlob> {
+/// Compile un étage de `source` et rend son code objet. Le message du
+/// compilateur HLSL est remonté tel quel : sans lui, une erreur de nuanceur
+/// n'est qu'un code HRESULT.
+fn compiler_etage(source: &str, point_d_entree: PCSTR, cible: PCSTR) -> anyhow::Result<ID3DBlob> {
     let mut code = None;
     let mut erreurs = None;
     let resultat = unsafe {
         D3DCompile(
-            SOURCE.as_ptr().cast(),
-            SOURCE.len(),
+            source.as_ptr().cast(),
+            source.len(),
             s!("sky-rendu/nuanceur.rs"),
             None,
             None,

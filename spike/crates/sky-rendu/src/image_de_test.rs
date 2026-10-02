@@ -1,23 +1,30 @@
-//! Une image YUV 4:4:4 unie, fabriquée sans décodeur.
+//! Des images YUV unies, fabriquées sans décodeur : 4:4:4 en mémoire CUDA
+//! (`ImageUnie`), et NV12 en texture Direct3D 11 (`ImageNv12DeTest`).
 //!
-//! RÉSERVÉ AUX TESTS ET AUX MESURES. Pourquoi ça existe : `ImageDecodee` n'est
-//! constructible que par `sky-decode` (son constructeur est `pub(crate)` et exige
-//! une session NVDEC vivante). Un test de couleur qui passerait par le décodeur
-//! mesurerait le décodage — ce que la tâche 2 mesure déjà — au lieu de mesurer
-//! la traversée interopérabilité + nuanceur, qui est la seule chose que ce crate
-//! ajoute.
+//! RÉSERVÉ AUX TESTS ET AUX MESURES. Pourquoi ça existe : `ImageDecodee` et
+//! `ImageMf` ne sont constructibles que par `sky-decode` (il y faut une session
+//! NVDEC ou un décodeur Media Foundation vivants). Un test de couleur qui
+//! passerait par le décodeur mesurerait le décodage au lieu de mesurer la
+//! traversée jusqu'au nuanceur, qui est la seule chose que ce crate ajoute.
 //!
-//! La disposition reproduit exactement celle de NVDEC : une allocation unique
-//! avec un pas de ligne, trois plans qui se suivent verticalement, espacés de la
-//! hauteur de la surface. Sans quoi le test emprunterait un chemin que la
-//! production n'emprunte pas.
+//! La disposition 4:4:4 reproduit exactement celle de NVDEC : une allocation
+//! unique avec un pas de ligne, trois plans qui se suivent verticalement,
+//! espacés de la hauteur de la surface. Sans quoi le test emprunterait un chemin
+//! que la production n'emprunte pas. L'image NV12, elle, n'est pas une tranche
+//! de tableau liée au seul décodeur comme celle de Media Foundation : c'est le
+//! test d'image réelle (`tests/image_nv12.rs`) qui couvre cette forme-là.
 
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use cudarc::driver::sys as cu;
 use cudarc::driver::CudaContext;
-use sky_decode::SurfaceCuda;
+use sky_decode::{SourceImage, SurfaceCuda};
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA,
+    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
 
 use crate::interop::{verifier, ImageAAfficher};
 
@@ -38,8 +45,8 @@ impl ImageAAfficher for ImageUnie {
     fn hauteur(&self) -> u32 {
         self.hauteur
     }
-    fn surface(&self) -> SurfaceCuda {
-        self.surface
+    fn source(&self) -> SourceImage<'_> {
+        SourceImage::Cuda444(self.surface)
     }
 }
 
@@ -117,4 +124,83 @@ impl Drop for ImageUnie {
         }
         unsafe { cu::cuMemFree_v2(self.surface.pointeur) };
     }
+}
+
+/// Une image NV12 unie dans une texture Direct3D 11, dont on connaît la couleur
+/// exacte. Elle s'affiche par le même chemin que l'image de Media Foundation
+/// (`SourceImage::Nv12`), en tranche 0 d'une texture d'une seule tranche.
+pub struct ImageNv12DeTest {
+    texture: ID3D11Texture2D,
+    largeur: u32,
+    hauteur: u32,
+}
+
+impl ImageAAfficher for ImageNv12DeTest {
+    fn largeur(&self) -> u32 {
+        self.largeur
+    }
+    fn hauteur(&self) -> u32 {
+        self.hauteur
+    }
+    fn source(&self) -> SourceImage<'_> {
+        SourceImage::Nv12 {
+            texture: &self.texture,
+            tranche: 0,
+        }
+    }
+}
+
+/// Fabrique une image NV12 unie sur `appareil`, sans décodeur.
+///
+/// `yuv` donne Y (constant sur le plan de luminance) puis U et V (constants sur
+/// le plan de chrominance entrelacé). La taille doit être paire, comme toute
+/// texture NV12.
+pub fn image_de_test_nv12(
+    appareil: &ID3D11Device,
+    largeur: u32,
+    hauteur: u32,
+    yuv: [u8; 3],
+) -> anyhow::Result<ImageNv12DeTest> {
+    anyhow::ensure!(
+        largeur > 0 && hauteur > 0 && largeur.is_multiple_of(2) && hauteur.is_multiple_of(2),
+        "taille d'image NV12 nulle ou impaire : {largeur}×{hauteur}"
+    );
+    // Disposition NV12 en mémoire : `hauteur` lignes de Y, puis `hauteur / 2`
+    // lignes de U et V entrelacés, toutes au même pas de `largeur` octets.
+    let (l, h) = (largeur as usize, hauteur as usize);
+    let mut octets = vec![yuv[0]; l * h * 3 / 2];
+    for paire in octets[l * h..].chunks_exact_mut(2) {
+        paire[0] = yuv[1];
+        paire[1] = yuv[2];
+    }
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: largeur,
+        Height: hauteur,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_NV12,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        ..Default::default()
+    };
+    // Données initiales d'un format planaire : un seul pointeur et un seul pas,
+    // le plan UV suivant le plan Y sans intervalle.
+    let donnees = D3D11_SUBRESOURCE_DATA {
+        pSysMem: octets.as_ptr().cast(),
+        SysMemPitch: largeur,
+        SysMemSlicePitch: 0,
+    };
+    let mut texture = None;
+    unsafe { appareil.CreateTexture2D(&desc, Some(&donnees), Some(&mut texture)) }
+        .context("création de la texture NV12 de test")?;
+    let texture = texture.ok_or_else(|| anyhow!("texture NV12 de test nulle"))?;
+    Ok(ImageNv12DeTest {
+        texture,
+        largeur,
+        hauteur,
+    })
 }

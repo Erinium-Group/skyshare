@@ -32,6 +32,9 @@ features = [
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
     "Win32_Graphics_Direct3D",
+    # `ID3D10Multithread`, par lequel un test vérifie que la fenêtre travaille
+    # sur le périphérique protégé de `sky_decode::creer_appareil_video`.
+    "Win32_Graphics_Direct3D10",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Direct3D_Fxc",
     "Win32_Graphics_DirectWrite",

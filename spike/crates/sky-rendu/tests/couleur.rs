@@ -1,7 +1,7 @@
-//! Le chemin GPU ne doit pas altérer la couleur. Ce test ne mesure pas le
-//! décodage (la tâche 2 s'en charge) mais la traversée interopérabilité +
-//! nuanceur : on pousse une surface YUV 4:4:4 dont on connaît la couleur
-//! exacte, et on relit le pixel présenté.
+//! Le chemin GPU ne doit pas altérer la couleur. Ces tests ne mesurent pas le
+//! décodage mais la traversée jusqu'au nuanceur : on pousse une image dont on
+//! connaît la couleur exacte — une surface YUV 4:4:4 en mémoire CUDA, ou une
+//! texture NV12 Direct3D 11 — et on relit le pixel présenté.
 
 // `nvidia-video-codec-sdk`, tiré par `sky-decode`, référence
 // `NvEncodeAPICreateInstance` et `NvEncodeAPIGetMaxSupportedVersion` dans un
@@ -25,9 +25,10 @@ const CAS: [(&str, [u8; 3], [u8; 3]); 3] = [
 #[test]
 fn la_conversion_bt601_rend_les_couleurs_attendues() {
     // Sortie franche et non silencieuse : sans carte NVIDIA, il n'y a ni CUDA ni
-    // interopérabilité, et la spec assume qu'une telle machine ne peut pas
-    // recevoir. Partout ailleurs, tout ce qui suit doit réussir — un `else` qui
-    // avalerait l'échec laisserait passer la régression que ce test traque.
+    // interopérabilité, donc pas de chemin 4:4:4 à éprouver (une telle machine
+    // reçoit en NV12, que le test suivant éprouve sans cette sortie). Partout
+    // ailleurs, tout ce qui suit doit réussir — un `else` qui avalerait l'échec
+    // laisserait passer la régression que ce test traque.
     if sky_rendu::cartes_cuda_disponibles() == 0 {
         println!("aucune carte CUDA : pas d'interopérabilité à éprouver ici");
         return;
@@ -44,6 +45,71 @@ fn la_conversion_bt601_rend_les_couleurs_attendues() {
             assert!(
                 ecart <= 4,
                 "{nom}, canal {canal} : {o} au lieu de {a} (écart {ecart})"
+            );
+        }
+    }
+}
+
+/// Le chemin NV12 (Media Foundation) applique la même matrice BT.601 pleine
+/// plage que le 4:4:4 (spec D6) : mêmes cas, mêmes couleurs attendues, même
+/// tolérance. Une image NV12 unie a les mêmes U et V sur tout son plan de
+/// chrominance, donc le sous-échantillonnage 4:2:0 n'y perd rien.
+///
+/// Pas de sortie « aucune carte CUDA » ici : le chemin NV12 ne dépend pas de
+/// CUDA, il doit fonctionner sur toute machine qui ouvre la fenêtre.
+#[test]
+fn la_conversion_bt601_nv12_rend_les_couleurs_attendues() {
+    let mut fenetre =
+        sky_rendu::Fenetre::ouvrir_masquee("couleur nv12", 64, 64).expect("fenêtre masquée");
+    for (nom, yuv, rgb_attendu) in CAS {
+        let image = sky_rendu::image_de_test_nv12(fenetre.appareil(), 64, 64, yuv)
+            .expect("image NV12 de test");
+        fenetre.afficher(&image).expect("affichage");
+        let obtenu = fenetre.pixel_central().expect("lecture du tampon");
+        println!("NV12 {nom} : YUV {yuv:?} -> RVB {obtenu:?} (attendu {rgb_attendu:?})");
+        for (canal, (o, a)) in obtenu.iter().zip(rgb_attendu).enumerate() {
+            let ecart = (*o as i32 - a as i32).abs();
+            assert!(
+                ecart <= 4,
+                "NV12 {nom}, canal {canal} : {o} au lieu de {a} (écart {ecart})"
+            );
+        }
+    }
+}
+
+/// La texture NV12 lisible par le nuanceur est refaite quand la taille de
+/// l'image change, comme le pont 4:4:4.
+///
+/// L'ordre des tailles est ce qui rend ce test discriminant. Une texture
+/// gardée à 64×64 sous une image 128×64 unie ne se verrait pas : la copie d'un
+/// coin 64×64 d'une image unie a la même couleur que l'image entière. C'est
+/// donc la plus GRANDE qui vient d'abord : une texture gardée à 128×64 sous une
+/// image 64×64 exige une copie qui déborde de la source — refusée par
+/// `PontNv12::televerser`, et que Direct3D 11 ignore sans erreur sinon, ce qui
+/// laisse affichée la couleur précédente (mesuré, tâche 6 : refus et
+/// recréation retirés ensemble, ce test rougit sur « 254 au lieu de 0 »).
+/// Chaque image a sa couleur.
+///
+/// L'ordre inverse (64×64 puis 128×64) a été mesuré : il reste VERT sous
+/// « texture jamais recréée ».
+#[test]
+fn le_pont_nv12_suit_la_taille_de_l_image() {
+    let mut fenetre =
+        sky_rendu::Fenetre::ouvrir_masquee("taille nv12", 64, 64).expect("fenêtre masquée");
+    let sequence = [(128, 64, CAS[0]), (64, 64, CAS[1]), (128, 64, CAS[2])];
+    for (largeur, hauteur, (nom, yuv, rgb_attendu)) in sequence {
+        let image = sky_rendu::image_de_test_nv12(fenetre.appareil(), largeur, hauteur, yuv)
+            .expect("image NV12 de test");
+        fenetre
+            .afficher(&image)
+            .unwrap_or_else(|e| panic!("affichage {largeur}×{hauteur} : {e:#}"));
+        let obtenu = fenetre.pixel_central().expect("lecture du tampon");
+        for (canal, (o, a)) in obtenu.iter().zip(rgb_attendu).enumerate() {
+            let ecart = (*o as i32 - a as i32).abs();
+            assert!(
+                ecart <= 4,
+                "{largeur}×{hauteur} {nom}, canal {canal} : {o} au lieu de {a} — \
+                 l'image précédente est-elle encore affichée ?"
             );
         }
     }
