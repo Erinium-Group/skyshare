@@ -459,6 +459,49 @@ Chaque correction a son test et sa neutralisation, appliquée seule.
 - **`transit_ms` compare deux horloges d'origines différentes** (hérité, documenté) : ce n'est pas
   une latence de bout en bout. **Aucun instrument du dépôt ne mesure la latence capture → pixel.**
 
+### Laissé ouvert par la revue finale et sa vague de correction (03/10/2026)
+
+La vague de correction finale a réglé le critique et les quatre importants de la revue de
+branche. Ce qui suit reste **ouvert**, tranché comme non bloquant pour la fusion.
+
+- **Fragilité principale du correctif « image de retard » (`CUVID_PKT_ENDOFPICTURE`)** : il
+  suppose **une tranche par image**, ce que rien n'impose côté encodeur, et aucun test ne fait
+  passer une vraie sortie de NVENC par `str0m`. Si NVENC découpait une image en plusieurs
+  tranches, chacune serait décodée comme une image complète. Remède : fixer explicitement le
+  mode de découpage de l'encodeur, et un test de bout en bout.
+- **Défense en profondeur du même correctif non faite** : aucune garde sur l'horodatage ne
+  refuse d'afficher une image plus ancienne que la dernière image clé.
+- **Changement de résolution pendant un partage** : l'image retenue pour répondre à une demande
+  d'image clé sur écran figé reste à l'ancienne taille. Non traité, et non écrit dans le code.
+- **« Session refusée » couvre aussi des échecs de décodage** : avant la première image, ils
+  afficheront « Le décodeur vidéo n'a pas pu démarrer », même quand le flux est en cause.
+- **Les plans datés** (`docs/superpowers/plans/`) gardent les affirmations corrigées depuis,
+  sans renvoi vers les corrections.
+- **Coût non mesuré** : la copie GPU de chaque image capturée, faite pour pouvoir répondre à
+  une demande d'image clé sur écran figé.
+- **« Consommer l'image aussitôt » n'est pas structurel** (`decodeur.rs:255`) : `decoder` rend
+  **une** image par appel ; si un même appel en dépose deux (rappel d'affichage puis échec du
+  rappel de décodage dans le même `cuvidParseVideoData`), le surplus reste mappé et immobilise
+  l'une des quatre surfaces de sortie — dont l'épuisement **bloque le fil appelant**.
+- **Une panne d'affichage en cours de flux montre un fragment technique** (`partage.rs:154`) :
+  `e.to_string()` ne rend que le contexte le plus externe — « plan 0 », « présentation »,
+  « contexte CUDA » — au lieu d'un message pour l'utilisateur.
+- **Le déchirement promis par la décision D7 n'aura probablement pas lieu** (`fenetre.rs:556`) :
+  la présentation se fait sans `DXGI_PRESENT_ALLOW_TEARING`, et en modèle flip la documentation
+  de DXGI indique qu'il n'y a alors pas de déchirement, la composition attendant la
+  synchronisation. Effet sur la latence : **à mesurer à l'essai**, pas à supposer.
+- **La gigue mêle l'encodage au réseau** (`hote.rs:384`) : l'horodatage est pris **après**
+  `encode`, en millisecondes entières, alors que l'heure de capture existe.
+
+### Textes affichés à l'utilisateur, à valider par le propriétaire
+
+Ajoutés ou modifiés par la vague finale, en plus des trois déjà listés plus haut : le **refus
+de partager sans HEVC 4:4:4**, `envoi_en_retard` (qui remplace « La connexion était trop lente
+pour la vidéo » de la spec du jalon 1) et `sans_decodage_444` corrigé. Texte exact dans
+`app/src/messages.ts` et `spike/crates/sky-app/src/noyau.rs`. **Point à trancher** :
+`envoi_en_retard` commence par « Le partage s'est arrêté », la même phrase que l'arrêt normal
+annoncé par l'hôte — l'utilisateur ne peut donc pas distinguer les deux à la première lecture.
+
 ### Mineurs reportés, recopiés du journal (62 constats, tâche par tâche)
 
 Recopiés parce que le journal est ignoré par git. « Soldé » signifie qu'une tâche ultérieure l'a
