@@ -1,0 +1,438 @@
+﻿SONDE AMD — faisabilité du décodage vidéo hors NVIDIA, pour SkyShare
+sonde-amd 1.0 (02/10/2026)
+Chaque résultat est marqué [MESURÉ] ou [ÉCHEC] ; un échec cite le message d'erreur exact.
+Rien n'est envoyé sur le réseau. Aucune fenêtre n'est ouverte.
+Rapport écrit dans : C:\Users\killi\AppData\Local\Temp\claude\D--skyshare\3ad5193a-c5db-4eeb-b8c9-8ad999838d94\scratchpad\sonde-amd\rapport-sonde-amd.txt
+
+==============================================================================
+0. LA MACHINE
+==============================================================================
+Date de l'exécution : 02/10/2026 20:07:56 (heure locale)
+Système : Windows 10 Pro 25H2, build 26200.9457 (ProductName vaut « Windows 10 » sur bien des Windows 11 : seul le numéro de build fait foi)
+Processeur : AMD Ryzen 7 5800X 8-Core Processor (16 processeurs logiques)
+Branché sur secteur : oui
+Extensions vidéo du Microsoft Store (indice du registre, pas une preuve) :
+  Paquet installé : Microsoft.AV1VideoExtension_2.0.30.0_x64__8wekyb3d8bbwe
+  Paquet installé : Microsoft.AVCEncoderVideoExtension_1.1.23.0_x64__8wekyb3d8bbwe
+  Paquet installé : Microsoft.HEVCVideoExtension_2.5.33.0_x64__8wekyb3d8bbwe
+  Paquet installé : Microsoft.MPEG2VideoExtension_1.2.32.0_x64__8wekyb3d8bbwe
+  Paquet installé : Microsoft.VP9VideoExtensions_1.2.20.0_x64__8wekyb3d8bbwe
+Adaptateur 0 : NVIDIA GeForce RTX 4060 — NVIDIA (VEN_10DE DEV_2882 REV_A1), pilote 32.0.16.1692, mémoire dédiée 7956 Mo, partagée 16337 Mo
+Adaptateur 1 : Microsoft Basic Render Driver — Microsoft (VEN_1414 DEV_008C REV_00), pilote 10.0.26100.9278, mémoire dédiée 0 Mo, partagée 16337 Mo — ADAPTATEUR LOGICIEL, ignoré
+
+==============================================================================
+1. CE QUE LA PUCE DÉCLARE (API vidéo Direct3D 11)
+==============================================================================
+
+--- Adaptateur : NVIDIA GeForce RTX 4060 ---
+Périphérique Direct3D 11 créé, niveau de fonctionnalité 0xB000
+  [MESURÉ] NVIDIA GeForce RTX 4060 déclare 27 profil(s) de décodage (GetVideoDecoderProfileCount)
+  Profil  0 : MPEG-2 et MPEG-1 VLD
+             GUID {86695F12-340E-4F04-9FD3-9253DD327460}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil  1 : MPEG-2 VLD
+             GUID {EE27417F-5E28-4E65-BEEA-1D26B508ADC9}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil  2 : MPEG-1 VLD
+             GUID {6F3EC719-3735-42CC-8063-65CC3CB36616}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil  3 : VC-1 VLD 2010
+             GUID {1B81BEA4-A0C7-11D3-B984-00C04F2E73C5}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil  4 : VC-1 VLD
+             GUID {1B81BEA3-A0C7-11D3-B984-00C04F2E73C5}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil  5 : inconnu (GUID propre au fabricant ?)
+             GUID {32FCFE3F-DE46-4A49-861B-AC71110649D5}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil  6 : H.264 VLD stéréo progressif
+             GUID {D79BE8DA-0CF1-4C81-B82A-69A4E236F43D}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil  7 : H.264 VLD stéréo
+             GUID {F9AACCBB-C2B6-4CFC-8779-5707B1760552}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil  8 : H.264 VLD (sans FGT) — le profil H.264 usuel
+             GUID {1B81BE68-A0C7-11D3-B984-00C04F2E73C5}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil  9 : HEVC Main (8 bits 4:2:0)
+             GUID {5B11D51B-2F4C-4452-BCC3-09F2A1160CC0}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil 10 : HEVC Main 10 (10 bits 4:2:0)
+             GUID {107AF0E0-EF1A-4D19-ABA8-67A163073D13}
+             formats de sortie acceptés : P010, 420_OPAQUE
+  Profil 11 : HEVC Main 12
+             GUID {1A72925F-0C2C-4F15-96FB-B17D1473603F}
+             formats de sortie acceptés : P010, 420_OPAQUE
+  Profil 12 : inconnu (GUID propre au fabricant ?)
+             GUID {15DF9B21-06C4-47F1-841E-A67C97D7F312}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil 13 : HEVC Main 4:4:4 (8 bits)
+             GUID {4008018F-F537-4B36-98CF-61AF8A2C1A33}
+             formats de sortie acceptés : AYUV, 420_OPAQUE
+  Profil 14 : HEVC Main 10 4:4:4
+             GUID {0DABEFFA-4458-4602-BC03-0795659D617C}
+             formats de sortie acceptés : Y410, 420_OPAQUE
+  Profil 15 : HEVC Main 12 4:4:4
+             GUID {9798634D-FE9D-48E5-B4DA-DBEC45B3DF01}
+             formats de sortie acceptés : Y416, 420_OPAQUE
+  Profil 16 : MPEG-4 Part 2 VLD Simple
+             GUID {EFD64D74-C9E8-41D7-A5E9-E9B0E39FA319}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil 17 : MPEG-4 Part 2 VLD Advanced Simple sans GMC
+             GUID {ED418A9F-010D-4EDA-9AE3-9A65358D8D2E}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil 18 : inconnu (GUID propre au fabricant ?)
+             GUID {9947EC6F-689B-11DC-A320-0019DBBC4184}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil 19 : inconnu (GUID propre au fabricant ?)
+             GUID {33FCFE41-DE46-4A49-861B-AC71110649D5}
+             formats de sortie acceptés : NV12, YUY2, 420_OPAQUE
+  Profil 20 : VP9 Profile 0 (8 bits)
+             GUID {463707F8-A1D0-4585-876D-83AA6D60B89E}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil 21 : VP9 Profile 2 (10 bits)
+             GUID {A4C749EF-6ECF-48AA-8448-50A7A1165FF7}
+             formats de sortie acceptés : P010, 420_OPAQUE
+  Profil 22 : inconnu (GUID propre au fabricant ?)
+             GUID {DDA19DC7-93B5-49F5-A9B3-2BDA28A2CE6E}
+             formats de sortie acceptés : P010, 420_OPAQUE
+  Profil 23 : AV1 Profile 0 (Main)
+             GUID {B8BE4CCB-CF53-46BA-8D59-D6B8A6DA5D2A}
+             formats de sortie acceptés : NV12, P010, 420_OPAQUE
+  Profil 24 : inconnu (GUID propre au fabricant ?)
+             GUID {6AFFD11E-1D96-42B1-A215-93A31F09A53D}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil 25 : inconnu (GUID propre au fabricant ?)
+             GUID {914C84A3-4078-4FA9-984C-E2F262CB5C9C}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+  Profil 26 : inconnu (GUID propre au fabricant ?)
+             GUID {8A1A1031-29BC-46D0-A007-E9B092CA6767}
+             formats de sortie acceptés : NV12, 420_OPAQUE
+
+--- Tailles acceptées par profil HEVC et H.264 (NVIDIA GeForce RTX 4060) ---
+  Méthode : GetVideoDecoderConfigCount sur une description de décodeur, puis, si au moins une
+  configuration existe, CreateVideoDecoder avec la première — la création effective est la preuve.
+  H.264 VLD stéréo progressif (sortie NV12) :
+      1920x1080 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      2560x1440 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      2560x2880 : ACCEPTÉE — 3 configuration(s), décodeur créé  <== taille décisive
+      3840x2160 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      4096x2304 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      4096x4096 : ACCEPTÉE — 3 configuration(s), décodeur créé
+  H.264 VLD stéréo (sortie NV12) :
+      1920x1080 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      2560x1440 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      2560x2880 : ACCEPTÉE — 3 configuration(s), décodeur créé  <== taille décisive
+      3840x2160 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      4096x2304 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      4096x4096 : ACCEPTÉE — 3 configuration(s), décodeur créé
+  H.264 VLD (sans FGT) — le profil H.264 usuel (sortie NV12) :
+      1920x1080 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      2560x1440 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      2560x2880 : ACCEPTÉE — 3 configuration(s), décodeur créé  <== taille décisive
+      3840x2160 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      4096x2304 : ACCEPTÉE — 3 configuration(s), décodeur créé
+      4096x4096 : ACCEPTÉE — 3 configuration(s), décodeur créé
+  HEVC Main (8 bits 4:2:0) (sortie NV12) :
+      1920x1080 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x1440 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x2880 : ACCEPTÉE — 2 configuration(s), décodeur créé  <== taille décisive
+      3840x2160 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x2304 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x4096 : ACCEPTÉE — 2 configuration(s), décodeur créé
+  HEVC Main 10 (10 bits 4:2:0) (sortie P010) :
+      1920x1080 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x1440 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x2880 : ACCEPTÉE — 2 configuration(s), décodeur créé  <== taille décisive
+      3840x2160 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x2304 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x4096 : ACCEPTÉE — 2 configuration(s), décodeur créé
+  HEVC Main 12 (sortie P010) :
+      1920x1080 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x1440 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x2880 : ACCEPTÉE — 2 configuration(s), décodeur créé  <== taille décisive
+      3840x2160 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x2304 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x4096 : ACCEPTÉE — 2 configuration(s), décodeur créé
+  HEVC Main 4:4:4 (8 bits) (sortie AYUV) :
+      1920x1080 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x1440 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x2880 : ACCEPTÉE — 2 configuration(s), décodeur créé  <== taille décisive
+      3840x2160 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x2304 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x4096 : ACCEPTÉE — 2 configuration(s), décodeur créé
+  HEVC Main 10 4:4:4 (sortie Y410) :
+      1920x1080 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x1440 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x2880 : ACCEPTÉE — 2 configuration(s), décodeur créé  <== taille décisive
+      3840x2160 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x2304 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x4096 : ACCEPTÉE — 2 configuration(s), décodeur créé
+  HEVC Main 12 4:4:4 (sortie Y416) :
+      1920x1080 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x1440 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      2560x2880 : ACCEPTÉE — 2 configuration(s), décodeur créé  <== taille décisive
+      3840x2160 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x2304 : ACCEPTÉE — 2 configuration(s), décodeur créé
+      4096x4096 : ACCEPTÉE — 2 configuration(s), décodeur créé
+
+==============================================================================
+2. LES DÉCODEURS MEDIA FOUNDATION (énumération MFTEnumEx)
+==============================================================================
+
+--- Décodeurs HEVC (entrée HEVC, sortie quelconque) ---
+  [MESURÉ] HEVC — synchrones locaux (choix par défaut) : 1 décodeur(s)
+      « HEVCVideoExtension »  CLSID ?  drapeaux : SYNCMFT
+  [MESURÉ] HEVC — MATÉRIELS seulement (MFT_ENUM_FLAG_HARDWARE) : 0 décodeur(s)
+  [MESURÉ] HEVC — tous (MFT_ENUM_FLAG_ALL) : 1 décodeur(s)
+      « HEVCVideoExtension »  CLSID ?  drapeaux : SYNCMFT
+  [MESURÉ] HEVC — tous, y compris les MFT du Store non approuvés : 1 décodeur(s)
+      « HEVCVideoExtension »  CLSID ?  drapeaux : SYNCMFT
+
+--- Décodeurs H.264 (entrée H.264, sortie quelconque) ---
+  [MESURÉ] H.264 — synchrones locaux (choix par défaut) : 1 décodeur(s)
+      « Microsoft H264 Video Decoder MFT »  CLSID {62CE7E72-4C71-4D20-B15D-452831A87D9D}  drapeaux : SYNCMFT
+  [MESURÉ] H.264 — MATÉRIELS seulement (MFT_ENUM_FLAG_HARDWARE) : 0 décodeur(s)
+  [MESURÉ] H.264 — tous (MFT_ENUM_FLAG_ALL) : 1 décodeur(s)
+      « Microsoft H264 Video Decoder MFT »  CLSID {62CE7E72-4C71-4D20-B15D-452831A87D9D}  drapeaux : SYNCMFT
+  [MESURÉ] H.264 — tous, y compris les MFT du Store non approuvés : 1 décodeur(s)
+      « Microsoft H264 Video Decoder MFT »  CLSID {62CE7E72-4C71-4D20-B15D-452831A87D9D}  drapeaux : SYNCMFT
+
+==============================================================================
+3. DÉCODAGE RÉEL DES FLUX DE TEST (Media Foundation)
+==============================================================================
+Méthode : chaque unité d'accès est soumise au décodeur (un échantillon par image), au plus vite,
+sans cadence imposée. « i/s » est donc la cadence MAXIMALE de décodage, pas une lecture à 60 i/s.
+Mode MATÉRIEL : décodeur relié à un périphérique Direct3D 11. Trois preuves sont exigées :
+  (1) le décodeur accepte le périphérique (MFT_MESSAGE_SET_D3D_MANAGER) ;
+  (2) chaque image rendue est une surface DXGI (IMFDXGIBuffer), pas de la mémoire système ;
+  (3) le compteur Windows « GPU Engine » du moteur vidéo, pour CE processus, a progressé.
+Mode LOGICIEL : sans périphérique, pour référence. Le temps CPU est celui de tout le processus.
+
+--- Flux hevc-main-420-2560x1440.h265 ---
+  600 unités d'accès, 14053786 octets, soit 11.24 Mbps à 60 i/s ; 1 SPS, 1 image(s) IDR dans le flux
+  [MESURÉ] HEVC lu dans le SPS : profil Main, niveau 150, 4:2:0 , 8 bits (luma) / 8 bits (chroma), 2560x1440
+
+  >> Décodeur « HEVCVideoExtension » — mode MATÉRIEL sur NVIDIA GeForce RTX 4060
+     · périphérique Direct3D 11 créé sur « NVIDIA GeForce RTX 4060 »
+     · attribut MF_SA_D3D11_AWARE = 1
+     · MF_LOW_LATENCY = 1 accepté
+     · MFT_MESSAGE_SET_D3D_MANAGER : ACCEPTÉ par le décodeur
+     · type d'entrée HEVC 2560x1440 accepté
+     · type de sortie NV12 accepté (2560x1440)
+     · flux de sortie : drapeaux 0x107 (le décodeur fournit ses échantillons), taille d'échantillon 5529600
+  [MESURÉ] 600/600 images décodées en 0.54 s : 1103.4 i/s (tient 60 i/s) ; CPU du processus 78 ms, soit 14 % d'un cœur (0.9 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+     Images rendues en surface DXGI : 600 ; en mémoire système : 0
+     Horodatages des sorties : aucune image manquante ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux
+     Surface de sortie : texture Direct3D 11 2560x1440, format DXGI 103, tableau de 1 tranche(s), BindFlags 0x200
+     Moteurs GPU vus pour ce processus : 3D, Copy, LegacyOverlay, OFA_0, Security, Security_1, VR, VideoDecode, VideoEncode
+     Moteurs actifs pendant le décodage : 3D (compteur +12017, soit 1 ms d'activité, utilisation max 0.2 %) ; Copy (compteur +49851, soit 5 ms d'activité, utilisation max 0.9 %) ; VideoDecode (compteur +4753546, soit 475 ms d'activité, utilisation max 87.1 %)
+     VERDICT : DÉCODAGE MATÉRIEL ÉTABLI — périphérique D3D11 accepté, 600/600 images en surfaces DXGI, moteur « VideoDecode » actif (compteur +4753546, soit 475 ms d'activité, utilisation max 87.1 %)
+
+  >> Décodeur « HEVCVideoExtension » — mode LOGICIEL (référence)
+     · attribut MF_SA_D3D11_AWARE = 1
+     · MF_LOW_LATENCY = 1 accepté
+     · type d'entrée HEVC 2560x1440 accepté
+     · type de sortie NV12 accepté (2560x1440)
+     · flux de sortie : drapeaux 0x7 (la sonde alloue les échantillons en mémoire système), taille d'échantillon 5529600
+  [MESURÉ] 120/600 images décodées en 3.77 s : 31.8 i/s (NE TIENT PAS 60 i/s) ; CPU du processus 13734 ms, soit 364 % d'un cœur (22.8 % de la machine) ; jusqu'à 480 image(s) retenue(s) par le décodeur
+  [ÉCHEC] hevc-main-420-2560x1440.h265 / « HEVCVideoExtension » / LOGICIEL (référence) : 480 image(s) sur 600 n'ont pas été rendues par le décodeur, sans erreur signalée (images manquantes : 120–599 ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux)
+     Images rendues en surface DXGI : 0 ; en mémoire système : 120
+     Horodatages des sorties : images manquantes : 120–599 ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux
+     Moteurs GPU vus pour ce processus : aucun
+     Moteurs actifs pendant le décodage : aucun
+     VERDICT : DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu — MAIS 480 image(s) sur 600 PERDUE(S)
+
+  >> Décodeur « HEVCVideoExtension » — mode LOGICIEL (référence), SANS faible latence (MF_LOW_LATENCY = 0)
+     · attribut MF_SA_D3D11_AWARE = 1
+     · MF_LOW_LATENCY = 0 accepté
+     · type d'entrée HEVC 2560x1440 accepté
+     · type de sortie NV12 accepté (2560x1440)
+     · flux de sortie : drapeaux 0x7 (la sonde alloue les échantillons en mémoire système), taille d'échantillon 5529600
+  [MESURÉ] 600/600 images décodées en 2.85 s : 210.5 i/s (tient 60 i/s) ; CPU du processus 18219 ms, soit 639 % d'un cœur (39.9 % de la machine) ; jusqu'à 11 image(s) retenue(s) par le décodeur
+     Images rendues en surface DXGI : 0 ; en mémoire système : 600
+     Horodatages des sorties : aucune image manquante ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux
+     Moteurs GPU vus pour ce processus : aucun
+     Moteurs actifs pendant le décodage : aucun
+     VERDICT : DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu
+
+  Contrôle de justesse : luminance de l'image n° 300 comparée entre les passes (la première sert de référence)
+  [MESURÉ] LOGICIEL (référence), SANS faible latence (MF_LOW_LATENCY = 0) / HEVCVideoExtension contre MATÉRIEL sur NVIDIA GeForce RTX 4060 / HEVCVideoExtension : luminances identiques à l'octet près
+
+--- Flux hevc-main-420-2560x2880.h265 ---
+  600 unités d'accès, 21630523 octets, soit 17.30 Mbps à 60 i/s ; 1 SPS, 1 image(s) IDR dans le flux
+  [MESURÉ] HEVC lu dans le SPS : profil Main, niveau 153, 4:2:0 , 8 bits (luma) / 8 bits (chroma), 2560x2880
+
+  >> Décodeur « HEVCVideoExtension » — mode MATÉRIEL sur NVIDIA GeForce RTX 4060
+     · périphérique Direct3D 11 créé sur « NVIDIA GeForce RTX 4060 »
+     · attribut MF_SA_D3D11_AWARE = 1
+     · MF_LOW_LATENCY = 1 accepté
+     · MFT_MESSAGE_SET_D3D_MANAGER : ACCEPTÉ par le décodeur
+     · type d'entrée HEVC 2560x2880 accepté
+     · type de sortie NV12 accepté (2560x2880)
+     · flux de sortie : drapeaux 0x107 (le décodeur fournit ses échantillons), taille d'échantillon 11059200
+  [MESURÉ] 600/600 images décodées en 0.95 s : 632.4 i/s (tient 60 i/s) ; CPU du processus 1094 ms, soit 115 % d'un cœur (7.2 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+     Images rendues en surface DXGI : 600 ; en mémoire système : 0
+     Horodatages des sorties : aucune image manquante ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux
+     Surface de sortie : texture Direct3D 11 2560x2880, format DXGI 103, tableau de 1 tranche(s), BindFlags 0x200
+     Moteurs GPU vus pour ce processus : 3D, Copy, LegacyOverlay, OFA_0, Security, Security_1, VR, VideoDecode, VideoEncode
+     Moteurs actifs pendant le décodage : 3D (compteur +153705, soit 15 ms d'activité, utilisation max 1.6 %) ; Copy (compteur +51781, soit 5 ms d'activité, utilisation max 0.5 %) ; VideoDecode (compteur +8731444, soit 873 ms d'activité, utilisation max 91.8 %)
+     VERDICT : DÉCODAGE MATÉRIEL ÉTABLI — périphérique D3D11 accepté, 600/600 images en surfaces DXGI, moteur « VideoDecode » actif (compteur +8731444, soit 873 ms d'activité, utilisation max 91.8 %)
+
+  >> Décodeur « HEVCVideoExtension » — mode LOGICIEL (référence)
+     · attribut MF_SA_D3D11_AWARE = 1
+     · MF_LOW_LATENCY = 1 accepté
+     · type d'entrée HEVC 2560x2880 accepté
+     · type de sortie NV12 accepté (2560x2880)
+     · flux de sortie : drapeaux 0x7 (la sonde alloue les échantillons en mémoire système), taille d'échantillon 11059200
+  [MESURÉ] 120/600 images décodées en 6.44 s : 18.6 i/s (NE TIENT PAS 60 i/s) ; CPU du processus 19594 ms, soit 304 % d'un cœur (19.0 % de la machine) ; jusqu'à 480 image(s) retenue(s) par le décodeur
+  [ÉCHEC] hevc-main-420-2560x2880.h265 / « HEVCVideoExtension » / LOGICIEL (référence) : 480 image(s) sur 600 n'ont pas été rendues par le décodeur, sans erreur signalée (images manquantes : 120–599 ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux)
+     Images rendues en surface DXGI : 0 ; en mémoire système : 120
+     Horodatages des sorties : images manquantes : 120–599 ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux
+     Moteurs GPU vus pour ce processus : aucun
+     Moteurs actifs pendant le décodage : aucun
+     VERDICT : DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu — MAIS 480 image(s) sur 600 PERDUE(S)
+
+  >> Décodeur « HEVCVideoExtension » — mode LOGICIEL (référence), SANS faible latence (MF_LOW_LATENCY = 0)
+     · attribut MF_SA_D3D11_AWARE = 1
+     · MF_LOW_LATENCY = 0 accepté
+     · type d'entrée HEVC 2560x2880 accepté
+     · type de sortie NV12 accepté (2560x2880)
+     · flux de sortie : drapeaux 0x7 (la sonde alloue les échantillons en mémoire système), taille d'échantillon 11059200
+  [MESURÉ] 600/600 images décodées en 5.28 s : 113.7 i/s (tient 60 i/s) ; CPU du processus 33203 ms, soit 629 % d'un cœur (39.3 % de la machine) ; jusqu'à 11 image(s) retenue(s) par le décodeur
+     Images rendues en surface DXGI : 0 ; en mémoire système : 600
+     Horodatages des sorties : aucune image manquante ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux
+     Moteurs GPU vus pour ce processus : aucun
+     Moteurs actifs pendant le décodage : aucun
+     VERDICT : DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu
+
+  Contrôle de justesse : luminance de l'image n° 300 comparée entre les passes (la première sert de référence)
+  [MESURÉ] LOGICIEL (référence), SANS faible latence (MF_LOW_LATENCY = 0) / HEVCVideoExtension contre MATÉRIEL sur NVIDIA GeForce RTX 4060 / HEVCVideoExtension : luminances identiques à l'octet près
+
+--- Flux h264-high-420-2560x1440.h264 ---
+  600 unités d'accès, 13025810 octets, soit 10.42 Mbps à 60 i/s ; 1 SPS, 1 image(s) IDR dans le flux
+  [MESURÉ] H.264 lu dans le SPS : profil High, niveau 51, 4:2:0 , 8 bits (luma) / 8 bits (chroma), 2560x1440
+
+  >> Décodeur « Microsoft H264 Video Decoder MFT » — mode MATÉRIEL sur NVIDIA GeForce RTX 4060
+     · périphérique Direct3D 11 créé sur « NVIDIA GeForce RTX 4060 »
+     · attribut MF_SA_D3D11_AWARE = 1
+     · MF_LOW_LATENCY = 1 accepté
+     · MFT_MESSAGE_SET_D3D_MANAGER : ACCEPTÉ par le décodeur
+     · type d'entrée H.264 2560x1440 accepté
+     · type de sortie NV12 accepté (2560x1440)
+     · flux de sortie : drapeaux 0x107 (le décodeur fournit ses échantillons), taille d'échantillon 7372800
+  [MESURÉ] 600/600 images décodées en 1.06 s : 564.7 i/s (tient 60 i/s) ; CPU du processus 62 ms, soit 6 % d'un cœur (0.4 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+     Images rendues en surface DXGI : 600 ; en mémoire système : 0
+     Horodatages des sorties : aucune image manquante ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux
+     Surface de sortie : texture Direct3D 11 2560x1440, format DXGI 103, tableau de 8 tranche(s), BindFlags 0x200
+     Moteurs GPU vus pour ce processus : 3D, Copy, LegacyOverlay, OFA_0, Security, Security_1, VR, VideoDecode, VideoEncode
+     Moteurs actifs pendant le décodage : 3D (compteur +12006, soit 1 ms d'activité, utilisation max 0.1 %) ; Copy (compteur +45846, soit 5 ms d'activité, utilisation max 0.4 %) ; VideoDecode (compteur +9911920, soit 991 ms d'activité, utilisation max 92.0 %)
+     VERDICT : DÉCODAGE MATÉRIEL ÉTABLI — périphérique D3D11 accepté, 600/600 images en surfaces DXGI, moteur « VideoDecode » actif (compteur +9911920, soit 991 ms d'activité, utilisation max 92.0 %)
+
+  >> Décodeur « Microsoft H264 Video Decoder MFT » — mode LOGICIEL (référence)
+     · attribut MF_SA_D3D11_AWARE = 1
+     · MF_LOW_LATENCY = 1 accepté
+     · type d'entrée H.264 2560x1440 accepté
+     · type de sortie NV12 accepté (2560x1440)
+     · flux de sortie : drapeaux 0x7 (la sonde alloue les échantillons en mémoire système), taille d'échantillon 7372800
+  [MESURÉ] 600/600 images décodées en 3.40 s : 176.3 i/s (tient 60 i/s) ; CPU du processus 8062 ms, soit 237 % d'un cœur (14.8 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+     Images rendues en surface DXGI : 0 ; en mémoire système : 600
+     Horodatages des sorties : aucune image manquante ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux
+     Moteurs GPU vus pour ce processus : aucun
+     Moteurs actifs pendant le décodage : aucun
+     VERDICT : DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu
+
+  Contrôle de justesse : luminance de l'image n° 300 comparée entre les passes (la première sert de référence)
+  [MESURÉ] LOGICIEL (référence) / Microsoft H264 Video Decoder MFT contre MATÉRIEL sur NVIDIA GeForce RTX 4060 / Microsoft H264 Video Decoder MFT : luminances identiques à l'octet près
+
+--- Flux h264-high-420-2560x2880.h264 ---
+  600 unités d'accès, 20279017 octets, soit 16.22 Mbps à 60 i/s ; 1 SPS, 1 image(s) IDR dans le flux
+  [MESURÉ] H.264 lu dans le SPS : profil High, niveau 52, 4:2:0 , 8 bits (luma) / 8 bits (chroma), 2560x2880
+
+  >> Décodeur « Microsoft H264 Video Decoder MFT » — mode MATÉRIEL sur NVIDIA GeForce RTX 4060
+     · périphérique Direct3D 11 créé sur « NVIDIA GeForce RTX 4060 »
+     · attribut MF_SA_D3D11_AWARE = 1
+     · MF_LOW_LATENCY = 1 accepté
+     · MFT_MESSAGE_SET_D3D_MANAGER : ACCEPTÉ par le décodeur
+     · type d'entrée H.264 2560x2880 accepté
+     · type de sortie NV12 accepté (2560x2880)
+     · flux de sortie : drapeaux 0x107 (le décodeur fournit ses échantillons), taille d'échantillon 14745600
+  [MESURÉ] 600/600 images décodées en 1.99 s : 300.8 i/s (tient 60 i/s) ; CPU du processus 2047 ms, soit 103 % d'un cœur (6.4 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+     Images rendues en surface DXGI : 600 ; en mémoire système : 0
+     Horodatages des sorties : aucune image manquante ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux
+     Surface de sortie : texture Direct3D 11 2560x2880, format DXGI 103, tableau de 8 tranche(s), BindFlags 0x200
+     Moteurs GPU vus pour ce processus : 3D, Copy, LegacyOverlay, OFA_0, Security, Security_1, VR, VideoDecode, VideoEncode
+     Moteurs actifs pendant le décodage : 3D (compteur +46142, soit 5 ms d'activité, utilisation max 0.2 %) ; Copy (compteur +45635, soit 5 ms d'activité, utilisation max 0.2 %) ; VideoDecode (compteur +18979959, soit 1898 ms d'activité, utilisation max 95.0 %)
+     VERDICT : DÉCODAGE MATÉRIEL ÉTABLI — périphérique D3D11 accepté, 600/600 images en surfaces DXGI, moteur « VideoDecode » actif (compteur +18979959, soit 1898 ms d'activité, utilisation max 95.0 %)
+
+  >> Décodeur « Microsoft H264 Video Decoder MFT » — mode LOGICIEL (référence)
+     · attribut MF_SA_D3D11_AWARE = 1
+     · MF_LOW_LATENCY = 1 accepté
+     · type d'entrée H.264 2560x2880 accepté
+     · type de sortie NV12 accepté (2560x2880)
+     · flux de sortie : drapeaux 0x7 (la sonde alloue les échantillons en mémoire système), taille d'échantillon 14745600
+  [MESURÉ] 600/600 images décodées en 6.07 s : 98.9 i/s (tient 60 i/s) ; CPU du processus 15297 ms, soit 252 % d'un cœur (15.8 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+     Images rendues en surface DXGI : 0 ; en mémoire système : 600
+     Horodatages des sorties : aucune image manquante ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux
+     Moteurs GPU vus pour ce processus : aucun
+     Moteurs actifs pendant le décodage : aucun
+     VERDICT : DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu
+
+  Contrôle de justesse : luminance de l'image n° 300 comparée entre les passes (la première sert de référence)
+  [MESURÉ] LOGICIEL (référence) / Microsoft H264 Video Decoder MFT contre MATÉRIEL sur NVIDIA GeForce RTX 4060 / Microsoft H264 Video Decoder MFT : luminances identiques à l'octet près
+
+==============================================================================
+4. SYNTHÈSE
+==============================================================================
+
+--- Question 1 — tailles déclarées (HEVC Main et H.264 VLD) ---
+  NVIDIA GeForce RTX 4060 | H.264 VLD (sans FGT)         | 1920x1080 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | H.264 VLD (sans FGT)         | 2560x1440 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | H.264 VLD (sans FGT)         | 2560x2880 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | H.264 VLD (sans FGT)         | 3840x2160 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | H.264 VLD (sans FGT)         | 4096x2304 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | H.264 VLD (sans FGT)         | 4096x4096 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | HEVC Main (8 bits 4:2:0)     | 1920x1080 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | HEVC Main (8 bits 4:2:0)     | 2560x1440 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | HEVC Main (8 bits 4:2:0)     | 2560x2880 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | HEVC Main (8 bits 4:2:0)     | 3840x2160 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | HEVC Main (8 bits 4:2:0)     | 4096x2304 : ACCEPTÉE
+  NVIDIA GeForce RTX 4060 | HEVC Main (8 bits 4:2:0)     | 4096x4096 : ACCEPTÉE
+
+--- Questions 2 et 3 — décodage réel ---
+  hevc-main-420-2560x1440.h265 | « HEVCVideoExtension » | MATÉRIEL sur NVIDIA GeForce RTX 4060
+      DÉCODAGE MATÉRIEL ÉTABLI — périphérique D3D11 accepté, 600/600 images en surfaces DXGI, moteur « VideoDecode » actif (compteur +4753546, soit 475 ms d'activité, utilisation max 87.1 %)
+      600/600 images décodées en 0.54 s : 1103.4 i/s (tient 60 i/s) ; CPU du processus 78 ms, soit 14 % d'un cœur (0.9 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+  hevc-main-420-2560x1440.h265 | « HEVCVideoExtension » | LOGICIEL (référence)
+      DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu — MAIS 480 image(s) sur 600 PERDUE(S)
+      120/600 images décodées en 3.77 s : 31.8 i/s (NE TIENT PAS 60 i/s) ; CPU du processus 13734 ms, soit 364 % d'un cœur (22.8 % de la machine) ; jusqu'à 480 image(s) retenue(s) par le décodeur
+  hevc-main-420-2560x1440.h265 | « HEVCVideoExtension » | LOGICIEL (référence), SANS faible latence (MF_LOW_LATENCY = 0)
+      DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu
+      600/600 images décodées en 2.85 s : 210.5 i/s (tient 60 i/s) ; CPU du processus 18219 ms, soit 639 % d'un cœur (39.9 % de la machine) ; jusqu'à 11 image(s) retenue(s) par le décodeur
+  hevc-main-420-2560x2880.h265 | « HEVCVideoExtension » | MATÉRIEL sur NVIDIA GeForce RTX 4060
+      DÉCODAGE MATÉRIEL ÉTABLI — périphérique D3D11 accepté, 600/600 images en surfaces DXGI, moteur « VideoDecode » actif (compteur +8731444, soit 873 ms d'activité, utilisation max 91.8 %)
+      600/600 images décodées en 0.95 s : 632.4 i/s (tient 60 i/s) ; CPU du processus 1094 ms, soit 115 % d'un cœur (7.2 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+  hevc-main-420-2560x2880.h265 | « HEVCVideoExtension » | LOGICIEL (référence)
+      DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu — MAIS 480 image(s) sur 600 PERDUE(S)
+      120/600 images décodées en 6.44 s : 18.6 i/s (NE TIENT PAS 60 i/s) ; CPU du processus 19594 ms, soit 304 % d'un cœur (19.0 % de la machine) ; jusqu'à 480 image(s) retenue(s) par le décodeur
+  hevc-main-420-2560x2880.h265 | « HEVCVideoExtension » | LOGICIEL (référence), SANS faible latence (MF_LOW_LATENCY = 0)
+      DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu
+      600/600 images décodées en 5.28 s : 113.7 i/s (tient 60 i/s) ; CPU du processus 33203 ms, soit 629 % d'un cœur (39.3 % de la machine) ; jusqu'à 11 image(s) retenue(s) par le décodeur
+  h264-high-420-2560x1440.h264 | « Microsoft H264 Video Decoder MFT » | MATÉRIEL sur NVIDIA GeForce RTX 4060
+      DÉCODAGE MATÉRIEL ÉTABLI — périphérique D3D11 accepté, 600/600 images en surfaces DXGI, moteur « VideoDecode » actif (compteur +9911920, soit 991 ms d'activité, utilisation max 92.0 %)
+      600/600 images décodées en 1.06 s : 564.7 i/s (tient 60 i/s) ; CPU du processus 62 ms, soit 6 % d'un cœur (0.4 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+  h264-high-420-2560x1440.h264 | « Microsoft H264 Video Decoder MFT » | LOGICIEL (référence)
+      DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu
+      600/600 images décodées en 3.40 s : 176.3 i/s (tient 60 i/s) ; CPU du processus 8062 ms, soit 237 % d'un cœur (14.8 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+  h264-high-420-2560x2880.h264 | « Microsoft H264 Video Decoder MFT » | MATÉRIEL sur NVIDIA GeForce RTX 4060
+      DÉCODAGE MATÉRIEL ÉTABLI — périphérique D3D11 accepté, 600/600 images en surfaces DXGI, moteur « VideoDecode » actif (compteur +18979959, soit 1898 ms d'activité, utilisation max 95.0 %)
+      600/600 images décodées en 1.99 s : 300.8 i/s (tient 60 i/s) ; CPU du processus 2047 ms, soit 103 % d'un cœur (6.4 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+  h264-high-420-2560x2880.h264 | « Microsoft H264 Video Decoder MFT » | LOGICIEL (référence)
+      DÉCODAGE LOGICIEL (mode de référence, sans périphérique) — moteur vidéo du GPU inactif, comme attendu
+      600/600 images décodées en 6.07 s : 98.9 i/s (tient 60 i/s) ; CPU du processus 15297 ms, soit 252 % d'un cœur (15.8 % de la machine) ; jusqu'à 1 image(s) retenue(s) par le décodeur
+
+--- Ce qui n'a PAS pu être mesuré ou a échoué (2) ---
+  - hevc-main-420-2560x1440.h265 / « HEVCVideoExtension » / LOGICIEL (référence) : 480 image(s) sur 600 n'ont pas été rendues par le décodeur, sans erreur signalée (images manquantes : 120–599 ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux)
+  - hevc-main-420-2560x2880.h265 / « HEVCVideoExtension » / LOGICIEL (référence) : 480 image(s) sur 600 n'ont pas été rendues par le décodeur, sans erreur signalée (images manquantes : 120–599 ; 0 sortie(s) hors d'ordre ; 0 horodatage(s) hors du flux)
+
+Fin de la sonde.
