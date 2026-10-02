@@ -1,6 +1,6 @@
 //! Ce que l'application apprend de la machine.
 
-use sky_encode::{pick_best, Codec, EncodeError, EncoderCaps};
+use sky_encode::{Codec, EncodeError, EncoderCaps};
 
 /// Nom d'appareil quand celui de la machine est refusé par le site (spec §10).
 /// MÊME valeur que le repli de `sky_compte` (`nom_par_defaut`, annuaire.rs) :
@@ -17,8 +17,9 @@ pub fn nom_d_appareil(nom_machine: Option<&str>) -> String {
         .unwrap_or_else(|| NOM_D_APPAREIL_DE_REPLI.to_string())
 }
 
-/// Le codec de partage de cette machine, ou `None` sans carte NVIDIA — même
-/// choix que `sky-probe hw` (`pick_best(&caps, true)` : netteté du texte).
+/// Tous les codecs que l'encodeur de cette machine sait produire, ou `vec![]`
+/// sans carte NVIDIA. Le choix du format transmis n'est plus fait ici : il
+/// l'est par la négociation avec le spectateur (`sky_partage::formats_encodables`).
 ///
 /// SANS CARTE NVIDIA, CETTE MACHINE NE PEUT NI PARTAGER NI REGARDER : il n'y a
 /// ni NVENC ni NVDEC, et aucun repli logiciel n'existe dans le projet (spec du
@@ -39,10 +40,10 @@ pub fn nom_d_appareil(nom_machine: Option<&str>) -> String {
 /// l'application, qui resterait affichée et figée.
 pub fn detecter_nvenc(
     sonde: impl FnOnce() -> Result<EncoderCaps, EncodeError> + std::panic::UnwindSafe,
-) -> Option<Codec> {
+) -> Vec<Codec> {
     match std::panic::catch_unwind(sonde) {
-        Ok(Ok(caps)) => pick_best(&caps, true),
-        Ok(Err(_)) | Err(_) => None,
+        Ok(Ok(caps)) => caps.codecs,
+        Ok(Err(_)) | Err(_) => vec![],
     }
 }
 
@@ -65,15 +66,20 @@ mod tests {
             detecter_nvenc(|| panic!(
                 "la table de fonctions NVENC doit être remplie par NvEncodeAPICreateInstance"
             )),
-            None
+            Vec::<Codec>::new()
         );
     }
 
     #[test]
-    fn une_carte_hevc_444_est_retenue_pour_le_texte() {
-        let caps =
-            EncoderCaps { gpu_name: "RTX".into(), codecs: vec![Codec::H264_420, Codec::Hevc444] };
-        assert_eq!(detecter_nvenc(move || Ok(caps)), Some(Codec::Hevc444));
+    fn les_codecs_de_la_carte_sont_tous_retenus() {
+        let caps = EncoderCaps {
+            gpu_name: "RTX".into(),
+            codecs: vec![Codec::H264_420, Codec::Hevc420, Codec::Hevc444],
+        };
+        assert_eq!(
+            detecter_nvenc(move || Ok(caps)),
+            vec![Codec::H264_420, Codec::Hevc420, Codec::Hevc444]
+        );
     }
 
     #[test]

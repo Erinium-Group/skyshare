@@ -9,8 +9,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use sky_compte::{Coffre, Config, ErreurCompte, Jetons};
-use sky_encode::Codec;
-use sky_partage::{Arret, ErreurPartage, Evenement, Fin};
+use sky_partage::{Arret, ErreurPartage, Evenement, Fin, FormatVideo};
 
 use crate::coquille::Coquille;
 use crate::faux_serveur::FauxServeur;
@@ -94,7 +93,7 @@ impl Partageur for PartageurFactice {
     fn heberger(
         &self,
         _noyau: &Noyau,
-        _codec: Codec,
+        _formats: Vec<FormatVideo>,
         _ecran: usize,
         arret: &Arret,
         evenements: &mut dyn FnMut(Evenement),

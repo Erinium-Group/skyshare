@@ -33,7 +33,7 @@ cargo run --release -p sky-probe -- host --source synthetique --seconds 5
 > ### ⚠️ Ne pas lancer `sky-probe host` sans options
 >
 > Sans options, la commande prend ses valeurs par défaut :
-> `--source ecran --seconds 30 --codec hevc444 --bitrate-mbps 30`. Elle capture
+> `--source ecran --seconds 30 --format auto --bitrate-mbps 30`. Elle capture
 > alors **l'écran réel de l'opérateur** pendant 30 secondes, l'encode et l'envoie —
 > et le programme du correspondant écrit ce flux **sur son disque**, dans un fichier
 > `recu.h265` déposé dans son répertoire courant, pouvant atteindre ~112 Mo.
@@ -190,7 +190,7 @@ extraites le sont déjà à l'index 120 pour cette raison.
 ## M5 — Charge processeur relevée sur écran réel (Q4) · Tâche 8
 
 ```bash
-cargo run --release -p sky-probe -- host --seconds 60 --codec hevc444 --bitrate-mbps 30
+cargo run --release -p sky-probe -- host --seconds 60 --format hevc444 --bitrate-mbps 30
 ```
 
 Non bloquante : deux mesures instrumentées concordent déjà. Cette mesure ne sert qu'à

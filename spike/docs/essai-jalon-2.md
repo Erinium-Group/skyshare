@@ -148,9 +148,10 @@ Toujours dans cet ordre : l'hôte d'abord, le spectateur ensuite. Pendant l'atte
 commande `sky-probe`**, et l'application de l'icône **fermée** (elles consommeraient les messages de
 la négociation).
 
-Hôte, avec l'image de test et non ton écran. **Ne change pas `--codec`** : la valeur par défaut,
-`hevc444`, est la seule acceptée — tout autre codec est désormais refusé avant toute connexion,
-parce que personne ne pourrait lire le flux. La colonne « RTT » du terminal de l'hôte affiche
+Hôte, avec l'image de test et non ton écran. **Ne change pas `--format`** : la valeur par défaut,
+`auto`, propose tous les formats que ta carte encode, et c'est la négociation avec le
+spectateur qui retient le meilleur commun (HEVC 4:4:4 entre deux cartes récentes). Forcer
+`--format hevc444` donne le même résultat sur ces cartes. La colonne « RTT » du terminal de l'hôte affiche
 **« non mesuré »** : aucune mesure d'aller-retour n'existe côté hôte.
 
 ```

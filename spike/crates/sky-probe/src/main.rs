@@ -67,9 +67,9 @@ enum Cmd {
     Host {
         #[arg(long, default_value_t = 30)]
         seconds: u64,
-        /// h264420 | h264444 | hevc420 | hevc444 | av1420
-        #[arg(long, default_value = "hevc444", value_parser = cmd_encode::parse_codec)]
-        codec: sky_encode::Codec,
+        /// auto | hevc444 | hevc420 | h264 (auto : tous ceux que la carte encode)
+        #[arg(long, default_value = "auto")]
+        format: String,
         /// Débit cible de la session NVENC — aussi le plafond du Pacer.
         #[arg(long, default_value_t = 30)]
         bitrate_mbps: u32,
@@ -192,7 +192,7 @@ fn main() -> anyhow::Result<()> {
         } => cmd_codecs::run(seconds, bitrate_mbps, monitor),
         Cmd::Host {
             seconds,
-            codec,
+            format,
             bitrate_mbps,
             floor_mbps,
             monitor,
@@ -201,7 +201,7 @@ fn main() -> anyhow::Result<()> {
             height,
         } => cmd_host::run(cmd_host::Parametres {
             secondes: seconds,
-            codec,
+            format,
             bitrate_mbps,
             floor_mbps,
             monitor,

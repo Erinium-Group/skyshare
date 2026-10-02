@@ -6,12 +6,11 @@ use std::io::Write;
 use std::time::Duration;
 
 use sky_compte::{synchroniser, ErreurCompte};
-use sky_encode::Codec;
 use sky_partage::hote::BUDGET_RETRY_ENVOI;
 use sky_partage::rendez_vous::FENETRE_HOTE;
 use sky_partage::{
-    heberger, Arret, Bilan, BilanEnvoi, Diagnostic, ErreurPartage, Evenement, Fin, Images, Mesures,
-    ParametresHote, SourceImages,
+    heberger, Arret, Bilan, BilanEnvoi, Diagnostic, ErreurPartage, Evenement, Fin, FormatVideo, Images,
+    Mesures, ParametresHote, SourceImages,
 };
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 
@@ -21,7 +20,8 @@ use crate::cmd_encode::{Source, TextureSynthetique};
 /// Paramètres de la chaîne complète (inchangés depuis le C2).
 pub struct Parametres {
     pub secondes: u64,
-    pub codec: Codec,
+    /// `auto` ou le nom d'un format (`format_depuis_texte`).
+    pub format: String,
     pub bitrate_mbps: u32,
     pub floor_mbps: u32,
     pub monitor: usize,
@@ -50,8 +50,19 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
             fabrique: fabrique_synthetique,
         },
     };
+    let caps = sky_encode::probe_hardware()?;
+    let encodables = sky_partage::formats_encodables(&caps.codecs);
+    let formats = match p.format.as_str() {
+        "auto" => encodables,
+        texte => {
+            let voulu = format_depuis_texte(texte)?;
+            anyhow::ensure!(encodables.contains(&voulu), "{} : cette carte ne l'encode pas", voulu.libelle());
+            vec![voulu]
+        }
+    };
+    anyhow::ensure!(!formats.is_empty(), "aucun format transmissible sur cette carte");
     let parametres = ParametresHote {
-        codec: p.codec,
+        formats,
         plafond_mbps: p.bitrate_mbps,
         plancher_mbps: p.floor_mbps,
         moniteur: p.monitor,
@@ -70,6 +81,18 @@ pub fn run(p: Parametres) -> anyhow::Result<()> {
     )
     .map_err(erreur_partage)?;
     afficher_fin(fin, p.floor_mbps, p.bitrate_mbps)
+}
+
+/// Le format que désigne un texte de ligne de commande : minuscules, sans
+/// `- _ : .` (même normalisation que `cmd_encode::parse_codec`). Réutilisée par
+/// `view` (tâche 7).
+pub(crate) fn format_depuis_texte(texte: &str) -> anyhow::Result<FormatVideo> {
+    match texte.to_ascii_lowercase().replace(['-', '_', ':', '.'], "").as_str() {
+        "hevc444" => Ok(FormatVideo::Hevc444),
+        "hevc420" => Ok(FormatVideo::Hevc420),
+        "h264" => Ok(FormatVideo::H264),
+        autre => anyhow::bail!("format inconnu « {autre} » (attendu : auto, hevc444, hevc420 ou h264)"),
+    }
 }
 
 pub(crate) fn afficher(lignes: &[String]) {
@@ -99,6 +122,7 @@ pub(crate) fn lignes_hote(evenement: &Evenement) -> Vec<String> {
         )],
         Evenement::Negociation => vec!["Réponse envoyée. Négociation en cours...".to_string()],
         Evenement::Connecte { en, .. } => vec![format!("CONNECTÉ en {:.1} s", en.as_secs_f32())],
+        Evenement::Format(f) => vec![format!("format négocié : {}", f.libelle())],
         Evenement::Diffusion { largeur, hauteur, codec, plancher_mbps, plafond_mbps } => vec![format!(
             "\nRésolution {largeur}x{hauteur}, {}, plancher {plancher_mbps} Mbps, plafond {plafond_mbps} Mbps.\n",
             codec.label()
@@ -123,11 +147,10 @@ pub(crate) fn lignes_hote(evenement: &Evenement) -> Vec<String> {
 
 fn afficher_fin(fin: Fin, plancher: u32, plafond: u32) -> anyhow::Result<()> {
     match fin {
-        Fin::CodecNonTransmissible { codec } => anyhow::bail!(
-            "{} refusé : la piste vidéo ne négocie que le HEVC 4:4:4, et le spectateur ne \
-             décode que lui — tout autre flux ne serait lisible par personne. Relance avec \
-             `--codec hevc444` (la valeur par défaut).",
-            codec.label()
+        Fin::AucunFormatEncodable => anyhow::bail!("aucun format transmissible sur cette carte."),
+        Fin::AucunFormatCommun => println!(
+            "\nÉCHEC : aucun format vidéo en commun — cette carte n'encode aucun format que \
+             celle de ton ami sait décoder."
         ),
         Fin::AucunAppareilLocal => anyhow::bail!(
             "aucun appareil enregistré sur cette machine — lance d'abord \
@@ -309,6 +332,32 @@ pub(crate) fn afficher_diagnostic(d: &Diagnostic) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_depuis_texte_reconnait_les_trois_formats_et_rejette_le_reste() {
+        for (texte, attendu) in [
+            ("hevc444", FormatVideo::Hevc444),
+            ("HEVC-4:4:4", FormatVideo::Hevc444),
+            ("hevc420", FormatVideo::Hevc420),
+            ("hevc_4.2.0", FormatVideo::Hevc420),
+            ("h264", FormatVideo::H264),
+            ("H.264", FormatVideo::H264),
+        ] {
+            assert_eq!(format_depuis_texte(texte).expect(texte), attendu, "{texte}");
+        }
+        let message = format_depuis_texte("av1").unwrap_err().to_string();
+        for attendu in ["hevc444", "hevc420", "h264"] {
+            assert!(message.contains(attendu), "{message}");
+        }
+    }
+
+    #[test]
+    fn la_ligne_du_format_negocie_porte_son_libelle() {
+        assert_eq!(
+            lignes_hote(&Evenement::Format(FormatVideo::Hevc420)),
+            vec!["format négocié : HEVC 4:2:0".to_string()]
+        );
+    }
 
     #[test]
     fn l_echec_local_ne_promet_aucune_reprise_et_renvoie_a_view() {

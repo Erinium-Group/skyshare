@@ -7,6 +7,7 @@ use std::time::Duration;
 use sky_compte::ErreurCompte;
 use sky_decode::ErreurDecodeur;
 use sky_encode::Codec;
+use sky_net::FormatVideo;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Evenement {
@@ -28,6 +29,9 @@ pub enum Evenement {
     Negociation,
     /// Canal de données ouvert.
     Connecte { en: Duration, depuis_le_lancement: Option<Duration> },
+    /// Le format vidéo négocié avec le pair, annoncé une fois le canal ouvert
+    /// (hôte : avant l'encodeur ; spectateur : au même point, tâche 7).
+    Format(FormatVideo),
     /// Hôte : la diffusion commence.
     Diffusion { largeur: u32, hauteur: u32, codec: Codec, plancher_mbps: u32, plafond_mbps: u32 },
     /// Une fois par seconde pendant le flux.
@@ -127,12 +131,14 @@ pub struct Diagnostic {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fin {
     Arrete,
-    /// Hôte : le codec demandé n'est pas le HEVC 4:4:4, refusé AVANT tout
-    /// réseau. C'est le seul codec que la piste média négocie
-    /// (`sky-net/src/link.rs`, catalogue réduit au H265) et le seul que le
-    /// décodeur du spectateur accepte (4:4:4 8 bits) : tout autre flux partirait
-    /// sur une piste H265 et ne serait lisible par personne.
-    CodecNonTransmissible { codec: Codec },
+    /// Hôte : aucun format transmissible n'a été proposé (liste vide), refusé
+    /// AVANT tout réseau. Sans format, rien ne partirait que le spectateur
+    /// sache lire.
+    AucunFormatEncodable,
+    /// Hôte : le lien est ouvert mais `str0m` a écarté la ligne média — la
+    /// carte qui partage n'encode aucun format que celle qui regarde sait
+    /// décoder. Le spectateur fait le même constat de son côté.
+    AucunFormatCommun,
     /// `duree_max` atteinte (`sky-probe --seconds`). Jamais dans l'application.
     DureeEcoulee(Box<Bilan>),
     AucunAppareilLocal,

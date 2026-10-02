@@ -13,11 +13,10 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use sky_compte::{ErreurCompte, Etat};
-use sky_encode::Codec;
 use sky_partage::rendez_vous::FENETRE_HOTE;
 use sky_partage::{
-    Arret, Designation, ErreurDecodeur, ErreurPartage, ErreurVisionnage, Evenement, Fin, Mesures,
-    ParametresHote, ParametresSpectateur, SourceImages,
+    Arret, Designation, ErreurDecodeur, ErreurPartage, ErreurVisionnage, Evenement, Fin, FormatVideo,
+    Mesures, ParametresHote, ParametresSpectateur, SourceImages,
 };
 
 use crate::noyau::Noyau;
@@ -32,7 +31,7 @@ pub trait Partageur: Send + Sync {
     fn heberger(
         &self,
         noyau: &Noyau,
-        codec: Codec,
+        formats: Vec<FormatVideo>,
         ecran: usize,
         arret: &Arret,
         evenements: &mut dyn FnMut(Evenement),
@@ -60,7 +59,7 @@ impl Partageur for PartageurReel {
     fn heberger(
         &self,
         noyau: &Noyau,
-        codec: Codec,
+        formats: Vec<FormatVideo>,
         ecran: usize,
         arret: &Arret,
         evenements: &mut dyn FnMut(Evenement),
@@ -70,7 +69,7 @@ impl Partageur for PartageurReel {
             noyau.coffre(),
             |_| noyau.synchroniser(),
             ParametresHote {
-                codec,
+                formats,
                 plafond_mbps: PLAFOND_MBPS,
                 plancher_mbps: PLANCHER_MBPS,
                 moniteur: ecran,
@@ -136,8 +135,11 @@ pub fn fin_vue(issue: &Result<Fin, ErreurPartage>) -> FinVue {
         // `Noyau::partager` refuse déjà ce cas avant tout démarrage ; cette
         // branche ne sert que si ce refus disparaissait un jour — et elle dit
         // alors la même chose.
-        Ok(Fin::CodecNonTransmissible { .. }) => {
-            FinVue::Autre { message: crate::noyau::MESSAGE_SANS_HEVC_444.to_string() }
+        Ok(Fin::AucunFormatEncodable) => {
+            FinVue::Autre { message: crate::noyau::MESSAGE_AUCUN_FORMAT.to_string() }
+        }
+        Ok(Fin::AucunFormatCommun) => {
+            FinVue::Autre { message: crate::noyau::MESSAGE_AUCUN_FORMAT_COMMUN.to_string() }
         }
         Ok(Fin::AucunAppareilLocal) => FinVue::Autre {
             message: "Cette machine n'a pas d'appareil enregistré : reconnecte-toi.".to_string(),
@@ -207,7 +209,7 @@ fn fin_de_visionnage(erreur: &ErreurVisionnage) -> FinVue {
 /// Le partage affiché après un événement, ou `None` s'il ne change rien.
 ///
 /// Les événements qui ne changent rien à l'écran (`Pret`, `Negociation`,
-/// `DemandeEcartee`, `EchecLocal`, `ReponseRecue`, `Diffusion`) rendent `None` :
+/// `DemandeEcartee`, `EchecLocal`, `ReponseRecue`, `Format`, `Diffusion`) rendent `None` :
 /// pas de publication, donc pas de réveil de la boucle pour rien.
 pub fn appliquer(
     actuel: &PartageVue,
@@ -336,6 +338,20 @@ mod tests {
         assert_eq!(
             fin_vue(&Ok(Fin::AucuneDemande)),
             FinVue::AucuneDemande { fenetre_s: FENETRE_HOTE.as_secs() }
+        );
+    }
+
+    #[test]
+    fn les_fins_de_format_disent_chacune_leur_cause() {
+        // Neutralisation : intervertir les deux messages — l'un des deux
+        // `assert_eq!` rougit.
+        assert_eq!(
+            fin_vue(&Ok(Fin::AucunFormatEncodable)),
+            FinVue::Autre { message: crate::noyau::MESSAGE_AUCUN_FORMAT.to_string() }
+        );
+        assert_eq!(
+            fin_vue(&Ok(Fin::AucunFormatCommun)),
+            FinVue::Autre { message: crate::noyau::MESSAGE_AUCUN_FORMAT_COMMUN.to_string() }
         );
     }
 

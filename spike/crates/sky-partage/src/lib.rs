@@ -10,6 +10,7 @@ pub mod arret;
 mod doublure;
 pub mod etablissement;
 pub mod evenement;
+pub mod formats;
 pub mod hote;
 pub mod reception;
 pub mod rendez_vous;
@@ -23,5 +24,9 @@ pub use evenement::{
 /// Réexportée : `ErreurVisionnage` la porte, et qui reçoit l'une doit
 /// pouvoir nommer les variantes de l'autre sans dépendre de `sky-decode`.
 pub use sky_decode::ErreurDecodeur;
+pub use formats::{codec_de, formats_encodables};
+/// Réexportée : `ParametresHote` la porte, et qui la construit ne doit pas
+/// dépendre de `sky-net` pour la nommer.
+pub use sky_net::FormatVideo;
 pub use hote::{heberger, FabriqueSynthetique, Images, ParametresHote, SourceImages, FPS};
 pub use spectateur::{regarder, trouver_ami, Designation, ParametresSpectateur, Puits};

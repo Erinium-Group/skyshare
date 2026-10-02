@@ -96,6 +96,7 @@ fn lignes_spectateur(evenement: &Evenement, sortie: &str) -> Vec<String> {
         | Evenement::DemandeEcartee { .. }
         | Evenement::EchecLocal { .. }
         | Evenement::DemandeRecue { .. }
+        | Evenement::Format(_)
         | Evenement::Diffusion { .. }
         | Evenement::Mesures(Mesures::Envoi { .. }) => Vec::new(),
     }
@@ -133,7 +134,11 @@ fn afficher_fin(fin: Fin, sortie: &str) -> anyhow::Result<()> {
         Fin::AucuneDemande
         | Fin::ReponseRefusee
         | Fin::FileDePaquetisationPleine
-        | Fin::CodecNonTransmissible { .. } => {}
+        | Fin::AucunFormatEncodable => {}
+        Fin::AucunFormatCommun => println!(
+            "\nÉCHEC : aucun format vidéo en commun — ce décodeur ne sait lire aucun format \
+             que la carte de ton ami encode."
+        ),
     }
     Ok(())
 }

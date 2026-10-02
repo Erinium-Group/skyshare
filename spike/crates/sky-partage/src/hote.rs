@@ -16,7 +16,7 @@ use sky_capture::wgc::WgcCapture;
 use sky_capture::CapturedFrame;
 use sky_compte::{deposer, relever, Coffre, Config, ErreurCompte, Etat};
 use sky_crypto::Identity;
-use sky_encode::{nvenc::NvencEncoder, Codec};
+use sky_encode::nvenc::NvencEncoder;
 use sky_net::{ErreurEnvoi, FormatVideo, LinkEvent, MessageControle, Pacer, PeerLink};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_TEXTURE2D_DESC,
@@ -25,6 +25,7 @@ use windows::Win32::Graphics::Direct3D11::{
 use crate::arret::{synchroniser_sauf_arret, Arret, ErreurAttente, HorlogeArretable};
 use crate::etablissement::{etablir, Etablissement};
 use crate::evenement::{Bilan, BilanEnvoi, ErreurPartage, Evenement, Fin, Mesures, Quantiles};
+use crate::formats::codec_de;
 use crate::rendez_vous::{echec_local, interroger, offres_recevables, CADENCE, FENETRE_HOTE};
 
 /// Cadence visée pour l'encodage. `sky-probe` la reprend (`cmd_encode::FPS`).
@@ -223,7 +224,10 @@ pub enum SourceImages {
 }
 
 pub struct ParametresHote {
-    pub codec: Codec,
+    /// Les formats que cette carte sait encoder et transmettre, dans l'ordre
+    /// de préférence (`formats_encodables`). Le format réellement diffusé est
+    /// celui que la négociation retient parmi eux.
+    pub formats: Vec<FormatVideo>,
     /// Débit cible de NVENC — aussi le plafond du Pacer.
     pub plafond_mbps: u32,
     pub plancher_mbps: u32,
@@ -243,15 +247,13 @@ pub fn heberger(
     arret: &Arret,
     evenements: &mut dyn FnMut(Evenement),
 ) -> Result<Fin, ErreurPartage> {
-    // Le contrat de codec, tenu ICI et pas seulement chez l'appelant : la piste
-    // média ne négocie que le H265, et le spectateur ne décode que le 4:4:4.
-    // `pick_best` peut pourtant rendre H.264 ou AV1 sur une carte sans HEVC
-    // 4:4:4, et `sky-probe host --codec` accepte tout : un tel flux partirait
-    // sur une piste H265 et ne serait lisible par personne. `sky-app` refuse
-    // aussi en amont (`Noyau::partager`), pour son message ; cette garde-ci
-    // protège tout appelant, présent ou futur. Les deux ne sont pas redondantes.
-    if p.codec != Codec::Hevc444 {
-        return Ok(Fin::CodecNonTransmissible { codec: p.codec });
+    // Le contrat de format, tenu ICI et pas seulement chez l'appelant : sans
+    // aucun format transmissible, rien ne partirait que le spectateur sache lire.
+    // `sky-app` refuse aussi en amont (`Noyau::partager`), pour son message ;
+    // cette garde-ci protège tout appelant, présent ou futur. Les deux ne sont
+    // pas redondantes.
+    if p.formats.is_empty() {
+        return Ok(Fin::AucunFormatEncodable);
     }
     // Construit AVANT la négociation (C2) : une faute de bornes doit coûter
     // une seconde, pas une attente de FENETRE_HOTE.
@@ -279,11 +281,7 @@ pub fn heberger(
             // Recevable ne veut pas dire utilisable : si `repondant` refuse le
             // SDP, on essaie l'offre suivante sans interrompre l'attente.
             for offre in offres_recevables(etat, relever(etat, &identite)) {
-                match PeerLink::repondant(
-                    Identity::generate(),
-                    &offre.texte,
-                    &[FormatVideo::Hevc444],
-                ) {
+                match PeerLink::repondant(Identity::generate(), &offre.texte, &p.formats) {
                     Ok((link, reponse)) => return Some((link, reponse, offre.destinataire)),
                     Err(e) => {
                         let raison = e.to_string();
@@ -334,7 +332,15 @@ pub fn heberger(
     drop(garde);
     evenements(Evenement::Connecte { en: duree, depuis_le_lancement: None });
 
-    en_annoncant_l_arret(&mut link, |lien| diffuser(lien, &mut pacer, p, arret, evenements))
+    // Aucun format commun : `str0m` a écarté la ligne média, le canal de données
+    // vit seul. Le spectateur fait le même constat de son côté (même fonction,
+    // `PeerLink::format_negocie`) : aucune annonce n'est nécessaire.
+    let Some(format) = link.format_negocie() else {
+        return Ok(Fin::AucunFormatCommun);
+    };
+    evenements(Evenement::Format(format));
+
+    en_annoncant_l_arret(&mut link, |lien| diffuser(lien, &mut pacer, format, p, arret, evenements))
 }
 
 /// Enveloppe une diffusion pour que le spectateur apprenne **toujours** qu'elle
@@ -384,6 +390,7 @@ fn en_annoncant_l_arret<L: LienVideo>(
 fn diffuser(
     link: &mut PeerLink,
     pacer: &mut Pacer,
+    format: FormatVideo,
     p: ParametresHote,
     arret: &Arret,
     evenements: &mut dyn FnMut(Evenement),
@@ -419,11 +426,12 @@ fn diffuser(
         }
     };
 
-    let mut enc = NvencEncoder::new(cap.d3d_device(), p.codec, largeur, hauteur, FPS, p.plafond_mbps * 1_000_000)?;
+    let codec = codec_de(format);
+    let mut enc = NvencEncoder::new(cap.d3d_device(), codec, largeur, hauteur, FPS, p.plafond_mbps * 1_000_000)?;
     evenements(Evenement::Diffusion {
         largeur,
         hauteur,
-        codec: p.codec,
+        codec,
         plancher_mbps: p.plancher_mbps,
         plafond_mbps: p.plafond_mbps,
     });
@@ -1367,41 +1375,35 @@ mod tests {
     }
 
     #[test]
-    fn un_codec_autre_que_hevc_444_est_refuse_avant_tout_reseau() {
-        // I2 de la revue finale. La piste média ne négocie que le H265 et le
-        // spectateur ne décode que le 4:4:4 : un flux H.264 ou AV1 partirait
-        // et ne serait lisible par personne. Neutralisation mesurée : retirer la
-        // garde en tête de `heberger` — il poursuit jusqu'à la vérification
-        // d'appareil, rend `AucunAppareilLocal`, et ce test rougit sur la fin.
+    fn une_liste_de_formats_vide_est_refusee_avant_tout_reseau() {
+        // Sans aucun format transmissible, rien ne partirait que le spectateur
+        // sache lire. Neutralisation mesurée : retirer la garde en tête de
+        // `heberger` — il poursuit jusqu'à la vérification d'appareil, rend
+        // `AucunAppareilLocal`, et ce test rougit sur la fin.
         let coffre = Coffre::pour_test("sky-test-partage-codec-hote");
         let config = Config::vers("http://127.0.0.1:1");
         let mut synchronisations = 0u32;
         let mut evenements = Vec::new();
 
-        for codec in [Codec::H264_420, Codec::H264_444, Codec::Av1_420] {
-            let fin = heberger(
-                &config,
-                &coffre,
-                |_| {
-                    synchronisations += 1;
-                    Err(ErreurCompte::Refuse)
-                },
-                ParametresHote {
-                    codec,
-                    plafond_mbps: 30,
-                    plancher_mbps: 10,
-                    moniteur: 0,
-                    source: SourceImages::Ecran,
-                    duree_max: None,
-                },
-                &Arret::nouveau(),
-                &mut |e| evenements.push(e),
-            );
-            assert!(
-                matches!(fin, Ok(Fin::CodecNonTransmissible { codec: refuse }) if refuse == codec),
-                "{codec:?} doit être refusé : {fin:?}"
-            );
-        }
+        let fin = heberger(
+            &config,
+            &coffre,
+            |_| {
+                synchronisations += 1;
+                Err(ErreurCompte::Refuse)
+            },
+            ParametresHote {
+                formats: vec![],
+                plafond_mbps: 30,
+                plancher_mbps: 10,
+                moniteur: 0,
+                source: SourceImages::Ecran,
+                duree_max: None,
+            },
+            &Arret::nouveau(),
+            &mut |e| evenements.push(e),
+        );
+        assert!(matches!(fin, Ok(Fin::AucunFormatEncodable)), "liste vide refusée : {fin:?}");
         assert_eq!(synchronisations, 0, "aucune synchronisation : rien n'a touché le réseau");
         assert!(evenements.is_empty(), "rien n'est annoncé : {evenements:?}");
     }
@@ -1441,7 +1443,7 @@ mod tests {
                     })
                 },
                 ParametresHote {
-                    codec: Codec::Hevc444,
+                    formats: vec![FormatVideo::Hevc444],
                     plafond_mbps: 30,
                     plancher_mbps: 10,
                     moniteur: 0,
