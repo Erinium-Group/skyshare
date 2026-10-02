@@ -1,0 +1,4 @@
+# Bibliothèque C statique : l'exécutable ne dépend d'aucun redistribuable
+# Visual C++ (vcruntime140.dll, msvcp140.dll) sur la machine cible.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
