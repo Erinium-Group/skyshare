@@ -66,7 +66,8 @@ négatif. Celle-ci tient par trois angles indépendants :
    > *Corrigé le 02/10/2026 (tâche 12 du jalon 2).* **« Perd 19–20 dB » est faux tel qu'écrit.**
    > 19 à 20 dB n'est pas un écart mais un **plancher absolu** : c'est le PSNR qu'atteignent les
    > codecs 4:2:0 du jalon 0 sur le motif de test (`spike/mesures/psnr-h264-420.log`, `psnr_avg`
-   > de 20,45 à 20,46 par image ; `psnr-av1-420.log`, 20,42). La seule mesure d'aller-retour
+   > de 20,45 à 20,49 par image — plage relue dans le journal le 02/10, elle était écrite « à
+   > 20,46 » ; `psnr-av1-420.log`, 20,42). La seule mesure d'aller-retour
    > 4:2:0 conservée dans le dépôt, la neutralisation du test de `sky-decode` (tâche 2 du jalon 2),
    > donne **15,06 dB absolus**, soit une chute de **70,4 dB** depuis 85,50 dB. La conclusion de
    > ce point (le 4:4:4 est préservé) tient ; le chiffre, non. Établi par la revue de la tâche 2,

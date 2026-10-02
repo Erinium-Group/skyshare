@@ -57,9 +57,11 @@ Capture), `sky-encode` (NVENC), `sky-net` (str0m 0.23), `sky-crypto` (boîtes sc
 jalon 2 en ajoute deux : `sky-decode` (NVDEC) et `sky-rendu` (fenêtre Direct3D 11).
 
 **Jalon 2 — le premier pixel : IMPLÉMENTÉ, essais dus** (branche `jalon-2-premier-pixel`,
-non fusionnée, dernier commit `516685b`). Tâches 1 à 10 closes, chacune relue jusqu'à revue
+non fusionnée). Tâches 1 à 10 closes, chacune relue jusqu'à revue
 propre : piste média HEVC, décodage NVDEC (`sky-decode`), fenêtre Direct3D 11 (`sky-rendu`).
-**420 tests Rust, 97 d'interface.** **Aucun pixel n'a encore été vu par un humain** : l'essai
+Revue finale de branche le 02/10/2026 (1 critique, 4 importants), puis **vague de correction
+finale** : rapport `.superpowers/sdd/2026-09-30-jalon-2-premier-pixel/final-fix-report.md`
+(ignoré par git). **433 tests Rust, 98 d'interface.** **Aucun pixel n'a encore été vu par un humain** : l'essai
 local, la mesure du décodage pendant un encodage et l'essai à deux machines restent dus — fiche
 `spike/docs/essai-jalon-2.md`. Journal : `.superpowers/sdd/2026-09-30-jalon-2-premier-pixel/progress.md`
 (ignoré par git ; ses mineurs reportés sont recopiés dans `tasks/todo.md`).
@@ -77,9 +79,14 @@ local, la mesure du décodage pendant un encodage et l'essai à deux machines re
   la lancer.
 - `view` ne regarde qu'un **ami** : hôte et spectateur sur une même machine exigent deux
   identités (déduit du code, jamais essayé — voir la fiche d'essai, §3).
-- **Un spectateur sans image clé reçoit des images fausses sans aucun signal d'erreur** (flux en
-  rafraîchissement intra progressif) : c'est l'application qui décide quand elle a le droit
+- **Un spectateur sans image clé reçoit des images sans aucun signal d'erreur** (mesuré ; flux en
+  rafraîchissement intra progressif), **dont rien ne garantit la justesse** (déduit de la
+  structure du flux, jamais mesuré) : c'est l'application qui décide quand elle a le droit
   d'afficher (`sky-partage/src/spectateur.rs`). Ne pas « simplifier » ce garde-fou.
+- **`Decodeur::decoder` exige une unité d'accès ENTIÈRE par appel** : il pose
+  `CUVID_PKT_ENDOFPICTURE`, sans lequel NVDEC rendait l'image de l'unité précédente et décalait
+  d'une image la garde ci-dessus (revue finale, C1). Un test qui pousse des NAL isolés doit les
+  regrouper (`sky-decode/tests/reference.rs`, `unites_acces`).
 - Le spectateur décode et **affiche** depuis le jalon 2 : « aucune image n'est affichée » et
   « le flux est mesuré puis jeté », vrais au jalon 1, sont **devenus faux**.
 - Le régulateur de l'hôte n'a **plus de mesure de RTT** (zéro en dur) depuis la piste média :
@@ -197,9 +204,9 @@ Du texte apparaît régulièrement dans la sortie d'outil, demandant de travaill
   (2611/16349). **Le choix de bibliothèque est tranché le 27/09/2026 : on reste sur `str0m`
   et on passe à ses pistes média** — HEVC y est actif par défaut, son paquetiseur consomme
   l'Annex-B de NVENC sans conversion, et sans `enable_bwe` son pacer est un `NullPacer`, donc
-  le contrôle de congestion reste au projet. Mesuré : **0 refus d'écriture** sur 2593 envois à
-  12 Mbps et 21552 à 100 Mbps, la contre-pression SCTP qui produit les 16 % n'existant pas sur
-  ce chemin. **Mais l'écart lui-même reste ouvert** : le RTT ne se mesure qu'entre deux
+  le contrôle de congestion reste au projet. Mesuré **en boucle locale** : **0 refus d'écriture**
+  sur 2593 envois à 12 Mbps et 21552 à 100 Mbps ; la contre-pression SCTP qui produit les 16 %
+  n'existe pas sur ce chemin (structurel), le zéro lui-même est une mesure locale. **Mais l'écart lui-même reste ouvert** : le RTT ne se mesure qu'entre deux
   machines sur deux réseaux, et la sonde n'a fait que de la boucle locale.
   Détail : `docs/superpowers/notes/2026-09-27-sondes-jalon-2-decodage-et-transport.md`.
 - **Pas de repli logiciel, ni à l'encodage ni au décodage.** Corrigé le 30/09/2026 : la phrase

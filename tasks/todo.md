@@ -1,6 +1,18 @@
 # TODO — SkyShare
 
-> ## ⛔ ARRÊT DEMANDÉ PAR LE PROPRIÉTAIRE — 23/08/2026
+## État au 02/10/2026 — à lire en premier
+
+- **Jalons 0, C1, C2 et 1 : terminés et fusionnés.** Jalon 0 : GO ferme le 23/08 (M4 et M1
+  mesurées). Jalon 1 : fusionné dans `main` le 27/09.
+- **Jalon 2 — le premier pixel : implémenté, revu, corrigé ; essais dus.** Branche
+  `jalon-2-premier-pixel`, non fusionnée. Revue finale de branche le 02/10 (1 critique,
+  4 importants), puis vague de correction finale. Ce qui reste dû est dans la section « Jalon 2 »
+  plus bas ; la fiche d'essai est `spike/docs/essai-jalon-2.md`.
+- Le bandeau d'arrêt du 23/08 et l'« état actuel » du jalon 0 qui suivent sont **conservés pour
+  l'historique et périmés** : le propriétaire a donné le feu vert du jalon 1, et le jalon 0 est
+  passé de GO CONDITIONNEL à GO ferme.
+
+> ## ⛔ ARRÊT DEMANDÉ PAR LE PROPRIÉTAIRE — 23/08/2026 *(historique, levé)*
 >
 > **Ne pas lancer le jalon 1 tant que le propriétaire n'a pas dit « go » explicitement.**
 >
@@ -12,7 +24,7 @@
 > branche, et répondre à ses questions.
 
 
-## État actuel
+## État du jalon 0 au 23/08/2026 *(historique, périmé)*
 - **Phase : jalon 0 terminé côté agents — GO CONDITIONNEL.**
   Rapport de faisabilité : `spike/docs/rapport-jalon-0.md`.
 - **Deux mesures humaines bloquent le passage à un GO ferme** : **M4** (test P2P avec un
@@ -123,8 +135,8 @@ jalon ; le sixième sur une recherche documentaire, sans matériel de test.
 | # | Jalon | État |
 |---|-------|------|
 | 0 | Faisabilité (capture + encode + P2P) | ✅ **TERMINÉ — GO ferme. 6/6 questions closes, M4 et M1 mesurées le 23/08 sur réseaux réels** |
-| 1 | Fondations (Discord, amis, listes) | à faire — porte la décision **D2** (annuaire de clés) |
-| 2 | Premier pixel (partage 1-à-1) | **implémenté** (tâches 1 à 10, branche `jalon-2-premier-pixel`) — essai local, mesure du décodage pendant un encodage et essai à deux machines **dus**. Écart **3** traité ; écart **5** reporté au jalon 3 ; D1 hors périmètre (voir section « Jalon 2 ») |
+| 1 | Fondations (Discord, amis, listes) — l'application | ✅ **TERMINÉ le 27/09/2026**, fusionné dans `main` ; essai réel à deux machines dû |
+| 2 | Premier pixel (partage 1-à-1) | **implémenté, revue finale et vague de correction faites** (branche `jalon-2-premier-pixel`) — essai local, mesure du décodage pendant un encodage et essai à deux machines **dus**. Écart **3** traité ; écart **5** reporté au jalon 3 ; D1 hors périmètre (voir section « Jalon 2 ») |
 | 3 | Qualité (simulcast, profils) | à faire — bloqué sur l'écart **5** (reconfiguration de débit à chaud) |
 | 4 | Lecteur (multi-flux, zoom, audio) | à faire |
 | 5 | Public (liens, salle d'attente) | à faire |
@@ -295,9 +307,13 @@ propriétaire : `spike/docs/essai-jalon-2.md`.
 
 ### ⚠️ À lire avant l'essai
 
-**1. Trois textes affichés à l'utilisateur ne viennent pas de la spec — à valider par le propriétaire**
-(`app/src/messages.ts`, chacun marqué « TEXTE NOUVEAU » sur son `case`). Jugés honnêtes par la
-re-revue de la tâche 10 : aucun ne désigne une fausse cause.
+**1. Des textes affichés à l'utilisateur ne viennent pas de la spec — à valider par le propriétaire**
+(`app/src/messages.ts`, chacun marqué sur son `case`). **Liste complète : spec du jalon 2, §7,
+« Textes affichés qui ne viennent pas de ce tableau ».** La vague finale en a ajouté un (refus de
+partager sans HEVC 4:4:4, `sky-app/src/noyau.rs`) et en a **corrigé deux** qui désignaient une
+fausse cause : `sans_decodage_444` (promettait « peut partager un écran ») et `trop_lente`, devenu
+`envoi_en_retard` (« la connexion était trop lente » pour une file locale). Les trois de la tâche 10,
+jugés honnêtes par sa re-revue :
 - `partage_arrete` : « Ton ami a arrêté son partage. »
 - `resolution_trop_grande` : « Le décodeur vidéo de cette carte graphique s'arrête à
   ${largeurMax}×${hauteurMax} : SkyShare a besoin d'au moins ${largeur}×${hauteur} pour recevoir
@@ -312,7 +328,10 @@ re-revue de la tâche 10 : aucun ne désigne une fausse cause.
 média, l'hôte n'a **plus aucune mesure de RTT** : il passe un zéro en dur au `Pacer`
 (`sky-partage/src/hote.rs:434`), l'écho du canal de données ayant disparu et RTCP n'étant lu par
 personne. La perte n'est plus visible qu'à travers les **refus de la file de paquetisation** — 0 sur
-21552 écritures mesurées à 100 Mbps. Sur ce chemin nominal mesuré, `congestionne` reste faux et le
+21552 écritures mesurées à 100 Mbps, **par la sonde du 27/09, en boucle locale**, quand la boucle sert
+le réseau entre deux images (`hote.rs`) : ni par l'hôte réel, ni sur un réseau. Cette file est en
+outre **locale** (vidée par nos propres `poll`) : un refus dirait que la boucle de l'hôte a pris du
+retard, pas que le réseau est lent (revue finale, M4). Sur ce chemin nominal mesuré, `congestionne` reste faux et le
 débit monte de 8 % par tic jusqu'au plafond, **et n'en redescend pas**. **Ce n'est pas structurel** :
 `SEUIL_PERTE` valant 2 %, un seul refus dans une fenêtre de moins de cinquante images suffit à
 faire détecter une congestion. **C'est la première chose à regarder si l'image se dégrade pendant
@@ -384,16 +403,40 @@ Au terme de la tâche 10 : `cargo test --workspace --no-fail-fast` **420 réussi
 - [ ] Écrire les deux résultats dans `spike/docs/mesures-jalon-2.md` (fichier prévu par le plan,
   pas encore créé).
 - [ ] **Essai à deux machines sur deux réseaux** — clôt l'écart 7 (voir ci-dessus).
-- [ ] Revue finale de branche, puis fusion sur décision du propriétaire.
+- [x] Revue finale de branche (02/10/2026) : 1 critique, 4 importants, et des mineurs. **Le critique,
+  les importants et les mineurs classés « avant fusion » sont traités** par la vague de correction
+  finale (voir la sous-section suivante). Restent ouverts, classés « peut attendre » par la revue :
+  M3 (une seule image relevée par appel au décodeur), M5 (fragment technique affiché sur une panne
+  d'affichage), M6 (déchirement probablement absent, donc latence d'une période), M7 (gigue qui mêle
+  l'encodage au réseau), et les mineurs reportés ci-dessous qui ne sont pas marqués soldés.
+- [ ] Fusion, sur décision du propriétaire — **après** les essais, qui seuls peuvent confirmer C1 et I1
+  sur un vrai écran.
 - [ ] Le plan n'a **pas** été corrigé (la spec et la note l'ont été) : il porte encore `npx tauri
   build`, `Encodeur`/`encoder`, `LinkEvent::Disconnected`, le chiffre « 19–20 dB » et une
   neutralisation inopérante (amputer le **premier** octet d'une unité d'accès ne discrimine pas :
   `next_start_code` accepte trois ou quatre octets, `str0m` `h265.rs:331-334`). Document
   historique ; à corriger ou à marquer comme tel.
-- [ ] **Double non corrigé du chiffre « 19–20 dB », dans du code** : l'en-tête de
-  `spike/crates/sky-decode/tests/reference.rs:3-4` affirme encore qu'« une conversion 4:2:0
-  parasite fait perdre 19 à 20 dB ». Trouvé en cherchant les doubles à la tâche 12, qui ne touche
-  pas au code : à corriger (15,06 dB absolus mesurés, voir la spec §2).
+- [x] **Double non corrigé du chiffre « 19–20 dB », dans du code** (`sky-decode/tests/reference.rs`) :
+  corrigé par la vague finale (15,06 dB absolus mesurés, voir la spec §2).
+
+### Vague de correction finale (02/10/2026)
+
+Rapport : `.superpowers/sdd/2026-09-30-jalon-2-premier-pixel/final-fix-report.md` (ignoré par git).
+Chaque correction a son test et sa neutralisation, appliquée seule.
+- **C1 — le décodeur rendait l'image de l'unité précédente** : `CUVID_PKT_ENDOFPICTURE` posé ; prouvé
+  sur le vrai décodeur. La garde d'affichage n'est plus décalée d'une image.
+- **I1 — écran figé côté hôte** : la dernière capture est copiée et ré-encodée quand une image clé est
+  due (au plus ~50 ms d'attente) ou quand la première n'a pas encore été envoyée. **Coût non mesuré** :
+  une copie GPU de ~14 Mo par image capturée en 2560×1440.
+- **I2 — le partage exige le HEVC 4:4:4** : refus avant tout réseau sinon (application et `heberger`).
+- **I3 — une erreur de décodage avant la première image affichée est une erreur d'ouverture** ; la
+  taille codée du flux est aussi comparée au maximum de la carte.
+- **I4 — « Aller-retour : 0 ms »** devient « non mesuré », du cœur jusqu'à l'écran.
+- Mineurs 20 et 49, M1 (faits périmés dans le code), M2 (« images fausses » : déduit), M4 (deux fins
+  qui désignaient une fausse cause).
+- **Défense en profondeur non faite** : la revue recommandait de faire porter la garde d'affichage sur
+  l'horodatage de l'image rendue plutôt que sur l'ordre des appels. Le test sur le vrai décodeur suffit
+  à la correction ; la garde reste sur l'ordre des appels.
 
 ### Limites connues, écrites d'avance
 - **Un seul spectateur, un écran, pas de son** ; déchirement possible (présentation sans attente de
@@ -403,8 +446,9 @@ Au terme de la tâche 10 : `cargo test --workspace --no-fail-fast` **420 réussi
   finale, I2). Sans décodeur HEVC 4:4:4 : pas de réception. *La ligne disait « NVIDIA antérieure à
   Turing : diffusion seulement », en contradiction avec l'écart 6 (GTX 10xx : pas de HEVC 4:4:4) ;
   quelles générations passent l'un ou l'autre n'est pas tranché, aucune n'ayant été essayée.*
-- **Un spectateur sans image clé verrait une image faussement plausible**, sans erreur du décodeur
-  (rafraîchissement intra progressif). Le garde-fou est applicatif, dans `spectateur.rs`.
+- **Un spectateur sans image clé verrait une image plausible et peut-être fausse**, sans erreur du
+  décodeur (rafraîchissement intra progressif) — l'absence d'erreur est mesurée, la fausseté déduite.
+  Le garde-fou est applicatif, dans `spectateur.rs`.
 - **L'aller-retour décodage n'est éprouvé qu'en 1440 et 1080**, deux multiples de 8 ; l'en-tête
   n'exige qu'un alignement sur 2, donc une hauteur comme 1050 n'est couverte ni par la mesure ni par
   la documentation.
@@ -440,7 +484,8 @@ traité selon le journal ou le code ; tous les autres sont **ouverts**.
 **Tâche 2 — `sky-decode`, décodage**
 10. Aucun vidage `CUVID_PKT_ENDOFSTREAM` : les dernières images d'un flux borné peuvent rester dans
     le décodeur. Sans effet sur un flux vivant.
-11. `unites_acces` découpe des NAL, pas des unités d'accès : nom trompeur.
+11. `unites_acces` découpe des NAL, pas des unités d'accès : nom trompeur. **Soldé** par la vague
+    finale : la fonction regroupe désormais les NAL en unités d'accès (exigé par C1).
 12. Le test de référence retient 1,34 Go en mémoire.
 13. Le `allow(dead_code)` de `nvcuvid_sys.rs` est devenu obsolète.
 14. `ulErrorThreshold = 0` rend une corruption indiscernable d'un en-tête — à reprendre avec
@@ -456,6 +501,7 @@ traité selon le journal ou le code ; tous les autres sont **ouverts**.
 **Tâche 3 — `sky-rendu`, fenêtre**
 19. Un échec de `redimensionner` est avalé sans commentaire (`fenetre.rs:391` à l'époque).
 20. Le commentaire « échec = intact » est faux pour la chaîne d'échange (`fenetre.rs:532` à l'époque).
+    **Soldé** par la vague finale (commentaire corrigé ; le comportement, rare, reste à corriger).
 21. L'image est étirée pendant le glissement du bord, la boucle de redimensionnement de Windows étant
     modale (`fenetre.rs:381` à l'époque).
 22. `ouvrir` montre une fenêtre vide avant le premier `afficher_etat` (`fenetre.rs:431` à l'époque).
@@ -518,7 +564,8 @@ traité selon le journal ou le code ; tous les autres sont **ouverts**.
 
 **Tâche 9 — `sky-partage`, spectateur**
 49. `images_par_seconde` compte les images **reçues**, pas les images affichées — la valeur
-    « images/s » de `sky-probe view` est donc celle des arrivées.
+    « images/s » de `sky-probe view` est donc celle des arrivées. **Soldé** par la vague finale : le
+    panneau dit « Images reçues », le terminal « images reçues/s ».
 50. `latence_decodage_ms` n'est pas testée (c'est une **moyenne** par relevé, pas une médiane).
 51. Le `flush` du fichier de sortie est sauté sur les sorties par `?`.
 52. Des accesseurs publics ne servent qu'aux tests.
@@ -535,7 +582,7 @@ traité selon le journal ou le code ; tous les autres sont **ouverts**.
 57. Le changement de DPI quand on déplace la fenêtre d'un écran à l'autre n'est pas traité.
 58. Pas de sortie du plein écran par Échap.
 59. L'ouverture du décodeur dans `regarder` n'est protégée ni par le type ni par un test (relevé deux
-    fois au journal, fusionné ici).
+    fois au journal, fusionné ici). *La vague finale (I3) touche le même endroit sans le solder.*
 60. L'interface tutoie, la spec vouvoie (c'est la spec qui détonne).
 61. Le test du F11 raté court-circuite l'appel Windows : il prouve la logique de retour arrière, pas
     l'état réel laissé par un `SetWindowPos` en échec.
@@ -563,9 +610,12 @@ inconnues du jalon ne reposaient sur aucune mesure. Résultats complets :
     Un lecteur qui « décode » ne prouve rien du matériel.
 - [x] **Le transport passe aux pistes média de `str0m` 0.23.1** — pas de passage à `webrtc-rs`.
   HEVC est actif par défaut dans str0m (`enable_h265(true)`), son paquetiseur consomme de l'**Annex-B**,
-  donc aucune conversion. **0 refus d'écriture sur 2593 à 12 Mbps et sur 21552 à 100 Mbps**, contre 16 %
-  aujourd'hui — et c'est structurel : la contre-pression SCTP qui produit les 16 % n'existe pas sur ce
-  chemin. Intégrité vérifiée : 61 NAL émis, 61 reçus, identiques octet pour octet.
+  donc aucune conversion. **0 refus d'écriture sur 2593 à 12 Mbps et sur 21552 à 100 Mbps**, mesurés
+  **en boucle locale**, contre 16 % entre deux réseaux. Ce qui est structurel, c'est l'absence de la
+  contre-pression SCTP qui produit les 16 % ; le zéro, lui, est une mesure locale, pas une propriété.
+  *Corrigé par la vague finale (02/10/2026) : la phrase disait « et c'est structurel » juste après le
+  zéro, double survivant de la correction faite dans la note des sondes.* Intégrité vérifiée : 61 NAL
+  émis, 61 reçus, identiques octet pour octet.
   - Argument décisif : sans `enable_bwe`, str0m installe un **`NullPacer`** — le projet garde
     intégralement son contrôle de congestion, sans rien contourner. Coût : **400 à 450 lignes**, dont
     ~140 supprimées, contre 1200 à 3500 pour `webrtc-rs` (async dans une application synchrone).
@@ -579,10 +629,12 @@ inconnues du jalon ne reposaient sur aucune mesure. Résultats complets :
 - [ ] **Latence décodeur → pixel affiché** : le vrai risque restant. Une image décodée pèse 11,06 Mio,
   le chemin doit rester sur le GPU.
 - [ ] Décodage **pendant** un encodage NVENC sur le même moteur : non mesuré, sonde courte.
-- [ ] Profil HEVC annoncé dans le `fmtp` : la sonde a utilisé Main par défaut, le projet encode en
-  **Main 4:4:4** — `add_h265` avec le bon `profile_id`.
-- [ ] Écart 3 (en-têtes de séquence émis une seule fois — confirmé côté décodeur : **un seul IDR pour
-  901 images**) et écart 5 (le régulateur ne pilote pas le débit : `nvEncReconfigureEncoder` absent de
-  l'API de `sky-encode`).
+- [x] Profil HEVC annoncé dans le `fmtp` : la sonde a utilisé Main par défaut, le projet encode en
+  **Main 4:4:4** — `add_h265` avec le bon `profile_id`. *Fait à la tâche 6 du jalon 2, prouvé par la
+  réponse SDP.*
+- [x] Écart 3 (en-têtes de séquence émis une seule fois — confirmé côté décodeur : **un seul IDR pour
+  901 images**) : *traité au jalon 2 (tâches 7 à 9).*
+- [ ] Écart 5 (le régulateur ne pilote pas le débit : `nvEncReconfigureEncoder` absent de l'API de
+  `sky-encode`) : reporté au jalon 3.
 - [ ] Décision D1 (machines sans NVIDIA récente) : direction fixée le 23/08 (voie A, empaquetage), ses
   neuf inconnues restent entières et demandent du matériel AMD/Intel absent à ce jour.

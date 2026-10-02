@@ -3,15 +3,19 @@ import type { FinVue } from "./types";
 /**
  * Chaque fin de partage, EN CLAIR (spec §4).
  *
- * Les quatre premiers textes sont ceux de la spec §4, et les quatre du
- * décodage ceux de la spec du jalon 2 (§7), au mot près : ce sont des
- * promesses faites à l'utilisateur, pas des étiquettes d'interface. Ils ont
- * chacun leur test dans `messages.test.ts`.
+ * Les quatre premiers textes viennent de la spec §4 du jalon 1, et les quatre
+ * du décodage de la spec du jalon 2 (§7), au mot près : ce sont des promesses
+ * faites à l'utilisateur, pas des étiquettes d'interface. Ils ont chacun leur
+ * test dans `messages.test.ts`. DEUX ONT ÉTÉ CORRIGÉS par la vague finale du
+ * jalon 2, parce qu'ils désignaient une cause fausse : `envoi_en_retard`
+ * (ex-`trop_lente`) et `sans_decodage_444` — chacun le dit sur son `case`.
  *
  * TROIS TEXTES N'EN VIENNENT PAS, tous ajoutés par la tâche 10 du jalon 2 et
  * signalés comme tels sur leur `case` : `partage_arrete`,
  * `resolution_trop_grande` et `decodage_interrompu`. Ils sont à valider par le
- * propriétaire.
+ * propriétaire. La liste complète des textes hors spec, celui du refus de
+ * partager sans HEVC 4:4:4 compris (`noyau.rs`), est dans la spec du jalon 2,
+ * §7.
  *
  * ARBITRAGE 4 DU CONTRÔLEUR : l'interface ne FABRIQUE aucun message à partir de
  * données brutes. La seule cause qui porte du texte, `autre`, le tient du cœur,

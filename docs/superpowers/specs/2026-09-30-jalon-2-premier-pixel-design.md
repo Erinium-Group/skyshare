@@ -17,8 +17,12 @@ Architecture générale : `docs/superpowers/specs/2026-08-22-skyshare-architectu
 > code lui-même ; elle est recopiée ici pour survivre à la fusion.
 
 > **Corrections de la vague finale, 02/10/2026, après la revue de branche.** Signalées sur place
-> par « *Corrigé par la vague finale* » : (a) une carte sans HEVC 4:4:4 ne « diffuse » rien de
-> lisible — le partage exige désormais ce codec, §5, §7 et §10.
+> par « *Corrigé par la vague finale* » ou « *Ajouté par la vague finale* » : (a) une carte sans
+> HEVC 4:4:4 ne « diffuse » rien de lisible — le partage exige désormais ce codec, §5, §7 et §10 ;
+> (b) la plage de `psnr_avg` H.264 4:2:0, §2 ; (c) la portée « en boucle locale » du 0 refus, §2 ;
+> (d) le bloc `Fenetre`, §5, réécrit à la forme réelle ; (e) « images fausses » (déduit) et
+> « `Ok(None)` » (non distingué d'un refus), §6 ; (f) le décodeur décalé d'une image et l'écran
+> figé de l'hôte, §6 ; (g) les textes hors tableau, §7.
 
 ---
 
@@ -56,14 +60,14 @@ transport fait pour la vidéo. Un spectateur, un écran, sans son.
 | Le 4:4:4 survit au décodage | **89,78 dB** (sonde), 99,979 % de pixels identiques contre `spike/mesures/frame120-hevc-444.png` ; **85,50 dB** par le test de `sky-decode` (voir la correction ci-dessous) |
 | L'espace colorimétrique du flux | **BT.601 pleine échelle** — BT.709 plafonne à 36 dB |
 | HEVC sur une piste média `str0m` | 61 NAL émis, 61 reçus, identiques octet pour octet ; payload type 102 négocié |
-| Le goulot d'envoi disparaît | **0 refus** sur 2593 écritures à 12 Mbps et sur 21552 à 100 Mbps, contre **16 %** aujourd'hui |
+| Le goulot d'envoi disparaît | **0 refus** sur 2593 écritures à 12 Mbps et sur 21552 à 100 Mbps, **en boucle locale**, contre **16 %** aujourd'hui entre deux réseaux — comparaison qui n'est donc pas faite à réseau égal |
 | `str0m` laisse le contrôle de congestion au projet | sans `enable_bwe`, `session.rs:171` installe un `NullPacer` |
 
 > *Corrigé le 02/10/2026 — deux chiffres de ce tableau.*
 >
 > 1. **« Un aller-retour 4:2:0 forcé perd 19–20 dB » était faux.** 19 à 20 dB n'est pas un
 >    écart, c'est un **plancher absolu** : celui qu'atteignent les codecs 4:2:0 du jalon 0 sur le
->    motif de test (`spike/mesures/psnr-h264-420.log`, `psnr_avg` de 20,45 à 20,46 par image, U à
+>    motif de test (`spike/mesures/psnr-h264-420.log`, `psnr_avg` de 20,45 à 20,49 par image, U à
 >    18,2 dB, V à 19,26 dB ; `psnr-av1-420.log`, 20,42). La seule mesure d'aller-retour 4:2:0 du
 >    dépôt, la neutralisation du test de `sky-decode` (tâche 2), donne **15,06 dB absolus**, soit
 >    une chute de 70,4 dB depuis 85,50 dB. Établi par la revue de la tâche 2.
@@ -276,6 +280,15 @@ travaille sur son propre contexte CUDA (`sky-decode/src/decodeur.rs:149`).
 
 ### `sky-rendu`
 
+*Corrigé le 02/10/2026 — deux signatures différaient dans le code* (`sky-rendu/src/fenetre.rs:131`
+et `:179`). Le bloc ci-dessous est désormais la forme réelle, comme ceux de `LinkEvent` et
+d'`ErreurDecodeur` ; jusqu'à la vague finale il gardait l'ancienne, la correction ne venant
+qu'après lui. `Fenetre::ouvrir(titre, largeur, hauteur)` ne reçoit pas d'appareil : la fenêtre
+crée le sien, sur l'adaptateur NVIDIA choisi explicitement, et l'expose par
+`Fenetre::appareil()`. `afficher` prend un `&dyn ImageAAfficher` (trait introduit à la tâche 4,
+le constructeur d'`ImageDecodee` étant privé à `sky-decode`) ; aucune de ses méthodes ne rend
+d'octets de pixel, donc D5 tient.
+
 ```rust
 pub struct Fenetre { /* ... */ }
 
@@ -284,9 +297,10 @@ pub enum EtatVisionnage { EnAttente, ConnexionPerdue, PartageArrete }
 pub enum EvenementFenetre { FermetureDemandee, PleinEcranBascule }
 
 impl Fenetre {
-    pub fn ouvrir(titre: &str, appareil: &ID3D11Device, largeur: u32, hauteur: u32)
-        -> anyhow::Result<Self>;
-    pub fn afficher(&mut self, image: &ImageDecodee) -> anyhow::Result<()>;
+    pub fn ouvrir(titre: &str, largeur: u32, hauteur: u32) -> anyhow::Result<Self>;
+    /// L'appareil Direct3D 11 de la fenêtre, sur l'adaptateur NVIDIA.
+    pub fn appareil(&self) -> &ID3D11Device;
+    pub fn afficher(&mut self, image: &dyn ImageAAfficher) -> anyhow::Result<()>;
     /// Une fenêtre noire muette est un défaut, pas un état.
     pub fn afficher_etat(&mut self, etat: EtatVisionnage) -> anyhow::Result<()>;
     pub fn pompe_messages(&mut self) -> Vec<EvenementFenetre>;
@@ -295,13 +309,6 @@ impl Fenetre {
 
 Mise à l'échelle en préservant le rapport d'image, bandes noires au besoin : déformer du texte
 serait inacceptable pour l'usage visé.
-
-*Corrigé le 02/10/2026 — deux signatures diffèrent dans le code* (`sky-rendu/src/fenetre.rs:131`
-et `:179`). `Fenetre::ouvrir(titre, largeur, hauteur)` ne reçoit pas d'appareil : la fenêtre crée
-le sien, sur l'adaptateur NVIDIA choisi explicitement, et l'expose par `Fenetre::appareil()`.
-`afficher` prend un `&dyn ImageAAfficher` (trait introduit à la tâche 4, le constructeur
-d'`ImageDecodee` étant privé à `sky-decode`) ; aucune de ses méthodes ne rend d'octets de pixel,
-donc D5 tient.
 
 ### `sky-encode` — deux ajouts
 
@@ -337,16 +344,37 @@ définitive, sans issue.
 **rafraîchissement intra progressif** : GOP et `idrPeriod` infinis, période de rafraîchissement de
 2 s, vague d'environ 1 s (`sky-encode/src/nvenc.rs:176` et `:230-232`, confirmé par la revue de la
 tâche 7 ; la durée exacte du cycle n'est **pas mesurée**). Conséquence que cette spec n'énonçait
-pas : un spectateur qui décode sans avoir vu d'image clé obtient **des images, mais fausses ou
-corrompues, sans aucun signal d'erreur du décodeur**. Ce n'est donc pas « rien à l'écran » mais
-**une image faussement plausible** — un défaut différent, et pire, puisque personne ne s'en
-aperçoit. Ce qui se passe sans les en-têtes est autre chose encore : NVDEC rend `Ok(None)` à
-chaque unité (mesuré à la tâche 7 : 0 image sur 9 paquets sans en-têtes), donc une attente muette
-et non un refus. Le garde-fou ne peut venir que de l'application : le spectateur **n'affiche
-jamais avant une image clé**, cesse d'afficher dès que `sans_perte` est faux ou que le décodeur
-refuse, montre « En attente de l'image… » entre-temps, et demande une image clé dans tous ces
-cas (tâche 9, `sky-partage/src/spectateur.rs`). Cela vaut aussi pour « rejoindre en cours de
-route » au jalon 3.
+pas : un spectateur qui décode sans avoir vu d'image clé obtient **des images, sans aucun signal
+d'erreur du décodeur** — cela est **mesuré** (`sky-decode/tests/aller_retour.rs`). Que ces images
+soient **fausses** est **déduit** de la structure du flux, non mesuré : leur justesse n'a jamais
+été comparée à une référence (mineur 41 de `tasks/todo.md`), et sous rafraîchissement intra elles
+devraient même converger au bout d'une période — supposé. Ce ne serait donc pas « rien à
+l'écran » mais **une image plausible et peut-être fausse**, un défaut que personne ne verrait. Ce
+qui se passe sans les en-têtes est autre chose encore : NVDEC ne rend **aucune image** (mesuré à
+la tâche 7 : 0 sur 9 paquets sans en-têtes) ; le test compte des images et **ne distingue pas un
+`Ok(None)` d'un refus**. Le spectateur demande une image clé dans les deux cas. Le garde-fou ne
+peut venir que de l'application : le spectateur **n'affiche jamais avant une image clé**, cesse
+d'afficher dès que `sans_perte` est faux ou que le décodeur refuse, montre « En attente de
+l'image… » entre-temps, et demande une image clé dans tous ces cas (tâche 9,
+`sky-partage/src/spectateur.rs`). Cela vaut aussi pour « rejoindre en cours de route » au jalon 3.
+
+*Corrigé par la vague finale (02/10/2026)* : ce paragraphe disait « des images, mais fausses ou
+corrompues » et « NVDEC rend `Ok(None)` à chaque unité (mesuré) », deux affirmations que la mesure
+ne porte pas (revue de la tâche 12, I1 et I2).
+
+*Ajouté par la vague finale — deux défauts que la revue de branche a trouvés sur ce chemin :*
+
+- **Le garde-fou était décalé d'une image.** Sans `CUVID_PKT_ENDOFPICTURE`, NVDEC rendait l'image
+  de l'unité **précédente** : à la reprise après une perte, l'image clé rallumait le droit
+  d'afficher, et c'est la dernière image décodée sur des références perdues qui s'affichait ; sur
+  un écran qui cesse de bouger, la dernière image n'apparaissait jamais. Les tests du spectateur
+  étaient verts parce que leur doublure rendait l'image de l'unité poussée. Le drapeau est posé,
+  et le contrat est **prouvé sur le vrai décodeur** (`chaque_unite_poussee_rend_sa_propre_image_sans_retard`).
+- **L'hôte n'honorait une demande qu'à la capture suivante**, et WGC ne capture que si l'écran
+  change : sur un écran figé, le spectateur renonçait au bout de dix secondes sans défaut réel, et
+  la première image capturée, jetée après lecture de sa taille, n'était jamais envoyée. L'hôte
+  retient désormais une copie de la dernière capture et la ré-encode quand une image clé est due,
+  ou quand la première n'a pas encore été envoyée (`hote::ImagesEcran`).
 
 **Remède, en deux temps :**
 
@@ -390,6 +418,24 @@ vrai, et que le code tient désormais :
 
 Quelles générations de cartes passent l'un ou l'autre n'est **pas tranché** ici : aucune carte
 antérieure à Turing n'a été essayée.
+
+### Textes affichés qui ne viennent pas de ce tableau
+
+*Ajouté par la vague finale (02/10/2026).* Le tableau ci-dessus n'était pas la liste complète des
+textes du jalon : les autres ne figuraient que dans `tasks/todo.md`. Les voici, chacun marqué sur
+son `case` dans `app/src/messages.ts` (ou sa constante dans `sky-app/src/noyau.rs`), **tous à
+valider par le propriétaire** :
+
+| Situation | Message | Origine |
+|---|---|---|
+| L'ami a arrêté son partage | « Ton ami a arrêté son partage. » | tâche 10 |
+| Décodeur trop petit pour l'écran | « Le décodeur vidéo de cette carte graphique s'arrête à L×H : SkyShare a besoin d'au moins L×H pour recevoir un écran sur cette machine. » — levé à l'ouverture, et depuis la vague finale aussi au premier paquet, contre la taille codée du flux | tâche 10, I3 |
+| Décodage interrompu **après** une image affichée | « Le décodage de l'image s'est interrompu en cours de visionnage, malgré les demandes de reprise. Relance le visionnage ; si cela se reproduit, demande à ton ami de relancer son partage. » | tâche 10 ; avant la première image, c'est un message d'ouverture (I3) |
+| Partager sans encodeur HEVC 4:4:4 | « Partage impossible : la carte graphique de cette machine n'encode pas la couleur pleine résolution (HEVC 4:4:4), le seul format que SkyShare sait transmettre. » | vague finale, I2 |
+| File de paquetisation restée pleine (hôte) | « Le partage s'est arrêté : l'envoi de la vidéo a pris trop de retard sur cette machine. » — **remplace** « La connexion était trop lente pour la vidéo » de la spec §4 du jalon 1 : la file est locale, le texte accusait le réseau | vague finale, M4 |
+
+L'interface **tutoie**, comme ces textes-ci ; le tableau du dessus **vouvoie** (« Fermez »,
+« Demandez ») : c'est la spec qui détonne (mineur 60).
 
 ---
 
