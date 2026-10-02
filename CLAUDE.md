@@ -53,7 +53,16 @@ Installée et utilisée par le propriétaire : synchronisation en **0,9 s**, int
 Le workspace `spike/` compte désormais huit crates : `sky-capture` (Windows Graphics
 Capture), `sky-encode` (NVENC), `sky-net` (str0m 0.23), `sky-crypto` (boîtes scellées),
 `sky-compte` (compte, annuaire, boîte aux lettres), `sky-partage` (négociation, événements),
-`sky-app` (cœur Tauri), `sky-probe` (CLI clap) — plus l'interface dans `app/`.
+`sky-app` (cœur Tauri), `sky-probe` (CLI clap) — plus l'interface dans `app/`. La branche du
+jalon 2 en ajoute deux : `sky-decode` (NVDEC) et `sky-rendu` (fenêtre Direct3D 11).
+
+**Jalon 2 — le premier pixel : IMPLÉMENTÉ, essais dus** (branche `jalon-2-premier-pixel`,
+non fusionnée, dernier commit `516685b`). Tâches 1 à 10 closes, chacune relue jusqu'à revue
+propre : piste média HEVC, décodage NVDEC (`sky-decode`), fenêtre Direct3D 11 (`sky-rendu`).
+**420 tests Rust, 97 d'interface.** **Aucun pixel n'a encore été vu par un humain** : l'essai
+local, la mesure du décodage pendant un encodage et l'essai à deux machines restent dus — fiche
+`spike/docs/essai-jalon-2.md`. Journal : `.superpowers/sdd/2026-09-30-jalon-2-premier-pixel/progress.md`
+(ignoré par git ; ses mineurs reportés sont recopiés dans `tasks/todo.md`).
 
 **Pièges de l'application, chèrement acquis :**
 - Une build de développement utilise un **identifiant et un trousseau distincts** (`.dev`) :
@@ -61,11 +70,24 @@ Capture), `sky-encode` (NVENC), `sky-net` (str0m 0.23), `sky-crypto` (boîtes sc
 - Seul `tauri build` embarque l'interface : un binaire de `cargo build` charge `devUrl` et
   affiche « localhost a refusé de se connecter ». Ne jamais diagnostiquer l'application
   autrement que sur la build empaquetée.
-- **Aucune image n'est encore affichée** : « Regarder » montre la connexion et ses mesures,
-  le flux est mesuré puis jeté. C'est le jalon 2 qui apporte le premier pixel.
+- **La construction qui fonctionne** : `npm run build` dans `app/`, puis
+  `../../../app/node_modules/.bin/tauri build` depuis `spike/crates/sky-app`.
+  `npx tauri build` depuis `spike/` **ne construit rien** (aucune CLI Tauri n'y est installée).
+- **`sky-probe view` ouvre une fenêtre** depuis le jalon 2 ; le dire au propriétaire **avant** de
+  la lancer.
+- `view` ne regarde qu'un **ami** : hôte et spectateur sur une même machine exigent deux
+  identités (déduit du code, jamais essayé — voir la fiche d'essai, §3).
+- **Un spectateur sans image clé reçoit des images fausses sans aucun signal d'erreur** (flux en
+  rafraîchissement intra progressif) : c'est l'application qui décide quand elle a le droit
+  d'afficher (`sky-partage/src/spectateur.rs`). Ne pas « simplifier » ce garde-fou.
+- Le spectateur décode et **affiche** depuis le jalon 2 : « aucune image n'est affichée » et
+  « le flux est mesuré puis jeté », vrais au jalon 1, sont **devenus faux**.
+- Le régulateur de l'hôte n'a **plus de mesure de RTT** (zéro en dur) depuis la piste média :
+  sur le chemin nominal, le débit monte au plafond et y reste (détail dans `tasks/todo.md`).
 
-**Essai réel à deux machines : toujours dû** pour le partage et la réception.
-Jalons 2 à 7 restent à faire (voir `tasks/todo.md`).
+**Essai réel à deux machines : toujours dû** pour le partage et la réception — désormais
+avec une NVIDIA Turing ou plus récente **des deux côtés**.
+Jalons 3 à 7 restent à faire (voir `tasks/todo.md`).
 
 ### Site (`EriniumGroupWebsite`)
 
@@ -198,6 +220,9 @@ Chacun a coûté du temps réel. `tasks/lessons.md` en tient le détail.
   fichiers dont le contenu est **identique octet pour octet**. Vérifier par SHA-256 ou
   `git diff --ignore-cr-at-eol`. Corollaire : `git checkout --` n'est **pas** une
   restauration à l'octet près. Ce piège s'est manifesté cinq fois.
+- **`core.autocrlf=true` vaut aussi pour CE dépôt.** `tauri build` réécrit les fins de ligne de
+  `spike/crates/sky-app/Cargo.toml` à chaque passage : il apparaît modifié, contenu identique.
+  Vérifier par `git diff --ignore-cr-at-eol` (vide), ne pas le commiter.
 - **Ne jamais écrire un fichier contenant des antislashs, du CSS, du JSON ou une
   expression régulière via un heredoc Bash ou `node -e`.** Un antislash a été mangé
   silencieusement **trois fois**, dont une dans ma propre vérification : `.*\\..*` est
@@ -278,6 +303,7 @@ autre, l'agent principal en contrôleur. C'est sa demande explicite et répété
 | `docs/superpowers/plans/2026-09-11-jalon-c2-client-signaling.md` | Plan du C2 : onze tâches, table de propriété des fichiers |
 | `spike/mesures/` | Les mesures brutes du jalon 0 |
 | `docs/superpowers/notes/2026-09-27-sondes-jalon-2-decodage-et-transport.md` | Les deux sondes du jalon 2 : décodage NVDEC et pistes média `str0m`, mesuré contre supposé |
-| `docs/superpowers/specs/2026-09-30-jalon-2-premier-pixel-design.md` | Le jalon 2 : transport, décodage, affichage (décisions D1–D8) |
+| `docs/superpowers/specs/2026-09-30-jalon-2-premier-pixel-design.md` | Le jalon 2 : transport, décodage, affichage (décisions D1–D8) ; neuf corrections du 02/10 signalées sur place |
+| `spike/docs/essai-jalon-2.md` | Fiche d'essai du jalon 2 pour le propriétaire : commandes exactes, ce qu'il faut voir et relever |
 | `spike/crates/sky-crypto/src/lib.rs` | Le scellage, 102 lignes, à lire avant de toucher à la crypto |
 | Site : `docs/mesures-jalon-c1.md` | Budget de requêtes et de volume de l'API |
