@@ -33,6 +33,8 @@ desktop.ini
 # Sorties de build
 /build
 /release
+# Version portable (spike/scripts/version-portable.ps1)
+/dist/
 
 # Espace de travail SDD (jetable)
 .superpowers/

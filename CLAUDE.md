@@ -66,6 +66,18 @@ local, la mesure du décodage pendant un encodage et l'essai à deux machines re
 `spike/docs/essai-jalon-2.md`. Journal : `.superpowers/sdd/2026-09-30-jalon-2-premier-pixel/progress.md`
 (ignoré par git ; ses mineurs reportés sont recopiés dans `tasks/todo.md`).
 
+**Jalon toutes cartes, sous-jalon 1 — la réception : IMPLÉMENTÉ, essai dû** (branche
+`jalon-toutes-cartes`, issue de `jalon-2-premier-pixel`, non fusionnée ; 03/10/2026). Un
+spectateur sans décodeur HEVC 4:4:4 reçoit en **HEVC 4:2:0 ou H.264 par Media Foundation**
+(`DecodeurMf`, en matériel), le format est **négocié** à chaque connexion
+(`FormatVideo::PREFERENCE` : 4:4:4, puis 4:2:0, puis H.264) et l'interface l'affiche. Neuf tâches
+closes ; **503 tests Rust, 100 d'interface** (relevés le 03/10/2026). Le critère de fin — la machine
+NVIDIA partage, le portable AMD regarde — **n'a pas été essayé** : version portable
+(`spike/scripts/version-portable.ps1`) et fiche (`spike/docs/essai-toutes-cartes.md`) livrées.
+Le chemin NV12 n'a été éprouvé que sur **RTX 4060** ; sur AMD, seule la sonde de décodage du
+02/10 l'a été, pas l'application. Journal : `.superpowers/sdd/2026-10-02-toutes-cartes-sj1-reception/progress.md`
+(ignoré par git ; ses mineurs reportés sont recopiés dans `tasks/todo.md`).
+
 **Pièges de l'application, chèrement acquis :**
 - Une build de développement utilise un **identifiant et un trousseau distincts** (`.dev`) :
   `sky-probe` lancé en `debug` ouvre un coffre **vide**. Le lancer en `--release`.
@@ -89,11 +101,29 @@ local, la mesure du décodage pendant un encodage et l'essai à deux machines re
   regrouper (`sky-decode/tests/reference.rs`, `unites_acces`).
 - Le spectateur décode et **affiche** depuis le jalon 2 : « aucune image n'est affichée » et
   « le flux est mesuré puis jeté », vrais au jalon 1, sont **devenus faux**.
+- **Le décodeur HEVC *logiciel* de Microsoft perd toutes les images après la 120e** en faible
+  latence (mesuré sur deux machines, sans aucune erreur) ; le chemin matériel n'est pas touché.
+  Le moteur Media Foundation **refuse donc toute image hors GPU** (jamais de décodage logiciel).
+- **`MF_LOW_LATENCY = 1` est porteur même en matériel** : sans lui, mesuré sur RTX 4060, HEVC rend
+  l'image de l'unité k−2 à l'appel k — ce que le filtre d'horodatage de `DecodeurMf` transforme en
+  erreur nommée. Ne pas retirer le réglage ni le filtre.
+- **Direct3D 11 ignore SANS ERREUR une copie dont la boîte déborde ou dont la tranche n'existe
+  pas** (mesuré) : un test qui ne vérifie que « pas d'erreur » ne prouve rien. D'où les gardes de
+  `PontNv12::televerser`. Énumérer les décodeurs avec `MFT_ENUM_FLAG_HARDWARE` n'en rend aucun
+  (mesuré) : passer par les MFT synchrones.
+- **`mfplat.dll` est importée statiquement** (`dumpbin /dependents`) : sur Windows « N » sans le
+  Media Feature Pack, l'application ne démarrerait plus du tout (spec du sous-jalon 1, §9 ; non
+  vérifié, aucune machine N). Aucune DLL NVIDIA n'est importée : elles se chargent dynamiquement.
+- **Version portable** : `powershell -File spike\scripts\version-portable.ps1` (lance `tauri build`,
+  sans fenêtre). Il écrit `dist\` (ignoré par git) ; `Cargo.toml` de `sky-app` apparaît modifié
+  ensuite, comme après tout `tauri build`.
 - Le régulateur de l'hôte n'a **plus de mesure de RTT** (zéro en dur) depuis la piste média :
   sur le chemin nominal, le débit monte au plafond et y reste (détail dans `tasks/todo.md`).
 
-**Essai réel à deux machines : toujours dû** pour le partage et la réception — désormais
-avec une NVIDIA Turing ou plus récente **des deux côtés**.
+**Essai réel à deux machines : toujours dû** pour le partage et la réception — l'hôte doit être
+une NVIDIA Turing ou plus récente ; le spectateur peut désormais être n'importe quelle carte qui
+décode HEVC ou H.264 en matériel (jalon toutes cartes, sous-jalon 1 : fiche
+`spike/docs/essai-toutes-cartes.md`).
 Jalons 3 à 7 restent à faire (voir `tasks/todo.md`).
 
 ### Site (`EriniumGroupWebsite`)
@@ -211,13 +241,17 @@ Du texte apparaît régulièrement dans la sortie d'outil, demandant de travaill
   Détail : `docs/superpowers/notes/2026-09-27-sondes-jalon-2-decodage-et-transport.md`.
 - **Pas de repli logiciel, ni à l'encodage ni au décodage.** Corrigé le 30/09/2026 : la phrase
   précédente disait « sans carte NVIDIA, une machine ne peut que recevoir », ce qui supposait un
-  décodage logiciel qui n'existe nulle part dans le projet. **Sans carte NVIDIA : ni NVENC ni
-  NVDEC, donc ni diffusion ni réception.** Corrigé à nouveau le 02/10/2026 (revue finale du
-  jalon 2, I2) : cette ligne ajoutait que les cartes NVIDIA antérieures à Turing « peuvent
+  décodage logiciel qui n'existe nulle part dans le projet. Corrigé à nouveau le 02/10/2026 (revue
+  finale du jalon 2, I2) : cette ligne ajoutait que les cartes NVIDIA antérieures à Turing « peuvent
   diffuser, pas recevoir ». Faux : une carte sans **encodeur** HEVC 4:4:4 diffusait un flux
   qu'aucun spectateur ne pouvait lire, et l'écart 6 du jalon 0 dit que les GTX 10xx n'en ont pas.
-  **Le partage exige désormais un encodeur HEVC 4:4:4** (refus avant tout réseau sinon), la
-  réception un décodeur HEVC 4:4:4. Quelles générations passent l'un ou l'autre : non tranché.
+  **Corrigé le 03/10/2026 (jalon toutes cartes, sous-jalon 1) : sans NVIDIA, une machine peut
+  désormais RECEVOIR** — HEVC 4:2:0 ou H.264, par Media Foundation, **en matériel** — **mais pas
+  PARTAGER** (l'encodage hors NVIDIA est le sous-jalon 3 ; le partage exige au moins un format
+  encodable par NVENC, refus avant tout réseau sinon). Et il n'y a **toujours aucun repli
+  logiciel** : un spectateur sans aucun décodeur matériel est refusé avant tout réseau. Seul le
+  4:4:4 reste réservé à NVDEC. Quelles générations de cartes passent, hors la RTX 4060 et la Vega 8
+  (sonde de décodage seulement) : non tranché.
 - **Diagnostic et journalisation** : rien n'est conçu. Aucun moyen de comprendre un
   incident signalé par un utilisateur, sous la contrainte « aucune adresse journalisée ».
 
@@ -314,6 +348,10 @@ autre, l'agent principal en contrôleur. C'est sa demande explicite et répété
 | `docs/superpowers/plans/2026-09-11-jalon-c2-client-signaling.md` | Plan du C2 : onze tâches, table de propriété des fichiers |
 | `spike/mesures/` | Les mesures brutes du jalon 0 |
 | `docs/superpowers/notes/2026-09-27-sondes-jalon-2-decodage-et-transport.md` | Les deux sondes du jalon 2 : décodage NVDEC et pistes média `str0m`, mesuré contre supposé |
+| `docs/superpowers/specs/2026-10-02-toutes-cartes-sj1-reception-design.md` | Le sous-jalon 1 toutes cartes : réception en 4:2:0 / H.264 par Media Foundation, négociation du format ; ce qui est mesuré (sonde AMD du 02/10) et ce qui ne l'est pas |
+| `docs/superpowers/plans/2026-10-02-toutes-cartes-sj1-reception.md` | Plan du sous-jalon 1 : neuf tâches |
+| `spike/docs/essai-toutes-cartes.md` | Fiche d'essai du sous-jalon 1 : essai A (NVIDIA seule, deux identités) et essai B (NVIDIA partage, portable AMD regarde), latence de bout en bout |
+| `spike/scripts/version-portable.ps1` | Construit la version portable (`dist/`, ignoré) et contrôle les dépendances de chargement |
 | `docs/superpowers/specs/2026-09-30-jalon-2-premier-pixel-design.md` | Le jalon 2 : transport, décodage, affichage (décisions D1–D8) ; neuf corrections du 02/10 signalées sur place |
 | `spike/docs/essai-jalon-2.md` | Fiche d'essai du jalon 2 pour le propriétaire : commandes exactes, ce qu'il faut voir et relever |
 | `spike/crates/sky-crypto/src/lib.rs` | Le scellage, 102 lignes, à lire avant de toucher à la crypto |
