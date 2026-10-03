@@ -9,15 +9,13 @@ use std::time::{Duration, Instant};
 
 use sky_compte::{deposer, relever, resoudre_ami, Ami, Coffre, Config, ErreurCompte, Etat};
 use sky_crypto::Identity;
-use sky_decode::{
-    sonder_decodage, CodecMf, Decodeur, DecodeurMf, ErreurDecodeur, ImageDecodee, ImageMf,
-};
+use sky_decode::{sonder_decodage, Decodeur, DecodeurMf, ErreurDecodeur, ImageDecodee, ImageMf};
 use sky_net::{ErreurEnvoi, FormatVideo, LinkEvent, MessageControle, PeerLink};
 use sky_rendu::{EtatVisionnage, EvenementFenetre, Fenetre, ImageAAfficher};
 
 use crate::arret::{synchroniser_sauf_arret, Arret, ErreurAttente, HorlogeArretable};
 use crate::etablissement::{etablir, Etablissement};
-use crate::formats::{formats_a_offrir, formats_decodables};
+use crate::formats::{codec_mf_de, formats_a_offrir, formats_decodables};
 use crate::evenement::{
     Bilan, BilanReception, ErreurPartage, ErreurVisionnage, Evenement, Fin, Mesures,
     MesuresVisionnage,
@@ -620,6 +618,35 @@ pub struct ParametresSpectateur<'a> {
     pub formats_imposes: Option<Vec<FormatVideo>>,
 }
 
+/// Les formats à offrir, ou la raison pour laquelle il n'y en a aucun.
+///
+/// Deux refus distincts, car le texte de `AucunDecodeur` (« cette machine ne
+/// décode aucun format ») serait faux pour le second : une machine qui ne
+/// décode rien, et une machine qui décode mais dont `--format` (réservé à
+/// `sky-probe view`) n'en laisse aucun.
+fn formats_de_l_offre(
+    decodables: Vec<FormatVideo>,
+    imposes: Option<&[FormatVideo]>,
+) -> Result<Vec<FormatVideo>, ErreurPartage> {
+    if decodables.is_empty() {
+        return Err(ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(
+            ErreurDecodeur::AucunDecodeur,
+        )));
+    }
+    let libelles = |formats: &[FormatVideo]| {
+        formats.iter().map(|f| f.libelle()).collect::<Vec<_>>().join(", ")
+    };
+    let offerts = formats_a_offrir(decodables.clone(), imposes);
+    if offerts.is_empty() {
+        return Err(ErreurPartage::Autre(anyhow::anyhow!(
+            "aucun des formats imposés n'est décodable ici : imposés {}, décodables {}",
+            libelles(imposes.unwrap_or_default()),
+            libelles(&decodables)
+        )));
+    }
+    Ok(offerts)
+}
+
 pub fn regarder(
     config: &Config,
     coffre: &Coffre,
@@ -640,15 +667,10 @@ pub fn regarder(
     // La sonde ne garde rien d'ouvert : le décodeur réel naît après la connexion,
     // sur le périphérique de la fenêtre (Media Foundation l'exige). Après la
     // vérification d'appareil, qui est locale et donne un message plus utile.
-    let formats = formats_a_offrir(
+    let formats = formats_de_l_offre(
         formats_decodables(&sonder_decodage(LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)),
         p.formats_imposes.as_deref(),
-    );
-    if formats.is_empty() {
-        return Err(ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(
-            ErreurDecodeur::AucunDecodeur,
-        )));
-    }
+    )?;
     // L'identité DURABLE : c'est pour sa clé d'annuaire que l'hôte scelle
     // l'enveloppe de sa réponse. La clé de l'offre, elle, est éphémère.
     let identite = coffre.identite().map_err(ErreurPartage::Compte)?;
@@ -714,10 +736,10 @@ pub fn regarder(
         return Ok(Fin::AucunFormatCommun);
     };
 
-    // Ouvert APRÈS la connexion, comme le fichier de `view` au C2 : jamais de
-    // fichier vide laissé par une négociation ratée.
-    let puits = ouvrir_puits()?;
-    recevoir(&mut link, format, &ami.discord_name, puits, p.duree_max, arret, evenements)
+    // Le puits (fichier de `view`) n'est PAS ouvert ici : `recevoir` l'ouvre une
+    // fois la fenêtre et le décodeur obtenus, pour qu'un échec de l'un ou
+    // l'autre ne laisse pas de fichier vide (comme au C2 pour la négociation).
+    recevoir(&mut link, format, &ami.discord_name, ouvrir_puits, p.duree_max, arret, evenements)
 }
 
 /// Ouvre la fenêtre, construit le décodeur du format négocié, puis passe la
@@ -737,7 +759,7 @@ fn recevoir(
     link: &mut PeerLink,
     format: FormatVideo,
     nom_de_l_hote: &str,
-    puits: Option<Puits>,
+    ouvrir_puits: impl FnOnce() -> anyhow::Result<Option<Puits>>,
     duree_max: Option<Duration>,
     arret: &Arret,
     evenements: &mut dyn FnMut(Evenement),
@@ -749,15 +771,18 @@ fn recevoir(
     )?;
     evenements(Evenement::Format(format));
     let ouverture = |e| ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(e));
-    match format {
-        FormatVideo::Hevc444 => {
+    // Le puits s'ouvre APRÈS le décodeur : un échec de la fenêtre ou du décodeur
+    // ne laisse aucun fichier vide.
+    match codec_mf_de(format) {
+        None => {
             let decodeur = Decodeur::nouveau(LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE).map_err(ouverture)?;
+            let puits = ouvrir_puits()?;
             boucle(link, Visionnage::nouveau(decodeur, fenetre, Instant::now()), puits, duree_max, arret, evenements)
         }
-        FormatVideo::Hevc420 | FormatVideo::H264 => {
-            let codec = if format == FormatVideo::H264 { CodecMf::H264 } else { CodecMf::Hevc };
+        Some(codec) => {
             let decodeur = DecodeurMf::nouveau(codec, fenetre.appareil(), LARGEUR_ANNONCEE, HAUTEUR_ANNONCEE)
                 .map_err(ouverture)?;
+            let puits = ouvrir_puits()?;
             boucle(link, Visionnage::nouveau(decodeur, fenetre, Instant::now()), puits, duree_max, arret, evenements)
         }
     }
@@ -1550,5 +1575,101 @@ mod tests {
         assert_eq!(trouver_ami(&etat, &Designation::Identifiant(7)).unwrap().discord_name, "bob");
         assert!(trouver_ami(&etat, &Designation::Texte("7")).is_err());
         assert!(trouver_ami(&etat, &Designation::Identifiant(99)).is_err());
+    }
+
+    /// Un décodeur et un afficheur qui consignent leur destruction.
+    struct TemoinDecodeur(std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>);
+    struct TemoinAfficheur(std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>);
+
+    impl Drop for TemoinDecodeur {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("décodeur");
+        }
+    }
+    impl Drop for TemoinAfficheur {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push("afficheur");
+        }
+    }
+    impl Decodage for TemoinDecodeur {
+        type Image = crate::doublure::ImageFactice;
+        fn decoder(
+            &mut self,
+            _unite: &[u8],
+            _horodatage_ms: u64,
+        ) -> Result<Option<Self::Image>, ErreurDecodeur> {
+            Ok(None)
+        }
+    }
+    impl Afficheur for TemoinAfficheur {
+        fn afficher(&mut self, _image: &dyn ImageAAfficher) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn afficher_etat(&mut self, _etat: EtatVisionnage) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn evenements(&mut self) -> Vec<EvenementFenetre> {
+            Vec::new()
+        }
+        fn basculer_plein_ecran(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn le_decodeur_tombe_avant_l_afficheur() {
+        // Le décodeur Media Foundation est bâti sur le périphérique D3D11 de la
+        // fenêtre : détruit APRÈS elle, il libérerait des ressources d'un
+        // périphérique déjà parti. Rust détruit les champs dans l'ordre de leur
+        // déclaration ; ce test verrouille celui de `Visionnage`.
+        let journal = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let v = Visionnage::nouveau(
+            TemoinDecodeur(journal.clone()),
+            TemoinAfficheur(journal.clone()),
+            Instant::now(),
+        );
+        drop(v);
+        assert_eq!(*journal.borrow(), vec!["décodeur", "afficheur"]);
+    }
+
+    #[test]
+    fn une_machine_qui_ne_decode_rien_rend_aucun_decodeur() {
+        let erreur = formats_de_l_offre(Vec::new(), None).unwrap_err();
+        assert!(
+            matches!(
+                erreur,
+                ErreurPartage::Visionnage(ErreurVisionnage::Ouverture(ErreurDecodeur::AucunDecodeur))
+            ),
+            "{erreur:?}"
+        );
+    }
+
+    #[test]
+    fn un_format_impose_non_decodable_n_accuse_pas_la_machine() {
+        // Le portable ne décode que le 4:2:0 ; `--format hevc444` ne doit pas
+        // se lire « aucun décodeur ».
+        let erreur = formats_de_l_offre(
+            vec![FormatVideo::Hevc420, FormatVideo::H264],
+            Some(&[FormatVideo::Hevc444]),
+        )
+        .unwrap_err();
+        match erreur {
+            ErreurPartage::Autre(e) => {
+                let texte = e.to_string();
+                assert!(texte.contains("formats imposés"), "{texte}");
+                assert!(texte.contains(FormatVideo::Hevc444.libelle()), "{texte}");
+            }
+            autre => panic!("attendu une erreur explicite, obtenu {autre:?}"),
+        }
+    }
+
+    #[test]
+    fn des_formats_decodables_et_imposes_donnent_l_offre() {
+        let offre = formats_de_l_offre(
+            vec![FormatVideo::Hevc420, FormatVideo::H264],
+            Some(&[FormatVideo::H264]),
+        )
+        .unwrap();
+        assert_eq!(offre, vec![FormatVideo::H264]);
     }
 }

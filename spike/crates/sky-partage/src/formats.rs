@@ -3,7 +3,7 @@
 //! Un seul endroit, pour l'hôte comme pour le spectateur : deux traductions
 //! écrites à deux endroits finiraient par diverger.
 
-use sky_decode::Decodables;
+use sky_decode::{CodecMf, Decodables};
 use sky_encode::Codec;
 use sky_net::FormatVideo;
 
@@ -23,6 +23,17 @@ pub fn codec_de(format: FormatVideo) -> Codec {
         FormatVideo::Hevc444 => Codec::Hevc444,
         FormatVideo::Hevc420 => Codec::Hevc420,
         FormatVideo::H264 => Codec::H264_420,
+    }
+}
+
+/// Le codec Media Foundation qui décode un format, ou `None` quand c'est NVDEC
+/// (HEVC 4:4:4, que Media Foundation ne décode pas). Une seule table pour le
+/// choix du moteur du spectateur : `recevoir` s'y fie.
+pub fn codec_mf_de(format: FormatVideo) -> Option<CodecMf> {
+    match format {
+        FormatVideo::Hevc444 => None,
+        FormatVideo::Hevc420 => Some(CodecMf::Hevc),
+        FormatVideo::H264 => Some(CodecMf::H264),
     }
 }
 
@@ -68,6 +79,21 @@ mod tests {
     #[test]
     fn h264_444_et_av1_ne_sont_pas_transmissibles() {
         assert!(formats_encodables(&[Codec::H264_444, Codec::Av1_420]).is_empty());
+    }
+
+    #[test]
+    fn le_hevc_444_se_decode_par_nvdec_pas_par_media_foundation() {
+        assert_eq!(codec_mf_de(FormatVideo::Hevc444), None);
+    }
+
+    #[test]
+    fn le_hevc_420_se_decode_par_media_foundation_en_hevc() {
+        assert_eq!(codec_mf_de(FormatVideo::Hevc420), Some(CodecMf::Hevc));
+    }
+
+    #[test]
+    fn le_h264_se_decode_par_media_foundation_en_h264() {
+        assert_eq!(codec_mf_de(FormatVideo::H264), Some(CodecMf::H264));
     }
 
     #[test]
