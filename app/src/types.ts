@@ -71,6 +71,8 @@ export type PartageVue =
       /** `null` quand rien ne le mesure — aujourd'hui toujours, côté hôte. */
       rttMs: number | null;
       ecran: number;
+      /** Libellé du format négocié, fabriqué par le cœur ; `null` avant l'événement. */
+      format: string | null;
     }
   | { etat: "demande"; ami: string; debutMs: number }
   | {
@@ -83,6 +85,8 @@ export type PartageVue =
       latenceDecodageMs: number;
       imagesAbandonnees: number;
       depuisMs: number;
+      /** Libellé du format négocié, fabriqué par le cœur ; `null` avant l'événement. */
+      format: string | null;
     }
   | { etat: "termine"; fin: FinVue };
 

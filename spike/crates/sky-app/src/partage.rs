@@ -256,19 +256,36 @@ pub fn appliquer(
                 debit_mbps: 0.0,
                 rtt_ms: None,
                 ecran: *ecran,
+                format: None,
             })
         }
-        (PartageVue::Diffuse { spectateur, ecran, .. }, Evenement::Connecte { .. }) => {
+        (PartageVue::Diffuse { spectateur, ecran, format, .. }, Evenement::Connecte { .. }) => {
             Some(PartageVue::Diffuse {
                 spectateur: spectateur.clone(),
                 depuis_ms: maintenant_ms,
                 debit_mbps: 0.0,
                 rtt_ms: None,
                 ecran: *ecran,
+                format: format.clone(),
             })
         }
+        // Côté hôte, la vue `Diffuse` naît de `DemandeRecue`, qui PRÉCÈDE
+        // `Connecte`, `Format` puis `Diffusion` (`hote.rs`, l.310-431) : le
+        // format se pose donc sur une vue déjà là, et `Diffusion` (qui ne change
+        // rien à la vue) ne peut pas l'effacer.
         (
-            PartageVue::Diffuse { spectateur, depuis_ms, ecran, .. },
+            PartageVue::Diffuse { spectateur, depuis_ms, debit_mbps, rtt_ms, ecran, .. },
+            Evenement::Format(f),
+        ) => Some(PartageVue::Diffuse {
+            spectateur: spectateur.clone(),
+            depuis_ms: *depuis_ms,
+            debit_mbps: *debit_mbps,
+            rtt_ms: *rtt_ms,
+            ecran: *ecran,
+            format: Some(f.libelle().to_string()),
+        }),
+        (
+            PartageVue::Diffuse { spectateur, depuis_ms, ecran, format, .. },
             Evenement::Mesures(Mesures::Envoi { debit_mbps, rtt_ms, .. }),
         ) => Some(PartageVue::Diffuse {
             spectateur: spectateur.clone(),
@@ -276,6 +293,7 @@ pub fn appliquer(
             debit_mbps: *debit_mbps,
             rtt_ms: *rtt_ms,
             ecran: *ecran,
+            format: format.clone(),
         }),
         (PartageVue::Demande { ami, .. }, Evenement::DemandeEnvoyee { .. }) => {
             Some(PartageVue::Demande { ami: ami.clone(), debut_ms: maintenant_ms })
@@ -290,10 +308,37 @@ pub fn appliquer(
                 latence_decodage_ms: 0.0,
                 images_abandonnees: 0,
                 depuis_ms: maintenant_ms,
+                format: None,
             })
         }
+        // Côté spectateur, `Connecte` (qui crée `Regarde`) précède `Format`
+        // (`spectateur.rs`, l.731 puis l.772).
         (
-            PartageVue::Regarde { ami, connecte_en_s, depuis_ms, .. },
+            PartageVue::Regarde {
+                ami,
+                connecte_en_s,
+                debit_mbps,
+                images_par_s,
+                gigue_ms,
+                latence_decodage_ms,
+                images_abandonnees,
+                depuis_ms,
+                ..
+            },
+            Evenement::Format(f),
+        ) => Some(PartageVue::Regarde {
+            ami: ami.clone(),
+            connecte_en_s: *connecte_en_s,
+            debit_mbps: *debit_mbps,
+            images_par_s: *images_par_s,
+            gigue_ms: *gigue_ms,
+            latence_decodage_ms: *latence_decodage_ms,
+            images_abandonnees: *images_abandonnees,
+            depuis_ms: *depuis_ms,
+            format: Some(f.libelle().to_string()),
+        }),
+        (
+            PartageVue::Regarde { ami, connecte_en_s, depuis_ms, format, .. },
             Evenement::Mesures(Mesures::Reception(m)),
         ) => Some(PartageVue::Regarde {
             ami: ami.clone(),
@@ -306,6 +351,7 @@ pub fn appliquer(
             latence_decodage_ms: f64::from(m.latence_decodage_ms),
             images_abandonnees: m.images_abandonnees,
             depuis_ms: *depuis_ms,
+            format: format.clone(),
         }),
         _ => None,
     }
@@ -442,8 +488,167 @@ mod tests {
                 depuis_ms: 5_000,
                 debit_mbps: 0.0,
                 rtt_ms: None,
-                ecran: 1
+                ecran: 1,
+                format: None,
             })
+        );
+    }
+
+    fn diffuse_sans_format() -> PartageVue {
+        PartageVue::Diffuse {
+            spectateur: Some("Bob".into()),
+            depuis_ms: 1,
+            debit_mbps: 0.0,
+            rtt_ms: None,
+            ecran: 0,
+            format: None,
+        }
+    }
+
+    fn regarde_sans_format() -> PartageVue {
+        PartageVue::Regarde {
+            ami: "Bob".into(),
+            connecte_en_s: 0.6,
+            debit_mbps: 0.0,
+            images_par_s: 0,
+            gigue_ms: 0.0,
+            latence_decodage_ms: 0.0,
+            images_abandonnees: 0,
+            depuis_ms: 9_000,
+            format: None,
+        }
+    }
+
+    /// La même vue, avec un format déjà négocié (`Regarde` et `Diffuse` seulement).
+    fn avec_format(vue: PartageVue, libelle: &str) -> PartageVue {
+        match vue {
+            PartageVue::Regarde { ami, connecte_en_s, debit_mbps, images_par_s, gigue_ms,
+                latence_decodage_ms, images_abandonnees, depuis_ms, .. } => PartageVue::Regarde {
+                ami, connecte_en_s, debit_mbps, images_par_s, gigue_ms, latence_decodage_ms,
+                images_abandonnees, depuis_ms, format: Some(libelle.into()),
+            },
+            PartageVue::Diffuse { spectateur, depuis_ms, debit_mbps, rtt_ms, ecran, .. } => {
+                PartageVue::Diffuse {
+                    spectateur, depuis_ms, debit_mbps, rtt_ms, ecran, format: Some(libelle.into()),
+                }
+            }
+            autre => panic!("pas de format à poser sur {autre:?}"),
+        }
+    }
+
+    fn mesure_de_reception() -> Evenement {
+        Evenement::Mesures(Mesures::Reception(MesuresVisionnage {
+            images_par_seconde: 60.0,
+            debit_kbps: 8_000,
+            latence_decodage_ms: 1.0,
+            images_abandonnees: 0,
+            gigue_ms: 2.0,
+        }))
+    }
+
+    fn mesure_d_envoi() -> Evenement {
+        Evenement::Mesures(Mesures::Envoi {
+            debit_mbps: 8.0,
+            cible_mbps: 30.0,
+            images_sautees: 0,
+            rtt_ms: None,
+        })
+    }
+
+    #[test]
+    fn le_format_negocie_s_inscrit_dans_la_vue_du_spectateur() {
+        let suivant =
+            appliquer(&regarde_sans_format(), &Evenement::Format(FormatVideo::H264), 0, None)
+                .expect("vue");
+        assert!(matches!(suivant, PartageVue::Regarde { format: Some(ref f), .. } if f == "H.264"));
+    }
+
+    #[test]
+    fn le_format_negocie_s_inscrit_dans_la_vue_de_l_hote() {
+        let suivant =
+            appliquer(&diffuse_sans_format(), &Evenement::Format(FormatVideo::Hevc420), 0, None)
+                .expect("vue");
+        assert!(
+            matches!(suivant, PartageVue::Diffuse { format: Some(ref f), .. } if f == "HEVC 4:2:0")
+        );
+    }
+
+    #[test]
+    fn les_mesures_suivantes_conservent_le_format() {
+        // Neutralisation : remplacer `format: format.clone()` par `format: None`
+        // dans l'une des deux transitions de mesures — le test correspondant rougit.
+        let regarde = avec_format(regarde_sans_format(), "H.264");
+        let Some(PartageVue::Regarde { format, .. }) =
+            appliquer(&regarde, &mesure_de_reception(), 1, None)
+        else {
+            panic!("une mesure de réception met à jour la vue");
+        };
+        assert_eq!(format.as_deref(), Some("H.264"));
+
+        let diffuse = avec_format(diffuse_sans_format(), "HEVC 4:4:4");
+        let Some(PartageVue::Diffuse { format, .. }) =
+            appliquer(&diffuse, &mesure_d_envoi(), 1, None)
+        else {
+            panic!("une mesure d'envoi met à jour la vue");
+        };
+        assert_eq!(format.as_deref(), Some("HEVC 4:4:4"));
+    }
+
+    /// L'ordre réel de l'hôte (`hote.rs` : `DemandeRecue`, `Connecte`, `Format`,
+    /// `Diffusion`, puis les mesures) rejoué de bout en bout : la vue finale
+    /// porte le format. Un `Diffusion` qui reconstruirait la vue sans le
+    /// recopier, ou un `Format` posé avant la naissance de `Diffuse`, le perdrait.
+    #[test]
+    fn la_suite_d_evenements_de_l_hote_laisse_le_format_dans_la_vue() {
+        let mut vue = PartageVue::Disponible { debut_ms: 0, fenetre_s: 1800, ecran: 0 };
+        let suite = [
+            Evenement::DemandeRecue {
+                expediteur_device_id: 42,
+                apres: Duration::from_secs(3),
+                synchronisations: 2,
+            },
+            Evenement::Connecte { en: Duration::from_millis(400), depuis_le_lancement: None },
+            Evenement::Format(FormatVideo::Hevc444),
+            Evenement::Diffusion {
+                largeur: 2560,
+                hauteur: 1440,
+                codec: sky_encode::Codec::Hevc444,
+                plancher_mbps: 4,
+                plafond_mbps: 30,
+            },
+            mesure_d_envoi(),
+        ];
+        for (i, evenement) in suite.iter().enumerate() {
+            if let Some(suivante) = appliquer(&vue, evenement, i as u64, Some(&etat_avec_bob())) {
+                vue = suivante;
+            }
+        }
+        assert!(
+            matches!(vue, PartageVue::Diffuse { format: Some(ref f), .. } if f == "HEVC 4:4:4"),
+            "vue finale : {vue:?}"
+        );
+    }
+
+    /// Même chose côté spectateur : `Connecte` crée `Regarde`, puis `Format`.
+    #[test]
+    fn la_suite_d_evenements_du_spectateur_laisse_le_format_dans_la_vue() {
+        let mut vue = PartageVue::Demande { ami: "Bob".into(), debut_ms: 0 };
+        let suite = [
+            Evenement::Connecte {
+                en: Duration::from_millis(600),
+                depuis_le_lancement: Some(Duration::from_secs(7)),
+            },
+            Evenement::Format(FormatVideo::H264),
+            mesure_de_reception(),
+        ];
+        for (i, evenement) in suite.iter().enumerate() {
+            if let Some(suivante) = appliquer(&vue, evenement, i as u64, None) {
+                vue = suivante;
+            }
+        }
+        assert!(
+            matches!(vue, PartageVue::Regarde { format: Some(ref f), .. } if f == "H.264"),
+            "vue finale : {vue:?}"
         );
     }
 
@@ -458,6 +663,7 @@ mod tests {
             debit_mbps: 0.0,
             rtt_ms: None,
             ecran: 0,
+            format: None,
         };
         let mesure = Evenement::Mesures(Mesures::Envoi {
             debit_mbps: 12.4,
@@ -503,6 +709,7 @@ mod tests {
                 latence_decodage_ms: 1.5,
                 images_abandonnees: 4,
                 depuis_ms: 9_000,
+                format: None,
             })
         );
     }

@@ -24,14 +24,15 @@ pub enum ErreurDecodeur {
     )]
     AucuneCarteNvidia(String),
 
-    /// Le texte ne dit RIEN de la capacité à partager, et c'est voulu : il
-    /// disait « cette machine peut partager un écran », ce que rien ne vérifie
-    /// ici — partager exige un ENCODEUR HEVC 4:4:4, que ce module ne sonde pas,
-    /// et le jalon 0 (écart 6) indique, sur base documentaire, que les cartes
-    /// qui ne décodent pas le 4:4:4 ne l'encodent pas non plus.
+    /// Le flux reçu, annoncé en 4:4:4, n'est pas décodable en 4:4:4 par NVDEC.
+    /// Depuis Media Foundation, cela ne veut PLUS dire que la machine ne peut
+    /// pas recevoir : elle peut recevoir en 4:2:0 ou en H.264. Le texte ne dit
+    /// rien non plus de la capacité à partager, que ce module ne sonde pas.
+    ///
+    /// Message à valider par le propriétaire.
     #[error(
-        "le décodeur de cette carte ne prend pas en charge le HEVC 4:4:4 : cette \
-         machine ne peut pas recevoir d'écran."
+        "le décodeur NVIDIA de cette machine ne décode pas ce flux en HEVC 4:4:4 : \
+         l'image reçue n'est pas au format annoncé."
     )]
     QuatreQuatreQuatreNonPris,
 

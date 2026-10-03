@@ -124,6 +124,9 @@ pub enum PartageVue {
         debit_mbps: f64,
         rtt_ms: Option<f64>,
         ecran: usize,
+        /// Libellé du format négocié (`FormatVideo::libelle`), `None` tant que
+        /// l'événement `Format` n'est pas arrivé. L'interface n'en fabrique aucun.
+        format: Option<String>,
     },
     /// Spectateur : demande envoyée, réponse attendue.
     Demande { ami: String, debut_ms: u64 },
@@ -141,6 +144,8 @@ pub enum PartageVue {
         /// de confiance, ou refusées par le décodeur (spec §8).
         images_abandonnees: u32,
         depuis_ms: u64,
+        /// Libellé du format négocié, `None` tant que `Format` n'est pas arrivé.
+        format: Option<String>,
     },
     Termine { fin: FinVue },
 }
@@ -198,13 +203,14 @@ mod tests {
             latence_decodage_ms: 1.5,
             images_abandonnees: 3,
             depuis_ms: 1,
+            format: Some("HEVC 4:2:0".into()),
         })
         .unwrap();
         assert_eq!(
             v,
             json!({"etat": "regarde", "ami": "bob", "connecteEnS": 0.5, "debitMbps": 12.0,
                    "imagesParS": 60, "gigueMs": 5.0, "latenceDecodageMs": 1.5,
-                   "imagesAbandonnees": 3, "depuisMs": 1})
+                   "imagesAbandonnees": 3, "depuisMs": 1, "format": "HEVC 4:2:0"})
         );
         // L'étiquette à chiffres est écrite à la main (`serde(rename)`) :
         // `rename_all` en aurait fait « sans_decodage444 ».
@@ -302,6 +308,7 @@ mod contrat_typescript {
                 debit_mbps: 12.0,
                 rtt_ms: Some(15.0),
                 ecran: 0,
+                format: Some("H.264".to_string()),
             },
             PartageVue::Demande { ami: "Bob".to_string(), debut_ms: 1 },
             PartageVue::Regarde {
@@ -313,6 +320,7 @@ mod contrat_typescript {
                 latence_decodage_ms: 1.5,
                 images_abandonnees: 0,
                 depuis_ms: 1,
+                format: None,
             },
             PartageVue::Termine { fin: FinVue::Arrete },
         ];
@@ -553,9 +561,11 @@ mod contrat_typescript {
             debit_mbps: 1.0,
             rtt_ms: None,
             ecran: 0,
+            format: None,
         })
         .unwrap();
         present_et_nul(&diffuse, "spectateur");
+        present_et_nul(&diffuse, "format");
         // I4 : un aller-retour non mesuré arrive `null`, jamais 0 ni absent —
         // l'interface en fait « non mesuré ».
         present_et_nul(&diffuse, "rttMs");

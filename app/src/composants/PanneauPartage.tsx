@@ -81,7 +81,10 @@ export function PanneauPartage({ instantane }: { instantane: Instantane }) {
               nom. « null regarde ton écran » serait une fuite de plomberie. */}
           <h2 className="font-titre text-2xl">{partage.spectateur ?? "Un ami"} regarde ton écran</h2>
           <dl className="flex gap-8">
-            <Mesure libelle="Depuis" valeur={duree(maintenant - partage.depuisMs)} />
+            {/* Le libellé est fabriqué par le cœur (`FormatVideo::libelle`) ;
+                `—` tant que l'événement `Format` n'est pas arrivé. */}
+            <Mesure libelle="Format" valeur={partage.format ?? "—"} />
+            <Mesure libelle="Depuis"valeur={duree(maintenant - partage.depuisMs)} />
             <Mesure libelle="Débit envoyé" valeur={`${decimale(partage.debitMbps)} Mbps`} />
             {/* Revue finale du jalon 2, I4 : l'hôte n'a plus aucune mesure
                 d'aller-retour depuis la piste média, et un 0 s'affichait
@@ -124,7 +127,8 @@ export function PanneauPartage({ instantane }: { instantane: Instantane }) {
             en plein écran ; la fermer arrête le visionnage. Rien n'est écrit sur le disque.
           </p>
           <dl className="flex gap-8">
-            <Mesure libelle="Débit reçu" valeur={`${decimale(partage.debitMbps)} Mbps`} />
+            <Mesure libelle="Format" valeur={partage.format ?? "—"} />
+            <Mesure libelle="Débit reçu"valeur={`${decimale(partage.debitMbps)} Mbps`} />
             {/* `imagesParS` est un entier côté cœur (`images_par_s: u64`) : pas
                 de décimale à séparer. Il compte les images REÇUES, y compris
                 celles écartées faute d'image clé — pas les images affichées.

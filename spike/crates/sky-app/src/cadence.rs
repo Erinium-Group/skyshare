@@ -85,7 +85,8 @@ mod tests {
                 depuis_ms: 0,
                 debit_mbps: 0.0,
                 rtt_ms: None,
-                ecran: 0
+                ecran: 0,
+                format: None
             }),
             Phase::EnCours
         );

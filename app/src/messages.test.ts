@@ -56,22 +56,25 @@ describe("les quatre échecs de la spec §4", () => {
  * rougit, et lui seul.
  */
 describe("les quatre messages du décodage, spec du jalon 2 §7, au mot près", () => {
-  it("aucune carte NVIDIA : ni partager ni recevoir", () => {
-    expect(messageDeFin({ cause: "sans_carte_nvidia" })).toBe(
-      "Cette machine n'a pas de carte graphique NVIDIA. SkyShare ne peut ni partager son écran ni en recevoir un sur cette machine.",
+  it("décodeur NVIDIA non chargé : ne dit plus que la machine ne peut pas recevoir", () => {
+    // Texte réécrit par le jalon « toutes cartes » (à valider par le
+    // propriétaire) : la réception ne dépend plus de NVIDIA, la cause ne
+    // survient plus qu'à l'ouverture de NVDEC après une sonde réussie.
+    const texte = messageDeFin({ cause: "sans_carte_nvidia" });
+    expect(texte).toBe(
+      "Le décodeur NVIDIA de cette machine n'a pas pu être chargé. Relance le visionnage.",
     );
+    expect(texte).not.toMatch(/ni partager/);
   });
 
-  it("carte sans décodage 4:4:4 : recevoir non, et rien n'est promis du partage", () => {
-    // Le texte de la spec promettait « peut partager un écran » : faux en
-    // général (le partage exige l'ENCODAGE HEVC 4:4:4, qu'aucun code ne vérifie
-    // ici). Corrigé le 02/10/2026 ; la seconde assertion garde la promesse
-    // retirée hors du texte.
+  it("flux reçu qui n'est pas au format annoncé : rien n'est dit de la machine", () => {
+    // Texte réécrit par le jalon « toutes cartes » (à valider par le
+    // propriétaire) : « cette machine ne peut pas recevoir » est devenu faux.
     const texte = messageDeFin({ cause: "sans_decodage_444" });
     expect(texte).toBe(
-      "Le décodeur de la carte graphique de cette machine ne prend pas en charge la couleur pleine résolution : SkyShare ne peut pas recevoir d'écran sur cette machine.",
+      "L'image reçue n'est pas au format annoncé. Relance le visionnage ; si cela se reproduit, demande à ton ami de relancer son partage.",
     );
-    expect(texte).not.toMatch(/peut partager/);
+    expect(texte).not.toMatch(/ne peut pas recevoir/);
   });
 
   it("décodeur refusé : fermer ce qui occupe la carte", () => {

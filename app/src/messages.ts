@@ -13,9 +13,12 @@ import type { FinVue } from "./types";
  * TROIS TEXTES N'EN VIENNENT PAS, tous ajoutés par la tâche 10 du jalon 2 et
  * signalés comme tels sur leur `case` : `partage_arrete`,
  * `resolution_trop_grande` et `decodage_interrompu`. Ils sont à valider par le
- * propriétaire. La liste complète des textes hors spec, celui du refus de
- * partager sans HEVC 4:4:4 compris (`noyau.rs`), est dans la spec du jalon 2,
- * §7.
+ * propriétaire. La liste complète des textes hors spec est dans la spec du
+ * jalon 2, §7 ; ceux du refus de partager sans format encodable
+ * (`MESSAGE_AUCUN_FORMAT`) et de recevoir sans décodeur
+ * (`MESSAGE_AUCUN_DECODEUR`) vivent dans `noyau.rs`. `sans_carte_nvidia` et
+ * `sans_decodage_444` ont été réécrits par le jalon « toutes cartes »
+ * (spec du 02/10/2026, §6), et ne sont donc plus ceux de la spec du jalon 2.
  *
  * ARBITRAGE 4 DU CONTRÔLEUR : l'interface ne FABRIQUE aucun message à partir de
  * données brutes. La seule cause qui porte du texte, `autre`, le tient du cœur,
@@ -62,15 +65,20 @@ export function messageDeFin(fin: FinVue): string {
     // détail de « pas de carte NVIDIA » vient d'une bibliothèque que Windows
     // peut traduire, et ne traverse jamais la frontière.
     case "sans_carte_nvidia":
-      return "Cette machine n'a pas de carte graphique NVIDIA. SkyShare ne peut ni partager son écran ni en recevoir un sur cette machine.";
+      // TEXTE RÉÉCRIT (jalon « toutes cartes », tâche 8), à valider par le
+      // propriétaire. Le texte de la spec §7 (« ni partager ni recevoir ») est
+      // devenu faux : la réception passe par Media Foundation et n'exige plus
+      // NVIDIA. Cette cause ne survient plus qu'à l'ouverture de NVDEC, après
+      // une sonde réussie.
+      return "Le décodeur NVIDIA de cette machine n'a pas pu être chargé. Relance le visionnage.";
     case "sans_decodage_444":
-      // TEXTE DE LA SPEC §7 CORRIGÉ le 02/10/2026 (revue finale du jalon 2,
-      // I2). Il promettait « cette machine peut partager un écran » : rien ne
-      // le vérifie à cet endroit — partager exige un ENCODEUR HEVC 4:4:4 —, et
-      // le jalon 0 (écart 6) dit, sur base documentaire, que les cartes sans
-      // décodage 4:4:4 ne l'encodent pas non plus. Le texte ne dit plus que ce
-      // qui est su : cette machine ne peut pas recevoir.
-      return "Le décodeur de la carte graphique de cette machine ne prend pas en charge la couleur pleine résolution : SkyShare ne peut pas recevoir d'écran sur cette machine.";
+      // TEXTE RÉÉCRIT (jalon « toutes cartes », tâche 8), à valider par le
+      // propriétaire. Il remplace celui de la spec §7, corrigé une première fois
+      // le 02/10/2026 (I2) et redevenu faux : « cette machine ne peut pas
+      // recevoir » ne l'est plus, un décodage 4:2:0 ou H.264 existe. La cause
+      // signifie désormais que le flux reçu, annoncé 4:4:4, n'est pas décodable
+      // en 4:4:4 par NVDEC — l'image n'est pas au format annoncé.
+      return "L'image reçue n'est pas au format annoncé. Relance le visionnage ; si cela se reproduit, demande à ton ami de relancer son partage.";
     case "decodeur_refuse":
       // Session refusée ou contexte CUDA perdu : deux causes, un message vrai
       // des deux.

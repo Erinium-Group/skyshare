@@ -2838,6 +2838,7 @@ mod tests {
             latence_decodage_ms: 1.5,
             images_abandonnees: 0,
             depuis_ms: 1,
+            format: None,
         });
         assert_eq!(c.noyau.phase(), Phase::EnCours);
         assert_eq!(c.noyau.connexion(), Err(MESSAGE_PENDANT_PARTAGE.to_string()));

@@ -122,7 +122,7 @@ describe("barre de partage", () => {
       <BarrePartage
         instantane={instantaneDeTest({
           ecrans: DEUX_ECRANS,
-          partage: { etat: "diffuse", spectateur: "Bob", depuisMs: Date.now(), debitMbps: 12.4, rttMs: 15, ecran: 1 },
+          partage: { etat: "diffuse", spectateur: "Bob", depuisMs: Date.now(), debitMbps: 12.4, rttMs: 15, ecran: 1, format: null },
         })}
       />,
     );
@@ -184,6 +184,7 @@ describe("panneau de partage", () => {
             latenceDecodageMs: 1.5,
             imagesAbandonnees: 0,
             depuisMs: Date.now(),
+            format: null,
           },
         })}
       />,
@@ -217,6 +218,7 @@ describe("panneau de partage", () => {
             latenceDecodageMs: 2.4,
             imagesAbandonnees: 17,
             depuisMs: Date.now(),
+            format: null,
           },
         })}
       />,
@@ -243,6 +245,7 @@ describe("panneau de partage", () => {
             latenceDecodageMs: 1.5,
             imagesAbandonnees: 0,
             depuisMs: Date.now(),
+            format: null,
           },
         })}
       />,
@@ -252,6 +255,70 @@ describe("panneau de partage", () => {
     // Les images reçues par seconde sont un entier côté cœur : aucune
     // décimale à séparer.
     expect(screen.getByText("107/s")).toBeInTheDocument();
+  });
+
+  it("le format négocié s'affiche tel que le cœur le rend, côté spectateur", () => {
+    // Le libellé vient du cœur (`FormatVideo::libelle`) : l'interface n'en
+    // fabrique aucun. Neutralisation : retirer la mesure « Format » du cas
+    // `regarde` — ce test rougit.
+    render(
+      <PanneauPartage
+        instantane={instantaneDeTest({
+          partage: {
+            etat: "regarde",
+            ami: "Bob",
+            connecteEnS: 0.6,
+            debitMbps: 12.4,
+            imagesParS: 107,
+            gigueMs: 5,
+            latenceDecodageMs: 1.5,
+            imagesAbandonnees: 0,
+            depuisMs: Date.now(),
+            format: "H.264",
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("Format")).toBeInTheDocument();
+    expect(screen.getByText("H.264")).toBeInTheDocument();
+  });
+
+  it("le format négocié s'affiche aussi côté hôte, et un tiret tient la place avant son annonce", () => {
+    // Neutralisation : retirer la mesure « Format » du cas `diffuse`, ou
+    // remplacer `?? "—"` par `?? ""` — l'un des deux tests rougit.
+    const { rerender } = render(
+      <PanneauPartage
+        instantane={instantaneDeTest({
+          partage: {
+            etat: "diffuse",
+            spectateur: "Bob",
+            depuisMs: Date.now(),
+            debitMbps: 12.4,
+            rttMs: null,
+            ecran: 0,
+            format: "HEVC 4:2:0",
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("Format")).toBeInTheDocument();
+    expect(screen.getByText("HEVC 4:2:0")).toBeInTheDocument();
+    rerender(
+      <PanneauPartage
+        instantane={instantaneDeTest({
+          partage: {
+            etat: "diffuse",
+            spectateur: "Bob",
+            depuisMs: Date.now(),
+            debitMbps: 12.4,
+            rttMs: null,
+            ecran: 0,
+            format: null,
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("—")).toBeInTheDocument();
   });
 
   it("un refus d'`arreter` s'affiche DANS LE PANNEAU, en état regarde", async () => {
@@ -276,6 +343,7 @@ describe("panneau de partage", () => {
             latenceDecodageMs: 1.5,
             imagesAbandonnees: 0,
             depuisMs: Date.now(),
+            format: null,
           },
         })}
       />,
@@ -315,6 +383,7 @@ describe("panneau de partage", () => {
             latenceDecodageMs: 1.5,
             imagesAbandonnees: 0,
             depuisMs: Date.now(),
+            format: null,
           },
         })}
       />,
@@ -338,7 +407,7 @@ describe("panneau de partage", () => {
     render(
       <PanneauPartage
         instantane={instantaneDeTest({
-          partage: { etat: "diffuse", spectateur: "Bob", depuisMs: Date.now(), debitMbps: 12.4, rttMs: 115.4, ecran: 0 },
+          partage: { etat: "diffuse", spectateur: "Bob", depuisMs: Date.now(), debitMbps: 12.4, rttMs: 115.4, ecran: 0, format: null },
         })}
       />,
     );
@@ -356,7 +425,7 @@ describe("panneau de partage", () => {
     render(
       <PanneauPartage
         instantane={instantaneDeTest({
-          partage: { etat: "diffuse", spectateur: "Bob", depuisMs: Date.now(), debitMbps: 12.4, rttMs: null, ecran: 0 },
+          partage: { etat: "diffuse", spectateur: "Bob", depuisMs: Date.now(), debitMbps: 12.4, rttMs: null, ecran: 0, format: null },
         })}
       />,
     );
@@ -370,7 +439,7 @@ describe("panneau de partage", () => {
     render(
       <PanneauPartage
         instantane={instantaneDeTest({
-          partage: { etat: "diffuse", spectateur: null, depuisMs: Date.now(), debitMbps: 1, rttMs: 20, ecran: 0 },
+          partage: { etat: "diffuse", spectateur: null, depuisMs: Date.now(), debitMbps: 1, rttMs: 20, ecran: 0, format: null },
         })}
       />,
     );
@@ -449,6 +518,7 @@ describe("on ne reçoit pas non plus sans le savoir", () => {
             latenceDecodageMs: 1.5,
             imagesAbandonnees: 0,
             depuisMs: Date.now(),
+            format: null,
           },
         })}
       />,
@@ -493,6 +563,7 @@ describe("on ne reçoit pas non plus sans le savoir", () => {
             latenceDecodageMs: 1.5,
             imagesAbandonnees: 0,
             depuisMs: Date.now(),
+            format: null,
           },
         })}
       />,
@@ -512,6 +583,7 @@ describe("on ne reçoit pas non plus sans le savoir", () => {
         latenceDecodageMs: 1.5,
         imagesAbandonnees: 0,
         depuisMs: Date.now(),
+        format: null,
       },
     });
     render(<App />);
@@ -561,6 +633,7 @@ describe("le temps restant s'écoule", () => {
         latenceDecodageMs: 1.5,
         imagesAbandonnees: 0,
         depuisMs: Date.now(),
+        format: null,
       },
     });
     render(

@@ -74,9 +74,13 @@ pub enum EncodeError {
     #[error("aucun GPU NVIDIA utilisable : {0}")]
     Cuda(#[from] cudarc::driver::DriverError),
 
+    // Texte à valider par le propriétaire. Il ne parle que du PARTAGE : depuis
+    // Media Foundation, une machine sans NVIDIA peut encore recevoir (HEVC 4:2:0
+    // ou H.264), et le texte de la spec du jalon 0 (« ni partager ni recevoir »)
+    // est devenu faux.
     #[error(
-        "Cette machine n'a pas de carte graphique NVIDIA. SkyShare ne peut ni \
-         partager son écran ni en recevoir un sur cette machine.\n\n\
+        "Cette machine n'a pas de carte graphique NVIDIA : SkyShare ne peut pas \
+         partager son écran depuis cette machine.\n\n\
          Détail technique : {0}"
     )]
     Dll(#[from] libloading::Error),
@@ -279,16 +283,20 @@ mod tests {
     }
 
     #[test]
-    fn le_message_d_absence_de_carte_est_celui_de_la_spec() {
+    fn le_message_d_absence_de_carte_ne_parle_que_du_partage() {
+        // Le texte n'est plus celui de la spec du jalon 0 (qui ajoutait « ni en
+        // recevoir un ») : la réception ne dépend plus de NVIDIA. À valider par
+        // le propriétaire.
         let erreur = verifier_bibliotheque("absente.dll").expect_err("doit être refusée");
         let message = erreur.to_string();
         assert!(
             message.contains(
-                "Cette machine n'a pas de carte graphique NVIDIA. SkyShare ne peut ni \
-                 partager son écran ni en recevoir un sur cette machine."
+                "Cette machine n'a pas de carte graphique NVIDIA : SkyShare ne peut pas \
+                 partager son écran depuis cette machine."
             ),
             "{message}"
         );
+        assert!(!message.contains("recevoir"), "{message}");
         assert!(message.contains("Détail technique :"), "{message}");
         assert!(!message.contains("x264"), "{message}");
     }
