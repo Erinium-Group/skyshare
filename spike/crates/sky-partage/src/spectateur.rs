@@ -70,11 +70,22 @@ const ATTENTE_IMAGE_CLE_MAX: Duration = Duration::from_secs(10);
 /// toute la chaîne. On ne dort QUE sur `Idle` — tant que le lien a quelque chose
 /// à rendre, on le vide sans attendre.
 ///
-/// **Sous Windows, une milliseconde demandée dure plutôt ~15 ms** (résolution
-/// par défaut de l'ordonnanceur, mesuré à la tâche 5). Une unité d'accès arrivée
-/// au début d'une pause peut donc attendre jusqu'à ~15 ms avant d'être décodée.
-/// **L'effet sur la latence d'affichage n'est pas mesuré** — à mesurer à l'essai
-/// réel à deux machines.
+/// **Cette pause n'est sûre que parce que `Idle` veut dire « socket vide ».**
+/// Jusqu'au 03/10/2026, `PeerLink::poll` lisait un seul datagramme par appel :
+/// la lecture était alors plafonnée à un datagramme par pause, la file du socket
+/// débordait, et l'essai réel n'a vu passer que 0,3 Mbps d'un flux de 14,9 Mbps
+/// livré par le réseau. `poll` lit désormais tout ce qui attend avant de rendre
+/// `Idle` (voir sa documentation) ; reproduit puis verrouillé en boucle locale
+/// par `sky-net`, `un_flux_de_15_mbps_arrive_entier_malgre_la_pause_sur_idle`
+/// (avec cette même pause, et 15 ms : 181 images sur 181).
+///
+/// **Durée réelle d'une milliseconde demandée : ~1,5 ms** — médiane de 200
+/// appels, trois séries, mesurée le 03/10/2026 sur la machine de développement
+/// (Windows 11, Rust 1.94). Ce commentaire disait « ~15 ms (mesuré à la tâche
+/// 5) » : non reproduit ici, et la valeur peut dépendre de la machine — **elle
+/// n'est pas mesurée sur le portable spectateur.** Une unité d'accès arrivée au
+/// début d'une pause attend au plus cette durée avant d'être lue. **L'effet sur
+/// la latence d'affichage n'est pas mesuré.**
 const PAUSE_SUR_INACTIVITE: Duration = Duration::from_millis(1);
 
 /// Ce que le spectateur annonce au décodeur comme taille maximale.
@@ -846,8 +857,9 @@ fn boucle<D: Decodage, A: Afficheur>(
             )));
         }
 
-        // Sur `Idle` seulement : voir `PAUSE_SUR_INACTIVITE` (~15 ms réels sous
-        // Windows, effet sur la latence non mesuré).
+        // Sur `Idle` seulement, c'est-à-dire socket vide : voir
+        // `PAUSE_SUR_INACTIVITE` (~1,5 ms réelles mesurées sur la machine de
+        // développement, effet sur la latence non mesuré).
         if inactif {
             std::thread::sleep(PAUSE_SUR_INACTIVITE);
         }

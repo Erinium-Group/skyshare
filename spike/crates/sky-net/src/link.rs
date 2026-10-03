@@ -70,10 +70,13 @@ pub enum ErreurEnvoi {
     /// **Récupérable, et c'est tout l'intérêt de la distinguer.** L'appelant
     /// appelle `poll`, puis réécrit la même image ; il ne l'abandonne pas.
     ///
-    /// Un `poll` libère **une** place, pas la file : `str0m` ne dépile qu'une
-    /// image par tour (`Media::do_payload`, un `pop_front`). Un appelant très en
-    /// retard peut donc être refusé plusieurs fois de suite, et ce n'est pas un
-    /// signe d'échec — c'est le rythme d'une seule image par `poll` qui reprend.
+    /// Un `poll` mené jusqu'à `Idle` libère **au moins une** place, pas la
+    /// file : `str0m` ne dépile qu'une image par passage dans son
+    /// `handle_timeout` (`Media::do_payload`, un `pop_front`), que provoquent
+    /// l'`Input::Timeout` de fin de `poll` et — depuis que `poll` lit tout le
+    /// socket, 03/10/2026 — chaque datagramme injecté (lu dans `str0m` 0.23,
+    /// `Rtc::handle_input`). Un appelant très en retard peut donc être refusé
+    /// plusieurs fois de suite, et ce n'est pas un signe d'échec.
     ///
     /// C'est le seul refus que la sonde du 27/09/2026 ait jamais vu sur ce
     /// chemin, et elle ne l'a vu qu'en écrivant sans poller : 0 refus sur 2593
@@ -122,6 +125,37 @@ const CANAL: &str = "sky";
 
 /// Taille maximale d'un datagramme UDP accepté (limite interne de `str0m`).
 const TAILLE_DATAGRAMME: usize = 2000;
+
+/// Nombre maximal de datagrammes lus par un seul `poll` qui ne rencontre aucun
+/// événement à rendre ; au-delà, `poll` rend `Idle` même si le socket n'est pas
+/// vide.
+///
+/// **Ce n'est pas un plafond de débit, c'est une garantie de reprise de main.**
+/// Sans borne, un flot ininterrompu de datagrammes qui ne produisent aucun
+/// événement (parasites, réponses STUN, paquets d'une image jamais complétée)
+/// pourrait retenir `poll` indéfiniment, et la boucle de l'appelant — qui pompe
+/// la fenêtre et guette l'arrêt — ne tournerait plus.
+///
+/// **Valeur CHOISIE, ordre de grandeur déduit.** Quand la borne est atteinte,
+/// l'appelant dort une fois sur `Idle` : ~1,5 ms pour une milliseconde demandée,
+/// mesuré le 03/10/2026 sur la machine de développement (médiane de 200 appels,
+/// trois séries). Le plafond de lecture qui en découle est de l'ordre de
+/// 1 024 / 1,5 ms ≈ 680 000 datagrammes/s — contre ~1 600/s pour un flux de
+/// 15 Mbps en paquets de ~1 200 octets ; même avec un sommeil de 15 ms, il
+/// resterait ~68 000/s, soit ~650 Mbps. Et 1 024 lectures d'au plus quelques
+/// microsecondes chacune rendent la main en quelques millisecondes (non
+/// mesuré).
+const LECTURES_MAX_PAR_POLL: usize = 1024;
+
+/// Ce qu'une lecture du socket a donné, pour `PeerLink::poll`.
+enum Lecture {
+    /// Un datagramme (ou une erreur de réception) a été consommé.
+    Faite,
+    /// Plus rien à lire pour l'instant.
+    SocketVide,
+    /// `str0m` a refusé le paquet : le lien est à déclarer perdu.
+    Echec(LinkEvent),
+}
 
 /// Fréquence de l'horloge RTP vidéo, en unités par seconde (RFC 3551).
 const HORLOGE_RTP: u64 = 90_000;
@@ -589,8 +623,28 @@ impl PeerLink {
         self.paquets_recus > 0
     }
 
-    /// Un tour de la boucle : vider les sorties de `str0m`, écouter le socket,
-    /// avancer le temps. Ne bloque jamais.
+    /// Sert le lien : vider les sorties de `str0m`, lire **tous** les
+    /// datagrammes en attente sur le socket, avancer le temps. Ne bloque jamais.
+    ///
+    /// Rend le premier événement qui apparaît (image, message de contrôle,
+    /// connexion, échec) dès qu'il apparaît — l'appelant rappelle `poll` pour
+    /// la suite, rien n'est perdu : les datagrammes non lus restent dans la file
+    /// du socket, les sorties non vidées dans `str0m`. Rend `Idle` quand le
+    /// socket est vide (ou après `LECTURES_MAX_PAR_POLL` lectures sans
+    /// événement, voir cette constante) : c'est alors seulement que l'appelant
+    /// peut dormir.
+    ///
+    /// # Pourquoi tout lire, et pas un datagramme par appel
+    ///
+    /// Jusqu'au 03/10/2026, `poll` lisait **au plus un** datagramme puis rendait
+    /// `Idle`, et la boucle du spectateur dormait sur chaque `Idle`. Sa lecture
+    /// était donc plafonnée à un datagramme par sommeil, quel que soit le débit
+    /// entrant ; la file du socket débordait et Windows jetait le reste en
+    /// silence. Essai réel du 03/10 : flux de 14,9 Mbps livré par le réseau
+    /// (`netstat`, 0 erreur de réception), 0,3 Mbps vus par l'application.
+    /// Reproduit en boucle locale (`un_flux_de_15_mbps_arrive_entier_malgre_la_pause_sur_idle`) :
+    /// 1 image sur 181 avec la pause, 181 sur 181 en boucle serrée (mesuré
+    /// avant la correction, en `debug`).
     pub fn poll(&mut self) -> anyhow::Result<LinkEvent> {
         if !self.rtc.is_alive() {
             return Ok(LinkEvent::Failed("session déclarée morte par l'agent".into()));
@@ -616,7 +670,43 @@ impl PeerLink {
             }
         }
 
-        // 1. Vider les sorties de str0m.
+        // Alterner 1 et 2 jusqu'à ce que le socket soit vide : chaque datagramme
+        // injecté peut faire naître un événement (dernier paquet d'une image,
+        // message de contrôle), rendu au tour même où il apparaît.
+        let mut buf = [0u8; TAILLE_DATAGRAMME];
+        let mut lectures = 0usize;
+        loop {
+            // 1. Vider les sorties de str0m.
+            if let Some(evenement) = self.vider_sorties() {
+                return Ok(evenement);
+            }
+            if lectures >= LECTURES_MAX_PAR_POLL {
+                break;
+            }
+            // 2. Injecter ce qui arrive du socket.
+            match self.lire_un_datagramme(&mut buf) {
+                Lecture::SocketVide => break,
+                Lecture::Faite => lectures += 1,
+                Lecture::Echec(evenement) => return Ok(evenement),
+            }
+        }
+
+        // Atteint à chaque `Idle`, donc dès que le socket se vide. Entre-temps,
+        // chaque injection fait déjà avancer le temps de `str0m` : en 0.23,
+        // `handle_input(Input::Receive)` appelle aussi `do_handle_timeout`
+        // (lu dans `str0m-0.23/src/lib.rs`, `Rtc::handle_input`).
+        let instant = self.maintenant();
+        if self.rtc.handle_input(Input::Timeout(instant)).is_err() {
+            return Ok(LinkEvent::Failed("connexion interrompue".into()));
+        }
+
+        Ok(LinkEvent::Idle)
+    }
+
+    /// Vide les sorties de `str0m` : émet chaque `Transmit`, absorbe les
+    /// événements internes, et rend le premier événement destiné à l'appelant
+    /// (`None` quand `str0m` n'a plus rien à sortir).
+    fn vider_sorties(&mut self) -> Option<LinkEvent> {
         loop {
             let sortie = match self.rtc.poll_output() {
                 Ok(s) => s,
@@ -634,12 +724,12 @@ impl PeerLink {
                         str0m::RtcError::Rtp(_) => "flux RTP",
                         _ => "autre",
                     };
-                    return Ok(LinkEvent::Failed(format!("erreur en sortie — {categorie}")));
+                    return Some(LinkEvent::Failed(format!("erreur en sortie — {categorie}")));
                 }
             };
 
             match sortie {
-                Output::Timeout(_) => break,
+                Output::Timeout(_) => return None,
                 Output::Transmit(t) => {
                     // Un envoi qui échoue (réseau momentanément indisponible) n'est
                     // pas fatal : ICE réémettra. L'erreur nommerait la destination,
@@ -665,15 +755,15 @@ impl PeerLink {
                         ) && !self.connected
                         {
                             self.connected = true;
-                            return Ok(LinkEvent::Connected);
+                            return Some(LinkEvent::Connected);
                         }
                         if etat == IceConnectionState::Disconnected && self.connected {
-                            return Ok(LinkEvent::Failed("connexion interrompue".into()));
+                            return Some(LinkEvent::Failed("connexion interrompue".into()));
                         }
                     }
                     Event::ChannelOpen(id, _) => self.canal = Some(id),
                     Event::ChannelData(d) => match serde_json::from_slice(&d.data) {
-                        Ok(message) => return Ok(LinkEvent::Controle(message)),
+                        Ok(message) => return Some(LinkEvent::Controle(message)),
                         // Illisible : on compte, on ne décrit pas (le contenu
                         // vient du pair) et on poursuit le vidage des sorties.
                         Err(_) => self.messages_illisibles += 1,
@@ -695,7 +785,7 @@ impl PeerLink {
                             donnees.codec_extra,
                             CodecExtra::H264(extra) if extra.is_keyframe
                         );
-                        return Ok(LinkEvent::Image {
+                        return Some(LinkEvent::Image {
                             donnees: donnees.data.to_vec(),
                             horodatage_ms: en_millisecondes(donnees.time),
                             cle,
@@ -707,28 +797,31 @@ impl PeerLink {
                 },
             }
         }
+    }
 
-        // 2. Injecter ce qui arrive du socket.
-        let mut buf = vec![0u8; TAILLE_DATAGRAMME];
-        match self.socket.recv_from(&mut buf) {
+    /// Lit UN datagramme du socket et, s'il vient du pair, l'injecte dans
+    /// `str0m`. `buf` est fourni par `poll`, pour ne pas allouer à chaque
+    /// lecture.
+    fn lire_un_datagramme(&mut self, buf: &mut [u8; TAILLE_DATAGRAMME]) -> Lecture {
+        match self.socket.recv_from(buf) {
             Ok((n, source)) => {
                 // Une réponse d'un serveur STUN est le retour de notre propre
                 // battement de maintien, pas un signe de vie du correspondant. La
                 // compter fausserait le diagnostic, et la passer à l'agent ICE
                 // n'aurait aucun sens.
-                // Sortir ici court-circuiterait le `Input::Timeout` de fin de
-                // fonction : l'agent ICE cesserait d'avancer tant que des reponses
-                // STUN arrivent. On ignore le paquet sans quitter le cycle.
+                // Sortir de `poll` ici court-circuiterait son `Input::Timeout` de
+                // fin : l'agent ICE cesserait d'avancer tant que des reponses
+                // STUN arrivent. On ignore le paquet sans quitter le cycle — la
+                // lecture compte comme faite, et `poll` continue de lire.
                 let percage = n == 1 && buf[0] == stun::OCTET_PERCAGE;
                 let du_pair = !self.serveurs_stun.contains(&source) && !percage;
                 if du_pair {
                     self.paquets_recus += 1;
                 }
-                buf.truncate(n);
                 // Un datagramme illisible (parasite, scan de port) est ignoré :
                 // il ne doit ni interrompre la négociation ni être décrit.
                 if du_pair {
-                    if let Ok(contents) = buf.as_slice().try_into() {
+                    if let Ok(contents) = buf[..n].try_into() {
                         let instant = self.maintenant();
                         let recu = Receive {
                             proto: Protocol::Udp,
@@ -741,28 +834,32 @@ impl PeerLink {
                             .handle_input(Input::Receive(instant, recu))
                             .is_err()
                         {
-                            return Ok(LinkEvent::Failed("erreur à l'injection d'un paquet reçu".into()));
+                            return Lecture::Echec(LinkEvent::Failed(
+                                "erreur à l'injection d'un paquet reçu".into(),
+                            ));
                         }
                     }
                 }
+                Lecture::Faite
             }
             Err(ref e)
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
+                ) =>
+            {
+                Lecture::SocketVide
+            }
             // Sous Windows, un ICMP « port unreachable » remonte en erreur sur le
             // socket UDP. Ce n'est pas fatal pendant les sondages ICE, mais un
-            // échec final mérite de le savoir.
-            Err(_) => self.erreurs_socket += 1,
+            // échec final mérite de le savoir. Compté comme une lecture : l'erreur
+            // est consommée, et la borne de `poll` reste tenue même si elles se
+            // suivaient sans fin.
+            Err(_) => {
+                self.erreurs_socket += 1;
+                Lecture::Faite
+            }
         }
-
-        let instant = self.maintenant();
-        if self.rtc.handle_input(Input::Timeout(instant)).is_err() {
-            return Ok(LinkEvent::Failed("connexion interrompue".into()));
-        }
-
-        Ok(LinkEvent::Idle)
     }
 
     /// Envoie un message de contrôle sur le canal de données.
@@ -801,9 +898,9 @@ impl PeerLink {
     /// paquetisation (`RtcError::WriteWithoutPoll`). Ce refus rend
     /// **`TropDImagesEnAttente`, et lui seul** : il est récupérable, l'appelant
     /// appelle `poll` puis **réécrit la même image**, il ne l'abandonne pas.
-    /// Attention à ce qu'un `poll` fait au juste — il libère **une** place et non
-    /// la file, `str0m` ne dépilant qu'une image par tour : plusieurs refus
-    /// d'affilée sont normaux quand on a beaucoup de retard. Toute autre erreur
+    /// Attention à ce qu'un `poll` fait au juste — il libère au moins une place
+    /// et non la file (voir `ErreurEnvoi::TropDImagesEnAttente`) : plusieurs
+    /// refus d'affilée sont normaux quand on a beaucoup de retard. Toute autre erreur
     /// rend `ImageRefusee` et n'a pas de relance connue.
     ///
     /// **Cette file est LOCALE.** Elle se vide pendant nos propres `poll`
@@ -1812,8 +1909,8 @@ mod tests {
 
         // Et la relance marche : c'est ce qui fait de ce refus un « réessayer »
         // et non un « abandonner ». Un seul `poll` suffit ici, et c'est tout ce
-        // que ce test affirme : il libère UNE place, pas la file. Avec deux
-        // images de retard il aurait fallu deux tours.
+        // que ce test affirme : il libère au moins une place, pas la file
+        // (voir `ErreurEnvoi::TropDImagesEnAttente`).
         let _ = hote.poll();
         let _ = spectateur.poll();
         hote.ecrire_image(&unite, images_acceptees)
@@ -2011,5 +2108,213 @@ mod tests {
             "reponse de {} caracteres pour une borne de {BORNE_BLOC_REEL} : le SDP n'est-il plus comprime ?",
             reponse.len()
         );
+    }
+
+    /// Une unité d'accès HEVC synthétique de `taille` octets : code de départ,
+    /// en-tête de NAL TRAIL_R (type 1), puis une charge sans aucun octet nul —
+    /// donc sans émulation de code de départ, et réassemblée telle quelle.
+    /// `graine` rend chaque unité distincte.
+    fn unite_synthetique(taille: usize, graine: u8) -> Vec<u8> {
+        let mut unite = vec![0x00, 0x00, 0x00, 0x01, 0x02, 0x01];
+        unite.extend((0..taille.saturating_sub(6)).map(|i| (i as u8 ^ graine) | 0x01));
+        unite
+    }
+
+    /// Ce que le spectateur a vu d'un flux réaliste.
+    struct BilanFlux {
+        images_ecrites: u64,
+        octets_ecrits: u64,
+        cles_ecrites: u64,
+        images_recues: u64,
+        octets_recus: u64,
+        cles_recues: u64,
+        /// Images reçues identiques octet pour octet à celle écrite au même
+        /// horodatage.
+        images_intactes: u64,
+        avec_perte: u64,
+        datagrammes_recus: u64,
+    }
+
+    /// Fait couler pendant `duree` un flux de l'ordre de 15 Mbps de l'hôte vers
+    /// le spectateur, chacun dans son fil, et rend ce que le spectateur a reçu.
+    ///
+    /// L'hôte imite la boucle synthétique de `sky-partage/src/hote.rs` : 60
+    /// images/s, le lien servi entre deux images par `poll` + sommeil d'au plus
+    /// 1 ms, `poll` après chaque écriture, relance sur `TropDImagesEnAttente`.
+    /// Unités : ~31 Ko (≈ 15 Mbps à 60 images/s), et toutes les 30 images la
+    /// vraie unité d'accès du jalon 0 (63 Ko, image clé).
+    ///
+    /// Le spectateur imite `sky-partage/src/spectateur.rs::boucle` : un `poll`
+    /// par tour, et `pause` sur `Idle` seulement — `Some(1 ms)` pour la vraie
+    /// boucle, `None` pour une boucle serrée de comparaison.
+    fn faire_couler_un_flux(pause: Option<Duration>, duree: Duration) -> BilanFlux {
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let (mut hote, mut spectateur) =
+            paire_avec_formats(&[FormatVideo::Hevc420], &[FormatVideo::Hevc420]);
+        let cle = std::fs::read(UNITE_JALON_0).expect("unité d'accès du jalon 0");
+        let fin_ecriture = Arc::new(AtomicBool::new(false));
+        let arret_hote = Arc::new(AtomicBool::new(false));
+
+        let fil_hote = {
+            let fin_ecriture = Arc::clone(&fin_ecriture);
+            let arret_hote = Arc::clone(&arret_hote);
+            std::thread::spawn(move || {
+                let periode = Duration::from_micros(16_667);
+                let debut = Instant::now();
+                let mut prochaine = debut;
+                let mut ecrites: HashMap<u64, Vec<u8>> = HashMap::new();
+                let mut cles = 0u64;
+                let mut n = 0u64;
+                while debut.elapsed() < duree {
+                    // Attente de l'image suivante, le lien servi pendant ce temps.
+                    loop {
+                        let m = Instant::now();
+                        if m >= prochaine {
+                            break;
+                        }
+                        let _ = hote.poll();
+                        std::thread::sleep(
+                            Duration::from_millis(1).min(prochaine.saturating_duration_since(m)),
+                        );
+                    }
+                    prochaine += periode;
+                    let unite = if n.is_multiple_of(30) {
+                        cles += 1;
+                        cle.clone()
+                    } else {
+                        unite_synthetique(31_000, n as u8)
+                    };
+                    let horodatage = n * 1000 / 60;
+                    loop {
+                        match hote.ecrire_image(&unite, horodatage) {
+                            Ok(()) => break,
+                            Err(ErreurEnvoi::TropDImagesEnAttente) => {
+                                let _ = hote.poll();
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            Err(e) => panic!("écriture refusée : {e}"),
+                        }
+                    }
+                    let _ = hote.poll();
+                    ecrites.insert(horodatage, unite);
+                    n += 1;
+                }
+                fin_ecriture.store(true, Ordering::SeqCst);
+                // Le lien reste servi (retransmissions, RTCP) jusqu'à la fin.
+                while !arret_hote.load(Ordering::SeqCst) {
+                    let _ = hote.poll();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                (ecrites, cles)
+            })
+        };
+
+        let mut recues: Vec<(u64, Vec<u8>, bool, bool)> = Vec::new();
+        let mut fin_vue: Option<Instant> = None;
+        loop {
+            if fin_ecriture.load(Ordering::SeqCst) {
+                // Une seconde de grâce après la dernière écriture.
+                let f = *fin_vue.get_or_insert_with(Instant::now);
+                if f.elapsed() >= Duration::from_secs(1) {
+                    break;
+                }
+            }
+            let evenement = spectateur.poll().expect("poll du spectateur");
+            let inactif = matches!(evenement, LinkEvent::Idle);
+            match evenement {
+                LinkEvent::Image {
+                    donnees,
+                    horodatage_ms,
+                    cle,
+                    sans_perte,
+                    ..
+                } => recues.push((horodatage_ms, donnees, cle, sans_perte)),
+                LinkEvent::Failed(raison) => panic!("lien perdu : {raison}"),
+                _ => {}
+            }
+            if inactif {
+                if let Some(p) = pause {
+                    std::thread::sleep(p);
+                }
+            }
+        }
+        arret_hote.store(true, Ordering::SeqCst);
+        let (ecrites, cles_ecrites) = fil_hote.join().expect("fil de l'hôte");
+
+        BilanFlux {
+            images_ecrites: ecrites.len() as u64,
+            octets_ecrits: ecrites.values().map(|u| u.len() as u64).sum(),
+            cles_ecrites,
+            images_recues: recues.len() as u64,
+            octets_recus: recues.iter().map(|r| r.1.len() as u64).sum(),
+            cles_recues: recues.iter().filter(|r| r.2).count() as u64,
+            images_intactes: recues
+                .iter()
+                .filter(|r| ecrites.get(&r.0).is_some_and(|u| *u == r.1))
+                .count() as u64,
+            avec_perte: recues.iter().filter(|r| !r.3).count() as u64,
+            datagrammes_recus: spectateur.paquets_recus,
+        }
+    }
+
+    impl std::fmt::Display for BilanFlux {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "images {}/{} reçues ({} intactes, {} avec perte), images clés {}/{}, \
+                 octets {}/{}, datagrammes du pair lus {}",
+                self.images_recues,
+                self.images_ecrites,
+                self.images_intactes,
+                self.avec_perte,
+                self.cles_recues,
+                self.cles_ecrites,
+                self.octets_recus,
+                self.octets_ecrits,
+                self.datagrammes_recus
+            )
+        }
+    }
+
+    /// L'essai réel du 03/10/2026, reproduit en boucle locale : un flux de
+    /// ~15 Mbps, un spectateur qui dort 1 ms sur chaque `Idle` comme
+    /// `sky-partage/src/spectateur.rs`. Quand `poll` ne lisait qu'un datagramme
+    /// par appel, la file du socket débordait : mesuré avant correction, **1
+    /// image sur 181** arrivait (la première, 2 014 datagrammes lus sur 5 298),
+    /// contre 181 sur 181 avec une boucle serrée.
+    ///
+    /// Neutralisation (03/10/2026) : `poll` ramené à une lecture par appel
+    /// (`break` après `Lecture::Faite`) — ce test rougit sur l'assertion des
+    /// images, 1/181 reçue ; rétabli, 181/181.
+    ///
+    /// Seuil à 95 % : l'écart à discriminer est de 0,6 % contre 100 %, la marge
+    /// absorbe une machine chargée sans rien laisser passer de l'ancien
+    /// comportement.
+    #[test]
+    fn un_flux_de_15_mbps_arrive_entier_malgre_la_pause_sur_idle() {
+        let b = faire_couler_un_flux(Some(Duration::from_millis(1)), Duration::from_secs(3));
+        println!("{b}");
+        assert!(b.images_ecrites >= 150, "l'hôte n'a pas tenu sa cadence : {b}");
+        assert!(
+            b.images_intactes * 100 >= b.images_ecrites * 95,
+            "moins de 95 % des images sont arrivées intactes : le spectateur ne \
+             lit pas le socket aussi vite que le flux le remplit — {b}"
+        );
+    }
+
+    #[test]
+    #[ignore = "mesure d'enquête du 03/10/2026, lancée à la main avec --nocapture"]
+    fn mesure_flux_realiste() {
+        for (nom, pause) in [
+            ("pause 1 ms sur Idle", Some(Duration::from_millis(1))),
+            ("pause 15 ms sur Idle", Some(Duration::from_millis(15))),
+            ("boucle serrée", None),
+        ] {
+            let b = faire_couler_un_flux(pause, Duration::from_secs(3));
+            println!("{nom} : {b}");
+        }
     }
 }

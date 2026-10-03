@@ -606,7 +606,9 @@ Chaque correction a son test et sa neutralisation, appliquée seule.
 - **Consigne absolue pendant tout essai : jamais `RUST_LOG="str0m=debug"`** (adresses en clair).
 - Constantes **choisies, non mesurées** : `ATTENTE_IMAGE_CLE_MAX` = 10 s,
   `ECHECS_DECODAGE_AVANT_ABANDON` = 120, `DRAINAGE_ARRET` = 50 ms ; effet de la pause sur inactivité
-  (1 ms demandée, ~15 ms réelles sous Windows) sur la latence : non mesuré.
+  (1 ms demandée, ~1,5 ms réelles mesurées le 03/10/2026 sur la machine de développement — le
+  « ~15 ms » écrit avant n'a pas été reproduit ; non mesuré sur le portable) sur la latence : non
+  mesuré.
 - **`transit_ms` compare deux horloges d'origines différentes** (hérité, documenté) : ce n'est pas
   une latence de bout en bout. **Aucun instrument du dépôt ne mesure la latence capture → pixel.**
 
