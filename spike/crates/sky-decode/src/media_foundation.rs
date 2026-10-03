@@ -178,6 +178,17 @@ pub fn mf_sait_decoder(
     DecodeurMf::nouveau(codec, appareil, largeur, hauteur).is_ok()
 }
 
+/// `MF_LOW_LATENCY` à l'ouverture. Privé : seul `DecodeurMf::nouveau` (`Oui`)
+/// et le constructeur réservé aux tests (`Non`) le choisissent.
+#[derive(Clone, Copy)]
+enum FaibleLatence {
+    Oui,
+    // Construit seulement par `nouveau_pour_essai_sans_faible_latence`, absent
+    // hors de la fonctionnalité d'essai.
+    #[cfg_attr(not(feature = "essai-sans-faible-latence"), allow(dead_code))]
+    Non,
+}
+
 /// Un décodeur Media Foundation ouvert sur le périphérique de la fenêtre.
 pub struct DecodeurMf {
     // L'ORDRE DE DESTRUCTION compte (sonde, `mf.rs:514-517`) : le MFT d'abord,
@@ -229,6 +240,41 @@ impl DecodeurMf {
         appareil: &ID3D11Device,
         largeur_annoncee: u32,
         hauteur_annoncee: u32,
+    ) -> Result<Self, ErreurDecodeur> {
+        Self::ouvrir(codec, appareil, largeur_annoncee, hauteur_annoncee, FaibleLatence::Oui)
+    }
+
+    /// RÉSERVÉ AUX TESTS : ouvre le décodeur avec `MF_LOW_LATENCY = 0`, le seul
+    /// moyen connu de produire, sur du matériel réel, un décodeur qui RETIENT
+    /// des images (mesuré, RTX 4060, HEVC : l'appel k rend l'image k−2). C'est
+    /// ce qui permet de prouver que le filtre d'horodatage de [`Self::decoder`]
+    /// est bien branché (revue finale du sous-jalon « toutes cartes », I2).
+    ///
+    /// LE CHEMIN DE PRODUCTION NE PEUT PAS L'EMPRUNTER : la fonction n'existe
+    /// que sous la fonctionnalité `essai-sans-faible-latence`, que seule la
+    /// dépendance de DÉVELOPPEMENT de `sky-decode` sur elle-même active
+    /// (`Cargo.toml`). Avec le résolveur 2 du workspace, une fonctionnalité
+    /// tirée par une dépendance de développement n'entre dans aucune
+    /// construction qui ne compile pas de tests — donc ni `tauri build` ni
+    /// `cargo build -p sky-app`. Ne jamais l'ajouter aux fonctionnalités d'une
+    /// dépendance normale : la spec (D5) exige `MF_LOW_LATENCY = 1`.
+    #[cfg(feature = "essai-sans-faible-latence")]
+    #[doc(hidden)]
+    pub fn nouveau_pour_essai_sans_faible_latence(
+        codec: CodecMf,
+        appareil: &ID3D11Device,
+        largeur_annoncee: u32,
+        hauteur_annoncee: u32,
+    ) -> Result<Self, ErreurDecodeur> {
+        Self::ouvrir(codec, appareil, largeur_annoncee, hauteur_annoncee, FaibleLatence::Non)
+    }
+
+    fn ouvrir(
+        codec: CodecMf,
+        appareil: &ID3D11Device,
+        largeur_annoncee: u32,
+        hauteur_annoncee: u32,
+        faible_latence: FaibleLatence,
     ) -> Result<Self, ErreurDecodeur> {
         let plateforme = Plateforme::demarrer()?;
 
@@ -293,9 +339,14 @@ impl DecodeurMf {
         // Faible latence : c'est elle qui retient au plus une image (spec D5).
         // Sûre sur le chemin matériel seulement ; le logiciel est refusé plus bas.
         // Porteuse, mesuré (RTX 4060, tâche 5) : à 0, l'unité 0 ne rend aucune
-        // image au même appel, en HEVC comme en H.264.
-        unsafe { attributs.SetUINT32(&MF_LOW_LATENCY, 1) }
-            .map_err(|e| mf("MF_LOW_LATENCY = 1", e))?;
+        // image au même appel, en HEVC comme en H.264. `FaibleLatence::Non`
+        // n'est atteignable que par le constructeur réservé aux tests.
+        let valeur = match faible_latence {
+            FaibleLatence::Oui => 1,
+            FaibleLatence::Non => 0,
+        };
+        unsafe { attributs.SetUINT32(&MF_LOW_LATENCY, valeur) }
+            .map_err(|e| mf(&format!("MF_LOW_LATENCY = {valeur}"), e))?;
 
         unsafe {
             t.ProcessMessage(
@@ -373,7 +424,11 @@ impl DecodeurMf {
     /// Le cas du décodeur en retard a été produit sur ce même matériel, en
     /// éteignant `MF_LOW_LATENCY` (mesuré, ronde de correction 1 de la tâche 5) :
     /// le MFT HEVC rend alors, à l'appel k, l'image k−2, et le filtre en fait
-    /// une erreur à chaque appel ; le MFT H.264 ne rend rien sur 8 unités.
+    /// une erreur à chaque appel ; le MFT H.264 ne rend rien sur 8 unités. Ce
+    /// cas est REJOUÉ par un test, qui prouve que le filtre est branché ici et
+    /// pas seulement juste en lui-même :
+    /// `tests/media_foundation.rs::hevc_420_un_decodeur_qui_retient_des_images_echoue_au_lieu_d_afficher_faux`
+    /// (remplacer l'appel ci-dessous par « dernière image tirée » le fait rougir).
     ///
     /// `Ok(None)` : aucune image tirée (en-têtes seuls).
     pub fn decoder(

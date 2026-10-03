@@ -4026,6 +4026,7 @@ dependencies = [
  "nvidia-video-codec-sdk",
  "png 0.17.16",
  "sky-capture",
+ "sky-decode",
  "sky-encode",
  "thiserror 2.0.20",
  "windows 0.62.2",

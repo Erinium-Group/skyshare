@@ -22,14 +22,17 @@
 //!
 //! Ronde de correction 1 :
 //! - le filtre d'horodatage de `decoder` retiré (dernière image tirée rendue
-//!   telle quelle) : ces tests-ci RESTENT VERTS, la RTX 4060 ne retenant aucune
-//!   image en faible latence ; ce sont les tests purs de
-//!   `media_foundation::tests` (`image_de_l_unite`) qui rougissent ;
+//!   telle quelle) : les tests en faible latence RESTENT VERTS, la RTX 4060
+//!   n'y retenant aucune image ; seuls rougissaient alors les tests purs de
+//!   `media_foundation::tests` (`image_de_l_unite`), qui ne prouvent pas le
+//!   BRANCHEMENT. Depuis la vague finale (I2),
+//!   `hevc_420_un_decodeur_qui_retient_des_images_echoue_au_lieu_d_afficher_faux`
+//!   le prouve sur le vrai décodeur, ouvert sans faible latence ;
 //! - `ImageMf` sans son échantillon (relâché aussitôt) : les deux
 //!   `*_une_image_gardee_ne_bouge_pas` rougissent, 2 073 600 octets changés.
 
 use sky_capture::CapturedFrame;
-use sky_decode::{creer_appareil_video, CodecMf, DecodeurMf};
+use sky_decode::{creer_appareil_video, CodecMf, DecodeurMf, ErreurDecodeur};
 use sky_encode::{Codec, NvencEncoder};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{
@@ -227,6 +230,69 @@ fn hevc_420_une_image_gardee_ne_bouge_pas() {
 #[test]
 fn h264_une_image_gardee_ne_bouge_pas() {
     une_image_gardee_ne_bouge_pas(Codec::H264_420, CodecMf::H264);
+}
+
+/// Unités poussées dans le décodeur qui retient des images : assez pour que le
+/// retard de deux images (mesuré) se manifeste plusieurs fois.
+const UNITES_EN_RETARD: usize = 12;
+
+/// Le filtre d'horodatage de `DecodeurMf::decoder` est-il BRANCHÉ ? (revue
+/// finale du sous-jalon « toutes cartes », I2 : c'est la protection du défaut C1
+/// du jalon 2, et les tests ci-dessus ne pouvaient pas la voir — la RTX 4060 ne
+/// retient aucune image en faible latence.)
+///
+/// On produit un décodeur qui retient réellement des images, sur le matériel
+/// réel : `MF_LOW_LATENCY = 0`, par le constructeur réservé aux tests. Mesuré
+/// (RTX 4060, ronde de correction 1 de la tâche 5) : le MFT HEVC rend alors,
+/// à l'appel k, l'image de l'unité k−2. Le contrat exigé : `decoder` ne rend
+/// JAMAIS `Ok(Some)` d'une image d'une autre unité ; il échoue au contraire par
+/// une `MediaFoundation` qui nomme l'horodatage attendu et ceux reçus — au
+/// moins une fois, faute de quoi le scénario ne prouverait rien.
+///
+/// Neutralisation : remplacer, dans `decoder`, l'appel à `image_de_l_unite` par
+/// « dernière image tirée » — ce test rougit sur l'assertion d'horodatage.
+#[test]
+fn hevc_420_un_decodeur_qui_retient_des_images_echoue_au_lieu_d_afficher_faux() {
+    let (appareil, _) = creer_appareil_video().expect("périphérique Direct3D 11 matériel");
+    let paquets = paquets_alternes(&appareil, Codec::Hevc420, UNITES_EN_RETARD, UNITES_EN_RETARD);
+    let mut decodeur = DecodeurMf::nouveau_pour_essai_sans_faible_latence(
+        CodecMf::Hevc,
+        &appareil,
+        LARGEUR_ANNONCEE,
+        HAUTEUR_ANNONCEE,
+    )
+    .unwrap_or_else(|e| panic!("ce test exige Media Foundation matériel (Hevc) : {e}"));
+    let (mut rendues, mut vides, mut refus) = (0, 0, 0);
+    for (rang, (_, paquet)) in paquets.iter().enumerate() {
+        let attendu = rang as u64;
+        match decodeur.decoder(paquet, attendu) {
+            Ok(Some(image)) => {
+                assert_eq!(
+                    image.horodatage_ms, attendu,
+                    "l'appel {rang} a rendu l'image d'une autre unité (horodatage {} ms) au lieu \
+                     d'échouer : le filtre d'horodatage n'est plus branché",
+                    image.horodatage_ms
+                );
+                rendues += 1;
+            }
+            Ok(None) => vides += 1,
+            Err(ErreurDecodeur::MediaFoundation(message)) => {
+                println!("appel {rang} : {message}");
+                assert!(
+                    message.contains(&format!("attendu {attendu} ms")) && message.contains("reçu"),
+                    "l'erreur de l'appel {rang} doit nommer l'attendu et le reçu : {message}"
+                );
+                refus += 1;
+            }
+            Err(autre) => panic!("appel {rang} : erreur inattendue {autre:?}"),
+        }
+    }
+    println!("sans faible latence : {rendues} images de leur unité, {vides} appels vides, {refus} refus");
+    assert!(
+        refus >= 1,
+        "le décodeur n'a retenu aucune image ({rendues} rendues, {vides} vides) : le scénario \
+         ne prouve rien — `MF_LOW_LATENCY = 0` a-t-il cessé de retarder ce MFT ?"
+    );
 }
 
 /// Couleur attendue d'une ligne du motif « rouge en tête » : `true` pour rouge.

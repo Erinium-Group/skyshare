@@ -25,7 +25,18 @@ windows = { version = "0.62", features = [
     "Win32_System_Com",
 ] }
 
+[features]
+# RÉSERVÉE AUX TESTS : expose `DecodeurMf::nouveau_pour_essai_sans_faible_latence`
+# (`MF_LOW_LATENCY = 0`), qui sert à prouver le filtre d'horodatage de
+# `DecodeurMf::decoder`. Activée UNIQUEMENT par la dépendance de développement
+# de cette crate sur elle-même, ci-dessous : avec le résolveur 2, elle n'entre
+# dans aucune construction de production. Ne jamais l'activer ailleurs.
+essai-sans-faible-latence = []
+
 [dev-dependencies]
+# Cette crate elle-même, pour activer la fonctionnalité d'essai dans ses tests
+# d'intégration (`tests/media_foundation.rs`) et là seulement.
+sky-decode = { path = ".", features = ["essai-sans-faible-latence"] }
 png = "0.17"
 # Deux usages : ses souches de lien `NvEncodeAPI*` (voir l'en-tête de
 # `tests/reference.rs` — un test d'intégration compile la bibliothèque sans
