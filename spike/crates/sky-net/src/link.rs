@@ -631,8 +631,13 @@ impl PeerLink {
     /// la suite, rien n'est perdu : les datagrammes non lus restent dans la file
     /// du socket, les sorties non vidées dans `str0m`. Rend `Idle` quand le
     /// socket est vide (ou après `LECTURES_MAX_PAR_POLL` lectures sans
-    /// événement, voir cette constante) : c'est alors seulement que l'appelant
-    /// peut dormir.
+    /// événement, voir cette constante). Un appelant **sous flux entrant** ne
+    /// devrait donc dormir que sur `Idle` : dormir après un événement laisse
+    /// des datagrammes en file pendant tout le sommeil. Trois appelants le
+    /// font aujourd'hui, sans conséquence, car aucun ne reçoit de flux :
+    /// `sky-partage/src/etablissement.rs` (`etablir`, avant toute vidéo), et
+    /// dans `sky-partage/src/hote.rs` la boucle d'attente autour de `servir`
+    /// et `annoncer_l_arret` (l'hôte ne reçoit que RTCP et contrôle).
     ///
     /// # Pourquoi tout lire, et pas un datagramme par appel
     ///
@@ -2288,7 +2293,8 @@ mod tests {
     ///
     /// Neutralisation (03/10/2026) : `poll` ramené à une lecture par appel
     /// (`break` après `Lecture::Faite`) — ce test rougit sur l'assertion des
-    /// images, 1/181 reçue ; rétabli, 181/181.
+    /// images, 2/181 reçues lors de cette passe (à ne pas confondre avec la
+    /// mesure d'avant correction ci-dessus, 1/181) ; rétabli, 181/181.
     ///
     /// Seuil à 95 % : l'écart à discriminer est de 0,6 % contre 100 %, la marge
     /// absorbe une machine chargée sans rien laisser passer de l'ancien

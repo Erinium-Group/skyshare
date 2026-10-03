@@ -77,14 +77,16 @@ const ATTENTE_IMAGE_CLE_MAX: Duration = Duration::from_secs(10);
 /// livré par le réseau. `poll` lit désormais tout ce qui attend avant de rendre
 /// `Idle` (voir sa documentation) ; reproduit puis verrouillé en boucle locale
 /// par `sky-net`, `un_flux_de_15_mbps_arrive_entier_malgre_la_pause_sur_idle`
-/// (avec cette même pause, et 15 ms : 181 images sur 181).
+/// (avec cette même pause : 181 images sur 181 ; avec 15 ms, 181 sur 181
+/// aussi, mesuré une fois, à la main, par le test ignoré `mesure_flux_realiste`).
 ///
 /// **Durée réelle d'une milliseconde demandée : ~1,5 ms** — médiane de 200
 /// appels, trois séries, mesurée le 03/10/2026 sur la machine de développement
 /// (Windows 11, Rust 1.94). Ce commentaire disait « ~15 ms (mesuré à la tâche
 /// 5) » : non reproduit ici, et la valeur peut dépendre de la machine — **elle
 /// n'est pas mesurée sur le portable spectateur.** Une unité d'accès arrivée au
-/// début d'une pause attend au plus cette durée avant d'être lue. **L'effet sur
+/// début d'une pause attend de l'ordre de cette durée avant d'être lue (1,5 ms
+/// est une médiane ; maximum mesuré sur 600 appels : 1,976 ms). **L'effet sur
 /// la latence d'affichage n'est pas mesuré.**
 const PAUSE_SUR_INACTIVITE: Duration = Duration::from_millis(1);
 

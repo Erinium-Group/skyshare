@@ -710,8 +710,13 @@ impl EnvoiVideo {
     ///
     /// Le seul refus possible sur ce chemin est `TropDImagesEnAttente`, et il
     /// est RÉCUPÉRABLE : le geste attendu est de poller puis de réécrire la
-    /// MÊME image. Mesuré : un `poll` ne libère qu'une place, pas la file —
-    /// plusieurs refus d'affilée sont donc normaux quand on a du retard, et ne
+    /// MÊME image. Un `poll` mené jusqu'à `Idle` libère **au moins une** place,
+    /// pas la file : `str0m` ne dépile qu'une image par passage dans son
+    /// `handle_timeout` (`Media::do_payload`, un `pop_front`), que provoquent
+    /// l'`Input::Timeout` de fin de `poll` et — depuis que `poll` lit tout le
+    /// socket, 03/10/2026 — chaque datagramme injecté (lu dans `str0m` 0.23,
+    /// `Rtc::handle_input` ; voir `sky_net::ErreurEnvoi::TropDImagesEnAttente`).
+    /// Plusieurs refus d'affilée sont donc normaux quand on a du retard, et ne
     /// sont pas un signe d'échec. Une image déjà encodée DOIT partir : sous GOP
     /// infini elle est chaînée sur la précédente, et l'abandonner casserait la
     /// chaîne pour tout le reste du flux (« ref POC introuvable » en cascade).
