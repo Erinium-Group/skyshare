@@ -335,6 +335,14 @@ pub fn heberger(
     // Aucun format commun : `str0m` a écarté la ligne média, le canal de données
     // vit seul. Le spectateur fait le même constat de son côté (même fonction,
     // `PeerLink::format_negocie`) : aucune annonce n'est nécessaire.
+    //
+    // HYPOTHÈSE D'ORDRE, lue UNE seule fois ici : l'hôte est le RÉPONDANT, et sa
+    // piste n'existe qu'après `Event::MediaAdded`. Lire `format_negocie` sitôt le
+    // canal ouvert n'est juste que si `MediaAdded` arrive AVANT l'ouverture du
+    // canal. C'est le cas dans `str0m` 0.23 (lu dans son source : `MediaAdded`
+    // part à la fin de DTLS, le canal s'ouvre après, sur SCTP) ; sinon une
+    // négociation réussie serait prise ici pour `AucunFormatCommun`. Verrouillé
+    // par `sky-net`, `link.rs::la_piste_du_repondant_existe_des_que_le_canal_est_ouvert`.
     let Some(format) = link.format_negocie() else {
         return Ok(Fin::AucunFormatCommun);
     };

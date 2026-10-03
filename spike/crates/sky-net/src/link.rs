@@ -1392,8 +1392,10 @@ mod tests {
     /// 1 293 à 1 301 (SDP de 1 880 à 2 008 octets ; `socket_et_candidats` ne
     /// déclare jamais plus de deux candidats). La description de la piste vidéo
     /// coûte donc un peu plus de 500 caractères de bloc, une fois comprimée.
-    /// Le catalogue de codecs est déjà réduit à HEVC seul (voir `nouveau_rtc`) ;
-    /// sans cela le coût serait plusieurs fois supérieur.
+    /// Le catalogue de codecs était alors réduit à HEVC 4:4:4 seul ; sans cette
+    /// réduction le coût aurait été plusieurs fois supérieur. (Ce n'est plus le
+    /// cas depuis le sous-jalon « toutes cartes » : `nouveau_rtc` annonce les
+    /// formats qu'on lui passe, jusqu'à trois — mesure ci-dessous.)
     ///
     /// **Re-mesuré le 02/10/2026, tâche 1 du sous-jalon « toutes cartes »**, les
     /// trois formats annoncés (HEVC 4:4:4, HEVC 4:2:0, H.264 : trois entrées
@@ -1444,6 +1446,48 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         panic!("le canal ne s'est pas ouvert dans les 10 s");
+    }
+
+    /// `sky-partage/src/hote.rs` lit `format_negocie()` UNE fois, sitôt le canal
+    /// ouvert ; or le répondant (l'hôte) n'apprend sa piste qu'à
+    /// `Event::MediaAdded`. Ce test verrouille l'ordre dont dépend cette lecture.
+    /// Il imite EXACTEMENT `sky-partage/src/etablissement.rs::etablir` : on
+    /// s'arrête au premier `poll` après lequel le canal DU RÉPONDANT est ouvert,
+    /// et la piste du répondant doit alors déjà exister, son format déjà
+    /// négocié. Établi par lecture du source de `str0m` 0.23 (`MediaAdded` à la
+    /// fin de DTLS, avant SCTP) ; ce test en fait une mesure, qui rougirait si
+    /// une mise à jour de `str0m` inversait l'ordre.
+    ///
+    /// Pas `paire_connectee` : elle attend les DEUX canaux, donc laisse au
+    /// répondant des `poll` de plus que `etablir`. Mesuré par neutralisation
+    /// (vague finale, m1) : une piste du répondant connue seulement au `poll`
+    /// SUIVANT l'ouverture de son canal laisse un test fondé sur
+    /// `paire_connectee` au vert ; celui-ci rougit, seul.
+    #[test]
+    fn la_piste_du_repondant_existe_des_que_le_canal_est_ouvert() {
+        let (mut spectateur, offre) =
+            PeerLink::offrant(Identity::generate(), &FormatVideo::PREFERENCE).unwrap();
+        let (mut hote, reponse) =
+            PeerLink::repondant(Identity::generate(), &offre, &FormatVideo::PREFERENCE).unwrap();
+        spectateur.accepter_reponse(&reponse).unwrap();
+        let limite = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < limite, "le canal du répondant ne s'est pas ouvert dans les 10 s");
+            let _ = spectateur.poll();
+            let _ = hote.poll();
+            if hote.canal_ouvert() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            hote.piste_ouverte(),
+            "canal ouvert, mais la piste du répondant n'existe pas encore"
+        );
+        assert!(
+            hote.format_negocie().is_some(),
+            "canal ouvert, mais aucun format négocié côté répondant"
+        );
     }
 
     /// Fait tourner les deux liens jusqu'au premier message de contrôle ou à la
