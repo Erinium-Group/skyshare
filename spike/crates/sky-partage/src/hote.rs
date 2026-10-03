@@ -1168,9 +1168,14 @@ mod tests {
 
     #[test]
     fn une_file_pleine_se_resorbe_en_pollant_et_en_reecrivant_la_meme_image() {
-        // Mesuré : un `poll` ne libère qu'UNE place. Deux images de retard
-        // demandent donc deux tours, et ces refus ne sont pas un échec — la même
-        // image doit finir par partir, intacte et une seule fois.
+        // La doublure libère une place par `poll` : deux places à libérer
+        // imposent donc deux refus d'affilée, et ces refus ne sont pas un échec —
+        // la même image doit finir par partir, intacte et une seule fois. Le vrai
+        // `poll` en libère AU MOINS une quand il va jusqu'à `Idle` (voir
+        // `sky_net::ErreurEnvoi::TropDImagesEnAttente`, `Media::do_payload` /
+        // `Rtc::handle_input` de `str0m` 0.23) : ce test ne dit rien du rythme
+        // réel, seulement que l'appelant encaisse plusieurs refus (voir
+        // `LienFactice`, `doublure.rs`).
         let mut lien = LienFactice::nouveau();
         let mut encodeur = RepriseFactice::avec_entetes(entetes_factices());
         let mut envoi = EnvoiVideo::nouveau();
@@ -1184,7 +1189,7 @@ mod tests {
         assert!(matches!(issue, IssueEnvoi::Envoyee), "l'image doit finir par partir");
         assert_eq!(lien.ecritures().len(), 1, "une seule fois, pas deux");
         assert_eq!(lien.ecritures()[0].horodatage_ms, 7, "le même horodatage qu'au premier essai");
-        assert!(lien.polls() >= 2, "un poll par place à libérer : {}", lien.polls());
+        assert!(lien.polls() >= 2, "un poll par place à libérer (doublure) : {}", lien.polls());
         assert_eq!(envoi.refus_absorbes, 1, "un retard résorbé, signalé une fois au Pacer");
     }
 

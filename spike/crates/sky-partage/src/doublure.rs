@@ -26,11 +26,33 @@ pub struct Ecriture {
 /// Un lien pair-à-pair sans réseau : il retient ce qu'on lui écrit et rend les
 /// événements qu'on lui injecte.
 ///
-/// Il imite un comportement mesuré de `PeerLink::ecrire_image` : un refus
-/// `TropDImagesEnAttente` ne se lève pas tout seul, et un `poll` ne libère
-/// **qu'une** place. C'est ce qui permet de vérifier que l'appelant sait faire
-/// le geste attendu — poller puis réécrire la MÊME image — plusieurs fois de
-/// suite sans conclure à un échec.
+/// Il imite `PeerLink::ecrire_image` sur un point : un refus
+/// `TropDImagesEnAttente` ne se lève pas tout seul, il faut poller. C'est ce
+/// qui permet de vérifier que l'appelant sait faire le geste attendu — poller
+/// puis réécrire la MÊME image — plusieurs fois de suite sans conclure à un
+/// échec.
+///
+/// **Sur le nombre de places libérées, la doublure SIMPLIFIE le réel.** Elle en
+/// libère exactement une par `poll`. Le vrai `poll` en libère **au moins une**
+/// quand il va jusqu'à `Idle` (un `do_payload` par passage de `str0m` dans
+/// `handle_timeout` : `Input::Timeout` et chaque datagramme injecté — voir
+/// `sky_net::ErreurEnvoi::TropDImagesEnAttente`, lu dans `str0m` 0.23
+/// `Media::do_payload` / `Rtc::handle_input`), et **peut-être aucune** quand il
+/// rend un événement avant toute injection (déduit de la lecture de
+/// `PeerLink::poll`, non mesuré). Ce n'est donc pas « le cas le plus
+/// défavorable » au sens strict, et elle n'a pas été choisie comme tel :
+/// jusqu'au 03/10/2026 ce commentaire présentait « une seule place » comme
+/// mesuré.
+///
+/// Pourquoi l'écart ne fausse aucun test (vérifié le 03/10/2026, relecture des
+/// deux appelants de `saturer`, tous deux dans `hote.rs`) : `envoyer_image`
+/// relance jusqu'à acceptation ou `BUDGET_RETRY_ENVOI`, sans jamais compter les
+/// places — un `poll` qui en libère zéro, une ou plusieurs ne change que le
+/// nombre de tours. `polls() >= 2` dans
+/// `une_file_pleine_se_resorbe_en_pollant_et_en_reecrivant_la_meme_image` est
+/// une propriété de CE scénario (deux refus imposés par la doublure), pas du
+/// réel : elle prouve que l'appelant encaisse deux refus d'affilée, rien sur le
+/// rythme de `str0m`.
 pub struct LienFactice {
     ecritures: Vec<Ecriture>,
     messages: Vec<MessageControle>,
