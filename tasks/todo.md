@@ -35,7 +35,9 @@ qui doit survivre est recopié ci-dessous. Fiche d'essai : `spike/docs/essai-tou
 - [ ] **Essai B — la NVIDIA partage, le portable AMD regarde** (version portable) : critère de fin
   du sous-jalon (spec §8). Relever le format affiché, les images/s, la latence de décodage et la
   **latence de bout en bout** (deux chronomètres photographiés ensemble ; spec §2, inconnue 1).
-- [ ] Revue finale de branche, puis fusion sur décision du propriétaire — **après** les essais.
+- [x] Revue finale de branche (« Avec corrections », aucun critique) et vague de correction finale,
+  03/10/2026 — voir plus bas.
+- [ ] Fusion sur décision du propriétaire — **après** les essais.
 
 ### Textes affichés à valider par le propriétaire (mot pour mot)
 
@@ -85,18 +87,31 @@ vrai tant que l'encodage reste NVENC-seul.
 - **`HEVC` ne rend jamais que la tranche 0, H.264 tourne de 0 à 7** (mesuré sur RTX 4060) ; nombre
   maximal d'images gardables avant blocage du décodeur : 3 tient, le maximum n'est pas mesuré.
 
-### ⚠️ À corriger avant fusion
-- `sky-encode/src/nvenc.rs:220-223` : « (Mesuré en HEVC ; en H.264, non.) » est contredit par la
-  neutralisation 4 de la tâche 2 (`repeatSPSPPS` seul suffit en H.264) ; `nvenc.rs:455-458` :
-  « chacun seuls » est trop large (`OUTPUT_SPSPPS` seul en H.264 : non mesuré). Un fait corrigé qui
-  doit survivre.
+### Revue finale de branche et vague de correction finale (03/10/2026)
+Verdict « Avec corrections », aucun critique. Soldés par la vague finale (rapport
+`.superpowers/sdd/2026-10-02-toutes-cartes-sj1-reception/final-fix-report.md`, ignoré par git) :
+- **I1** — treize faits corrigés qui survivaient, dont `nvenc.rs` (« Mesuré en HEVC ; en H.264,
+  non. », « chacun seuls » : désormais codec par codec, `OUTPUT_SPSPPS` seul en H.264 dit non
+  mesuré), les docs de `SansCarteNvidia` / `SansDecodage444`, `noyau.rs`, `materiel.rs`,
+  `reference.rs`, `sonde.rs` (sans Media Foundation le processus ne démarre pas), `BORNE_BLOC_REEL`,
+  `fenetre.rs` (NVDEC décode dans CUDA), « au mot près » de `messages.ts`, ce fichier et `CLAUDE.md`.
+- **I2** — le branchement du filtre d'horodatage de `DecodeurMf::decoder` est prouvé sur le vrai
+  décodeur, ouvert sans faible latence par un constructeur réservé aux tests (fonctionnalité
+  `essai-sans-faible-latence`, activée par la seule dépendance de développement de `sky-decode` sur
+  elle-même) ; la production garde `MF_LOW_LATENCY = 1`.
+- **m1** — l'ordre « piste du répondant avant ouverture du canal », dont dépend `hote.rs`, est
+  verrouillé par un test de `link.rs`.
+- **m3** — fiche d'essai : le script se lance dans PowerShell (Git Bash mange les antislashs).
+- **m4** — `sky-probe view` sans `--out` nomme le fichier d'après le format négocié (`recu.h264`
+  ou `recu.h265`).
 
 ### Mineurs reportés par les revues (recopiés du journal ; tous ouverts sauf mention)
 **T1 — négociation** : `FormatVideo::depuis_parametres`, branches HEVC 4:4:4 / 4:2:0 sans test qui
 rougisse en les permutant (ajouter une assertion `format` au test d'accord 4:4:4 et un cas 4:2:0) ;
 `des_listes_disjointes_...` garde deux assertions qui passent sans négociation ; coquille « pas
 d'`writer` » (`link.rs:999`) ; `ecrire_image` revérifie le type de charge dans `payload_params` et
-`CodecNonNegocie` n'a aucun test ; la doc de `BORNE_BLOC_REEL` garde « catalogue réduit à HEVC seul ».
+`CodecNonNegocie` n'a aucun test. *Soldé par la vague finale : la doc de `BORNE_BLOC_REEL` gardait
+« catalogue réduit à HEVC seul ».*
 **T2 — NVENC** : `pick_best` met `Av1_420` avant `Hevc420` (sans effet depuis T3 : l'hôte passe par
 `formats_encodables` ; seul `sky-probe hw` l'affiche) ; `une_carte_hevc_annonce_aussi_le_hevc_420`
 commente « avant Hevc444 » sans prouver l'ordre ; aucune image HEVC 4:2:0 encodée par un test de
@@ -106,23 +121,23 @@ n'a pas de test d'intégration (la fonction qu'elle lit est prouvée, 3 lignes) 
 répond « format inconnu « auto » » (casse) ; `cmd_host` imprime ÉCHEC puis sort en code 0 pour
 `AucunFormatCommun` ; le test de liste vide d'hôte garde un nom de coffre hérité ;
 `une_carte_h264_seule_partage_desormais` sans neutralisation consignée.
-**T4 — `DecodeurMf`, ouverture** : `sonde.rs:15-17` « ne panique pas sans Media Foundation » est
-faux (`mfplat.dll` importée statiquement : sans elle le processus ne démarre pas, spec §9) ;
-`appareil.rs:92-96` commentaire multi-fil non sourcé ; `fenetre.rs:280-282` « c'est sur lui que
-décode NVDEC » inexact (NVDEC décode dans CUDA puis copie) ; `appareil.rs:151`
+**T4 — `DecodeurMf`, ouverture** : `appareil.rs:92-96` commentaire multi-fil non sourcé ;
+`appareil.rs:151`
 `CudaContext::device_count()` panique sans `nvcuda.dll` (branche « repli » morte, préexistant
 `sky-rendu/src/lib.rs:37`) ; `choisir_sortie` confond toute erreur de `GetOutputAvailableType` avec
 « aucun NV12 » ; `mf_sait_decoder` perd la cause (extension HEVC absente ?) — rien pour dire
 « installez l'extension HEVC » ; le test `releve_du_decodeur_choisi` n'affirme rien de plus à chaque
 passage ; `VIDEO_SUPPORT` pourrait faire échouer la création du périphérique sur un adaptateur sans
-API vidéo (VM, pilote de base) — non vérifié. *Soldés par T5 : taille d'affichage nulle,
+API vidéo (VM, pilote de base) — non vérifié. *Soldés par la vague finale : `sonde.rs` « ne panique
+pas sans Media Foundation » (faux, `mfplat.dll` importée statiquement) ; `fenetre.rs` « c'est sur
+lui que décode NVDEC » (NVDEC décode dans CUDA puis copie).* *Soldés par T5 : taille d'affichage nulle,
 `END_STREAMING` sans `BEGIN_STREAMING`, `allow(dead_code)`. Soldé par T6 : lien `Fenetre` ↔
 périphérique partagé.*
 **T5 — `decoder`** : unité d'en-têtes seuls (`Ok(None)`), sorties multiples et `MF_E_NOTACCEPTING`
-non exercés par les tests ; `copier_luminance` échoue sur taille impaire (réservé aux tests) ; le
-câblage de `image_de_l_unite` dans `decoder` n'a aucun test (tests purs sur la fonction seule) ;
+non exercés par les tests ; `copier_luminance` échoue sur taille impaire (réservé aux tests) ;
 après l'erreur « image d'une autre unité », le décodeur reste ouvert (l'appelant termine par ses
-compteurs d'échecs).
+compteurs d'échecs). *Soldé par la vague finale (I2) : le câblage de `image_de_l_unite` dans
+`decoder` n'avait aucun test.*
 **T6 — NV12** : passer de `Cuda444` à `Nv12` garde le pont CUDA vivant (et inversement) — sans effet
 tant qu'une session n'emprunte qu'un chemin ; cas « texture gardée plus petite que l'image » non
 couvert (images unies seulement) ; le commentaire de `televerser` cite « (ronde de correction 1) »,
@@ -130,11 +145,10 @@ une référence d'historique dans le code.
 **T7 — spectateur** : duplication des deux appels `boucle(Visionnage::nouveau(..))` imposée par le
 typage générique ; `Evenement::Format` est émis avant la création du décodeur.
 **T8 — interface** : deux espaces perdus dans le JSX de `PanneauPartage.tsx`
-(`libelle="Depuis"valeur=`, `libelle="Débit reçu"valeur=`) ; les commentaires « les quatre textes du
-décodage, AU MOT PRÈS » de `messages.ts` / `messages.test.ts` sont devenus faux après la réécriture de
-`sans_decodage_444` ; la doc de `QuatreQuatreQuatreNonPris` ne couvre que la levée en cours de flux,
+(`libelle="Depuis"valeur=`, `libelle="Débit reçu"valeur=`) ; la doc de `QuatreQuatreQuatreNonPris` ne couvre que la levée en cours de flux,
 pas celle de `depuis_brut` (`capacites.rs:88`) ; la recopie de `format` dans `(Diffuse, Connecte)`
-n'a pas de test (inerte dans l'ordre réel).
+n'a pas de test (inerte dans l'ordre réel). *Soldé par la vague finale : les commentaires « les
+quatre textes du décodage » de `messages.ts` / `messages.test.ts` disaient encore « au mot près ».*
 
 ---
 
@@ -479,7 +493,10 @@ faudrait plusieurs mégaoctets). Le test de transport de la tâche 6, lui, versi
 ne se mesure pas en boucle locale. Il exige désormais une **NVIDIA Turing ou plus récente des deux
 côtés** — sans NVDEC, une machine ne peut plus regarder (le mode d'emploi du C2,
 `spike/docs/essai-reel-c2.md`, dit encore « n'importe laquelle » pour le spectateur : vrai au C2,
-faux pour le jalon 2).
+faux pour le jalon 2). *Dépassé le 03/10/2026 par le sous-jalon 1 « toutes cartes » : l'hôte doit
+avoir une NVIDIA dont NVENC encode au moins un des trois formats (le 4:4:4 n'est plus exigé), et le
+spectateur peut être toute carte qui décode HEVC ou H.264 en matériel — la phrase sur Turing ne
+vaut plus que pour un essai en HEVC 4:4:4 des deux côtés.*
 
 ### Ce qui est fait — tâches 1 à 10, chacune relue et corrigée jusqu'à revue propre
 
@@ -570,12 +587,16 @@ Chaque correction a son test et sa neutralisation, appliquée seule.
 ### Limites connues, écrites d'avance
 - **Un seul spectateur, un écran, pas de son** ; déchirement possible (présentation sans attente de
   synchronisation verticale, D7).
-- **Sans NVIDIA : ni diffusion ni réception.** *(Réception : devenu faux le 03/10/2026, voir la
-  section « Jalon toutes cartes, sous-jalon 1 » ; la diffusion reste NVIDIA-seule, mais n'exige plus le 4:4:4 : un format encodable suffit.)* Sans encodeur HEVC 4:4:4 : pas de diffusion — le
-  partage est refusé avant tout réseau, au lieu d'envoyer un flux que personne ne peut lire (revue
-  finale, I2). Sans décodeur HEVC 4:4:4 : pas de réception. *La ligne disait « NVIDIA antérieure à
-  Turing : diffusion seulement », en contradiction avec l'écart 6 (GTX 10xx : pas de HEVC 4:4:4) ;
-  quelles générations passent l'un ou l'autre n'est pas tranché, aucune n'ayant été essayée.*
+- **Diffusion : NVIDIA seulement, et un format encodable par NVENC suffit.** Une machine sans NVIDIA
+  ne diffuse pas (aucun repli logiciel) ; une NVIDIA dont NVENC n'encode aucun des trois formats
+  (HEVC 4:4:4, HEVC 4:2:0, H.264) est refusée avant tout réseau. *Au jalon 2, c'était « sans encodeur
+  HEVC 4:4:4 : pas de diffusion » (revue finale, I2) ; le sous-jalon « toutes cartes » l'a élargi.*
+- **Réception : sur toute carte qui décode en matériel** — HEVC 4:4:4 par NVDEC, HEVC 4:2:0 ou H.264
+  par Media Foundation (voir la section « Jalon toutes cartes, sous-jalon 1 »). Une machine sans aucun
+  décodeur matériel est refusée avant tout réseau. *Au jalon 2, la ligne disait « sans NVIDIA : ni
+  diffusion ni réception » et « sans décodeur HEVC 4:4:4 : pas de réception » ; devenu faux le
+  03/10/2026.* Quelles générations NVIDIA passent l'encodage ou le décodage 4:4:4 n'est pas tranché,
+  aucune n'ayant été essayée (l'écart 6 dit que les GTX 10xx n'ont pas de HEVC 4:4:4).
 - **Un spectateur sans image clé verrait une image plausible et peut-être fausse**, sans erreur du
   décodeur (rafraîchissement intra progressif) — l'absence d'erreur est mesurée, la fausseté déduite.
   Le garde-fou est applicatif, dans `spectateur.rs`.
@@ -594,9 +615,11 @@ Chaque correction a son test et sa neutralisation, appliquée seule.
 - **La branche `jalon-2-premier-pixel` n'est PAS fusionnée.** Elle est poussée et propre. La
   fusion était prévue après l'essai local, qui est **mis de côté** sur décision du propriétaire.
 - **Le portable du propriétaire n'a pas de carte NVIDIA**, seulement la puce graphique intégrée
-  de son processeur AMD. Sans repli logiciel, il **ne peut ni partager ni recevoir** depuis le
-  jalon 2 : il refuserait à l'ouverture avec « Cette machine n'a pas de carte graphique
-  NVIDIA ». Au C2, il recevait le flux sans le décoder, ce qui suffisait.
+  de son processeur AMD. Sans repli logiciel, il **ne pouvait ni partager ni recevoir** à la fin
+  du jalon 2 : il refusait à l'ouverture avec « Cette machine n'a pas de carte graphique
+  NVIDIA ». Au C2, il recevait le flux sans le décoder, ce qui suffisait. *(État au 03/10/2026,
+  avant le sous-jalon 1 « toutes cartes » : depuis, il reçoit par Media Foundation — c'est
+  l'objet de l'essai B ; il ne partage toujours pas.)*
 - **Conséquence** : l'essai à deux machines sur deux réseaux, seul capable de clore l'écart 7,
   ne peut plus se faire avec ce portable tel quel. Deux voies : un **mode « mesure seule »** du
   spectateur, qui reçoit et mesure sans décoder (l'écart 7 est une question de réseau, pas de

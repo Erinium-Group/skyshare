@@ -13,8 +13,13 @@ pub struct Decodables {
 }
 
 /// Interroge les deux moteurs. Ne panique pas sans NVIDIA (`sonder_materiel`
-/// vérifie `nvcuda.dll` avant `cuInit`) ni sans Media Foundation (tout échec
-/// rend `false`).
+/// vérifie `nvcuda.dll` avant `cuInit`), et tout échec d'un appel Media
+/// Foundation rend `false`. MAIS sans Media Foundation du tout, cette fonction
+/// n'est jamais atteinte : `mfplat.dll` est importée STATIQUEMENT (le crate
+/// `windows` 0.62 lie en `raw-dylib` ; l'import figure dans `dumpbin /dependents`
+/// de l'exécutable, que `spike/scripts/version-portable.ps1` vérifie), donc sur une édition « N » de Windows sans Media Feature Pack le processus ne
+/// démarre pas, même pour partager (spec du 02/10/2026, §9 ; non vérifié, aucune
+/// machine N). Le remède, un chargement différé, est reporté.
 pub fn sonder_decodage(largeur: u32, hauteur: u32) -> Decodables {
     let hevc_444 = matches!(
         crate::sonder_materiel(),

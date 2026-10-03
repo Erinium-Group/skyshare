@@ -50,12 +50,15 @@ describe("les quatre échecs de la spec §4", () => {
 });
 
 /**
- * Les quatre textes du décodage, spec du jalon 2 §7, au mot près — un test par
- * cause, pour la même raison qu'au-dessus. Neutralisation de chacun : changer
- * un mot de son texte, ou faire rendre à sa branche le texte d'une autre ; il
- * rougit, et lui seul.
+ * Les quatre causes du décodage de la spec du jalon 2 §7 — un test par cause,
+ * pour la même raison qu'au-dessus. Deux textes sont encore ceux de cette spec,
+ * mot pour mot (`decodeur_refuse`, `image_irreconstituable`) ; les deux autres
+ * (`sans_carte_nvidia`, `sans_decodage_444`) ont été RÉÉCRITS par le jalon
+ * « toutes cartes » (spec du 02/10/2026, §6) et sont fixés ici dans leur
+ * nouvelle forme. Neutralisation de chacun : changer un mot de son texte, ou
+ * faire rendre à sa branche le texte d'une autre ; il rougit, et lui seul.
  */
-describe("les quatre messages du décodage, spec du jalon 2 §7, au mot près", () => {
+describe("les quatre messages du décodage (deux de la spec du jalon 2 §7, deux réécrits)", () => {
   it("décodeur NVIDIA non chargé : ne dit plus que la machine ne peut pas recevoir", () => {
     // Texte réécrit par le jalon « toutes cartes » (à valider par le
     // propriétaire) : la réception ne dépend plus de NVIDIA, la cause ne

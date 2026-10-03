@@ -44,13 +44,15 @@ const ECART_MAX_TOLERE: u8 = 1;
 
 /// Ouvre le décodeur, ou fait échouer le test en disant que le matériel manque.
 ///
-/// Ce test est celui du **receveur**, et un receveur sans décodeur NVIDIA
-/// HEVC 4:4:4 n'existe pas : le projet n'a aucun repli logiciel, ni à
-/// l'encodage ni au décodage. (Ce commentaire disait « une machine sans carte
-/// NVIDIA ne peut qu'émettre », phrase corrigée dans `CLAUDE.md` le 30/09/2026 :
-/// sans carte NVIDIA, ni émission ni réception.) Se taire en vert sans décodeur serait « une
-/// preuve qui passerait aussi bien dans le cas négatif » — la faute que ce dépôt
-/// documente nommément.
+/// Ce test est celui du **receveur 4:4:4**, et le HEVC 4:4:4 ne se décode que
+/// par NVDEC : le projet n'a aucun repli logiciel, ni à l'encodage ni au
+/// décodage. Une machine sans décodeur NVIDIA HEVC 4:4:4 peut recevoir en 4:2:0
+/// ou H.264 par Media Foundation depuis le jalon « toutes cartes » — mais pas ce
+/// flux-ci, qui est 4:4:4. (Ce commentaire a dit « une machine sans carte NVIDIA
+/// ne peut qu'émettre », puis, le 30/09/2026, « ni émission ni réception » : les
+/// deux sont dépassés.) Se taire en vert sans décodeur serait « une preuve qui
+/// passerait aussi bien dans le cas négatif » — la faute que ce dépôt documente
+/// nommément.
 fn decodeur_ou_echouer() -> Decodeur {
     match Decodeur::nouveau(2560, 1440) {
         Ok(decodeur) => decodeur,

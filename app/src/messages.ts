@@ -4,11 +4,13 @@ import type { FinVue } from "./types";
  * Chaque fin de partage, EN CLAIR (spec §4).
  *
  * Les quatre premiers textes viennent de la spec §4 du jalon 1, et les quatre
- * du décodage de la spec du jalon 2 (§7), au mot près : ce sont des promesses
- * faites à l'utilisateur, pas des étiquettes d'interface. Ils ont chacun leur
- * test dans `messages.test.ts`. DEUX ONT ÉTÉ CORRIGÉS par la vague finale du
- * jalon 2, parce qu'ils désignaient une cause fausse : `envoi_en_retard`
- * (ex-`trop_lente`) et `sans_decodage_444` — chacun le dit sur son `case`.
+ * causes du décodage de la spec du jalon 2 (§7) : ce sont des promesses faites
+ * à l'utilisateur, pas des étiquettes d'interface. Ils ont chacun leur test dans
+ * `messages.test.ts`. Ils ne sont PLUS tous mot pour mot ceux de ces specs :
+ * `envoi_en_retard` (ex-`trop_lente`) a été corrigé par la vague finale du
+ * jalon 2 parce qu'il désignait une cause fausse, et deux des quatre textes du
+ * décodage ont été réécrits par le jalon « toutes cartes » (voir plus bas) —
+ * chacun le dit sur son `case`.
  *
  * TROIS TEXTES N'EN VIENNENT PAS, tous ajoutés par la tâche 10 du jalon 2 et
  * signalés comme tels sur leur `case` : `partage_arrete`,
@@ -60,7 +62,9 @@ export function messageDeFin(fin: FinVue): string {
       // distinguer de « Partage arrêté. » : ce n'est pas l'utilisateur qui l'a
       // arrêté, c'est son ami.
       return "Ton ami a arrêté son partage.";
-    // --- Spec du jalon 2, §7 : les quatre textes du décodage, AU MOT PRÈS. ---
+    // --- Spec du jalon 2, §7 : les quatre causes du décodage. ---------------
+    // Deux textes y sont encore mot pour mot (`decodeur_refuse`,
+    // `image_irreconstituable`) ; les deux premiers ci-dessous ont été réécrits.
     // L'interface se branche sur la CAUSE, jamais sur un texte d'erreur : le
     // détail de « pas de carte NVIDIA » vient d'une bibliothèque que Windows
     // peut traduire, et ne traverse jamais la frontière.

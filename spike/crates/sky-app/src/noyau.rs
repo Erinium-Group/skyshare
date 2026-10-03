@@ -61,10 +61,12 @@ pub struct Branchements {
 pub const MESSAGE_PENDANT_PARTAGE: &str =
     "Impossible pendant un partage ou une attente : arrête-le d'abord.";
 pub const MESSAGE_SESSION_EXPIREE: &str = "Session expirée — reconnecte-toi";
-/// Spec §4 : pas de repli logiciel x264 (question ouverte du projet). Une
-/// machine sans carte NVIDIA ne peut pas non plus REGARDER depuis le jalon 2 —
-/// ni NVENC ni NVDEC (spec du jalon 2, §7) ; elle l'apprend au clic sur
-/// « Regarder », par `FinVue::SansCarteNvidia`.
+/// Spec §4 : pas de repli logiciel x264 (question ouverte du projet) — sans
+/// carte NVIDIA, pas de NVENC, donc pas de partage. REGARDER reste possible
+/// depuis le jalon « toutes cartes » : la réception en HEVC 4:2:0 ou H.264 passe
+/// par Media Foundation, en matériel, sur n'importe quelle carte qui les décode.
+/// Une machine qui ne décode rien en matériel l'apprend au clic sur
+/// « Regarder », avant tout réseau, par `MESSAGE_AUCUN_DECODEUR`.
 pub const MESSAGE_SANS_NVIDIA: &str =
     "Partage impossible : aucune carte NVIDIA utilisable sur cette machine.";
 /// Une carte NVIDIA est là, mais son encodeur ne sait produire aucun format

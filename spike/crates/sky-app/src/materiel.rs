@@ -21,11 +21,13 @@ pub fn nom_d_appareil(nom_machine: Option<&str>) -> String {
 /// sans carte NVIDIA. Le choix du format transmis n'est plus fait ici : il
 /// l'est par la négociation avec le spectateur (`sky_partage::formats_encodables`).
 ///
-/// SANS CARTE NVIDIA, CETTE MACHINE NE PEUT NI PARTAGER NI REGARDER : il n'y a
-/// ni NVENC ni NVDEC, et aucun repli logiciel n'existe dans le projet (spec du
-/// jalon 2, §7). L'ancienne phrase « une telle machine peut encore regarder »
-/// datait d'avant le décodage ; un spectateur sans carte l'apprend désormais à
-/// l'ouverture du décodeur, par `FinVue::SansCarteNvidia`.
+/// SANS CARTE NVIDIA, CETTE MACHINE NE PEUT PAS PARTAGER : pas de NVENC, et
+/// aucun repli logiciel n'existe dans le projet. Elle peut en revanche REGARDER
+/// depuis le jalon « toutes cartes » (spec du 02/10/2026) : la réception en
+/// HEVC 4:2:0 ou H.264 passe par Media Foundation, en matériel. La sonde du
+/// décodage est faite ailleurs (`sky_decode::sonder_decodage`), pas ici. (Ce
+/// commentaire a dit tour à tour « peut encore regarder » avant le jalon 2, puis
+/// « ne peut ni partager ni regarder » au jalon 2 ; c'est la troisième version.)
 ///
 /// LE `catch_unwind` N'EST PLUS LE REMPART CONTRE L'ABSENCE DE PILOTE. Depuis
 /// la tâche 7 du jalon 2, `probe_hardware` vérifie `nvcuda.dll` AVANT d'appeler

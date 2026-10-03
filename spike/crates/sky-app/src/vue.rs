@@ -82,11 +82,19 @@ pub enum FinVue {
     // L'interface se branche sur ces ÉTIQUETTES, jamais sur un texte d'erreur :
     // celui d'`AucuneCarteNvidia` vient de `libloading` et peut être LOCALISÉ
     // selon la langue de Windows.
-    /// Aucune carte NVIDIA : ni NVENC ni NVDEC, donc ni diffusion ni réception.
+    /// NVDEC n'a pas pu être chargé à l'ouverture d'un flux négocié en HEVC
+    /// 4:4:4, alors que la sonde d'avant l'offre l'avait trouvé. Depuis le jalon
+    /// « toutes cartes », une machine sans NVIDIA reçoit par Media Foundation
+    /// (HEVC 4:2:0 ou H.264) et n'atteint jamais cette cause : sans aucun
+    /// décodeur matériel, elle est refusée avant tout réseau
+    /// (`ErreurDecodeur::AucunDecodeur`, `MESSAGE_AUCUN_DECODEUR`).
     SansCarteNvidia,
-    /// Carte NVIDIA dont le décodeur ne prend pas le HEVC 4:4:4 : elle ne peut
-    /// pas recevoir. Rien n'est dit de sa capacité à partager, qui exige
-    /// l'ENCODAGE HEVC 4:4:4 et se décide ailleurs (`Noyau::partager`).
+    /// NVDEC refuse le HEVC 4:4:4 à l'ouverture d'un flux négocié dans ce
+    /// format, alors que la sonde l'avait accepté : l'image reçue n'est pas au
+    /// format annoncé. Ne dit PAS que la machine ne peut pas recevoir — elle
+    /// peut recevoir en 4:2:0 ou H.264 si elle les décode. Rien n'est dit non
+    /// plus de sa capacité à partager, qui exige un format encodable par NVENC
+    /// (pas forcément le 4:4:4) et se décide ailleurs (`Noyau::partager`).
     #[serde(rename = "sans_decodage_444")]
     SansDecodage444,
     /// Session de décodage refusée, ou contexte CUDA impossible à rendre

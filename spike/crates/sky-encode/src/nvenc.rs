@@ -217,10 +217,13 @@ impl NvencEncoder {
                 // images. Il ne rend PAS le flux rejoignable en cours de route.
                 // Voir le rapport de la Tâche 3 : le jalon 2 passe par
                 // `nvEncGetSequenceParams` pour un spectateur qui arrive tard.
-                // Mais il REDEVIENT ACTIF dès qu'un IDR est forcé : en HEVC, il
-                // produit alors les en-têtes à lui seul, comme
-                // `NV_ENC_PIC_FLAG_OUTPUT_SPSPPS` — voir `encoder_mappee`, où la
-                // redondance est expliquée. (Mesuré en HEVC ; en H.264, non.)
+                // Mais il REDEVIENT ACTIF dès qu'un IDR est forcé : il produit
+                // alors les en-têtes à lui seul. Mesuré en H.264 aussi (sous-jalon
+                // « toutes cartes », tâche 2) : sans `NV_ENC_PIC_FLAG_OUTPUT_SPSPPS`,
+                // l'IDR forcé porte encore SPS et PPS, et
+                // `le_h264_force_une_image_cle_avec_ses_entetes` reste vert ; il ne
+                // rougit qu'une fois ce drapeau-ci retiré à son tour. Voir
+                // `encoder_mappee`, où la redondance est expliquée.
                 h264.set_repeatSPSPPS(1);
                 appliquer_vui(&mut h264.h264VUIParameters);
             } else if codec_guid == NV_ENC_CODEC_HEVC_GUID {
@@ -452,11 +455,16 @@ impl NvencEncoder {
         let encode_picture = nvenc_fn!(self.api, nvEncEncodePicture);
         // Une image clé demandée devient un IDR accompagné de ses en-têtes :
         // un point de reprise n'en est un que si le décodeur peut l'ouvrir.
-        // Mesuré : `repeatSPSPPS` (posé à la configuration) et `OUTPUT_SPSPPS`
-        // produisent chacun seuls ces en-têtes sur un IDR forcé ; retirer l'un des
-        // deux ne fait rougir aucun test, retirer les deux fait rougir celui de
-        // `forcer_une_image_cle`. Le drapeau est gardé : il rend le point de
-        // reprise indépendant de la configuration.
+        // Ce qui est mesuré, codec par codec, sur un IDR forcé :
+        // - HEVC (jalon 2) : `repeatSPSPPS` (posé à la configuration) et
+        //   `OUTPUT_SPSPPS` produisent chacun seuls ces en-têtes ; retirer l'un des
+        //   deux ne fait rougir aucun test, retirer les deux fait rougir
+        //   `forcer_une_image_cle_produit_un_idr_a_l_image_suivante`.
+        // - H.264 (sous-jalon « toutes cartes », tâche 2) : `repeatSPSPPS` seul
+        //   les produit (drapeau retiré, `le_h264_force_une_image_cle_avec_ses_entetes`
+        //   reste vert). `OUTPUT_SPSPPS` seul, `repeatSPSPPS` retiré : NON mesuré.
+        // Le drapeau est gardé : il rend le point de reprise indépendant de la
+        // configuration (en HEVC du moins ; en H.264, c'est supposé).
         let drapeaux = if std::mem::take(&mut self.cle_demandee) {
             NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_FORCEIDR as u32
                 | NV_ENC_PIC_FLAGS::NV_ENC_PIC_FLAG_OUTPUT_SPSPPS as u32

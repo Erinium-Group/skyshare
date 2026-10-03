@@ -54,7 +54,9 @@ Le workspace `spike/` compte désormais huit crates : `sky-capture` (Windows Gra
 Capture), `sky-encode` (NVENC), `sky-net` (str0m 0.23), `sky-crypto` (boîtes scellées),
 `sky-compte` (compte, annuaire, boîte aux lettres), `sky-partage` (négociation, événements),
 `sky-app` (cœur Tauri), `sky-probe` (CLI clap) — plus l'interface dans `app/`. La branche du
-jalon 2 en ajoute deux : `sky-decode` (NVDEC) et `sky-rendu` (fenêtre Direct3D 11).
+jalon 2 en ajoute deux : `sky-decode` (NVDEC pour le HEVC 4:4:4 et, depuis le sous-jalon
+« toutes cartes », Media Foundation pour le HEVC 4:2:0 et le H.264) et `sky-rendu` (fenêtre
+Direct3D 11).
 
 **Jalon 2 — le premier pixel : IMPLÉMENTÉ, essais dus** (branche `jalon-2-premier-pixel`,
 non fusionnée). Tâches 1 à 10 closes, chacune relue jusqu'à revue
@@ -114,15 +116,16 @@ Le chemin NV12 n'a été éprouvé que sur **RTX 4060** ; sur AMD, seule la sond
 - **`mfplat.dll` est importée statiquement** (`dumpbin /dependents`) : sur Windows « N » sans le
   Media Feature Pack, l'application ne démarrerait plus du tout (spec du sous-jalon 1, §9 ; non
   vérifié, aucune machine N). Aucune DLL NVIDIA n'est importée : elles se chargent dynamiquement.
-- **Version portable** : `powershell -File spike\scripts\version-portable.ps1` (lance `tauri build`,
-  sans fenêtre). Il écrit `dist\` (ignoré par git) ; `Cargo.toml` de `sky-app` apparaît modifié
+- **Version portable** : `powershell -File spike\scripts\version-portable.ps1`, **depuis
+  PowerShell** (Git Bash mange les antislashs) ; il lance `tauri build`, sans fenêtre. Il écrit `dist\` (ignoré par git) ; `Cargo.toml` de `sky-app` apparaît modifié
   ensuite, comme après tout `tauri build`.
 - Le régulateur de l'hôte n'a **plus de mesure de RTT** (zéro en dur) depuis la piste média :
   sur le chemin nominal, le débit monte au plafond et y reste (détail dans `tasks/todo.md`).
 
 **Essai réel à deux machines : toujours dû** pour le partage et la réception — l'hôte doit être
-une NVIDIA Turing ou plus récente ; le spectateur peut désormais être n'importe quelle carte qui
-décode HEVC ou H.264 en matériel (jalon toutes cartes, sous-jalon 1 : fiche
+une NVIDIA dont NVENC encode au moins un des trois formats (HEVC 4:4:4, HEVC 4:2:0, H.264 ; le
+4:4:4 n'est pas exigé, spec du sous-jalon 1, §4) ; le spectateur peut désormais être n'importe
+quelle carte qui décode HEVC ou H.264 en matériel (jalon toutes cartes, sous-jalon 1 : fiche
 `spike/docs/essai-toutes-cartes.md`).
 Jalons 3 à 7 restent à faire (voir `tasks/todo.md`).
 

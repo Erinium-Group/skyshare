@@ -325,8 +325,10 @@ impl Fenetre {
             return Err(anyhow!("taille de fenêtre nulle : {largeur}×{hauteur}"));
         }
         // Le périphérique unique de SkyShare (adaptateur NVIDIA d'abord, API
-        // vidéo, protection multi-fil) : c'est sur lui que décodent NVDEC, par
-        // l'interopérabilité CUDA, et Media Foundation.
+        // vidéo, protection multi-fil). Media Foundation décode SUR lui (il lui
+        // est confié par `IMFDXGIDeviceManager`). NVDEC, non : il décode dans un
+        // contexte CUDA, et l'image est ensuite copiée de CUDA vers les textures
+        // de ce périphérique par l'interopérabilité (`interop.rs`).
         let (appareil, contexte) = sky_decode::creer_appareil_video()?;
         let boite = Box::into_raw(Box::new(RefCell::new(Boite::default())));
         let hwnd = match creer_hwnd(titre, largeur, hauteur, boite) {
