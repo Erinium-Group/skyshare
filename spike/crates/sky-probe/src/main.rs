@@ -96,8 +96,11 @@ enum Cmd {
         ami: String,
         #[arg(long, default_value_t = 30)]
         seconds: u64,
-        #[arg(long, default_value = "recu.h265")]
-        out: String,
+        /// Fichier du flux reçu. Par défaut `recu.h265` (HEVC) ou `recu.h264`
+        /// (H.264), selon le format NÉGOCIÉ — connu seulement après la
+        /// connexion, d'où l'absence de valeur fixe.
+        #[arg(long)]
+        out: Option<String>,
         /// `auto` (tout ce que cette machine décode) ou `hevc444`, `hevc420`,
         /// `h264`. Restreint ce que le spectateur offre ; `h264` ou `hevc420`
         /// éprouvent Media Foundation sur une machine NVIDIA.
@@ -214,7 +217,7 @@ fn main() -> anyhow::Result<()> {
             largeur_synth: width,
             hauteur_synth: height,
         }),
-        Cmd::View { ami, seconds, out, format } => cmd_view::run(&ami, seconds, &out, &format),
+        Cmd::View { ami, seconds, out, format } => cmd_view::run(&ami, seconds, out, &format),
         Cmd::Login => {
             let (config, coffre) = cmd_compte::config_et_coffre()?;
             cmd_compte::login(&config, &coffre)

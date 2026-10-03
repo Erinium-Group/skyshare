@@ -2,6 +2,7 @@
 //! tâche 5). Le flux reçu est écrit dans `sortie` dès le premier paquet —
 //! `sky-partage` le jetterait ; c'est ce fichier qui lui fournit le puits.
 
+use std::cell::RefCell;
 use std::fs::File;
 use std::time::{Duration, Instant};
 
@@ -14,10 +15,22 @@ use sky_partage::{
 use crate::cmd_compte::{avertissement_consommation, causes_d_un_depot_refuse, config_et_coffre};
 use crate::cmd_host::{afficher, afficher_diagnostic, erreur_partage, format_depuis_texte};
 
-pub fn run(ami_designe: &str, secondes: u64, sortie: &str, format: &str) -> anyhow::Result<()> {
+/// `sortie` : le `--out` donné, ou `None` — le nom est alors déduit du format
+/// négocié (`nom_par_defaut`), dès son annonce. Avant le sous-jalon « toutes
+/// cartes », le défaut fixe `recu.h265` gardait cette extension même pour un
+/// flux H.264 (revue finale, m4).
+pub fn run(
+    ami_designe: &str,
+    secondes: u64,
+    sortie: Option<String>,
+    format: &str,
+) -> anyhow::Result<()> {
     // Validé avant tout : une faute de frappe coûte une seconde, pas une
     // négociation.
     let formats_imposes = formats_imposes(format)?;
+    // Le nom du fichier, fixé au plus tard à `Evenement::Format`, qui précède
+    // TOUJOURS l'ouverture du puits (`sky-partage`, `recevoir`).
+    let sortie = RefCell::new(sortie);
     // Pris AVANT le coffre, comme au C2 : c'est d'ici que se mesurent
     // « Réponse reçue après » et « depuis le lancement de view ».
     let lancement = Instant::now();
@@ -35,12 +48,35 @@ pub fn run(ami_designe: &str, secondes: u64, sortie: &str, format: &str) -> anyh
             lancement,
             formats_imposes,
         },
-        || Ok(Some(Box::new(File::create(sortie)?) as Puits)),
+        || {
+            let nom = sortie.borrow().clone().ok_or_else(|| {
+                anyhow::anyhow!("le fichier du flux reçu s'ouvre avant l'annonce du format négocié")
+            })?;
+            Ok(Some(Box::new(File::create(nom)?) as Puits))
+        },
         &arret,
-        &mut |evenement| afficher(&lignes_spectateur(&evenement, sortie)),
+        &mut |evenement| {
+            let nom = match &evenement {
+                Evenement::Format(f) => {
+                    sortie.borrow_mut().get_or_insert_with(|| nom_par_defaut(*f).to_string()).clone()
+                }
+                _ => String::new(),
+            };
+            afficher(&lignes_spectateur(&evenement, &nom))
+        },
     )
     .map_err(erreur_partage)?;
-    afficher_fin(fin, sortie)
+    let nom = sortie.into_inner();
+    afficher_fin(fin, nom.as_deref().unwrap_or("aucun (format jamais négocié)"))
+}
+
+/// Le fichier par défaut d'un flux de ce format : l'extension dit le codec,
+/// comme l'attendent `ffprobe` et `ffplay`.
+fn nom_par_defaut(format: FormatVideo) -> &'static str {
+    match format {
+        FormatVideo::Hevc444 | FormatVideo::Hevc420 => "recu.h265",
+        FormatVideo::H264 => "recu.h264",
+    }
 }
 
 /// `auto` : rien d'imposé. Sinon le seul format nommé.
@@ -85,14 +121,11 @@ fn lignes_spectateur(evenement: &Evenement, sortie: &str) -> Vec<String> {
             apres.as_secs_f32()
         )],
         Evenement::Negociation => vec!["Négociation en cours...".to_string()],
-        Evenement::Connecte { en, depuis_le_lancement } => vec![
-            format!(
-                "CONNECTÉ en {:.1} s ({:.1} s depuis le lancement de view)",
-                en.as_secs_f32(),
-                depuis_le_lancement.unwrap_or_default().as_secs_f32()
-            ),
-            format!("Écriture du flux reçu dans {sortie}, dès le premier paquet.\n"),
-        ],
+        Evenement::Connecte { en, depuis_le_lancement } => vec![format!(
+            "CONNECTÉ en {:.1} s ({:.1} s depuis le lancement de view)",
+            en.as_secs_f32(),
+            depuis_le_lancement.unwrap_or_default().as_secs_f32()
+        )],
         Evenement::Mesures(Mesures::Reception(m)) => vec![format!(
             // « reçues » : le compte inclut les images écartées faute d'image
             // clé, ce n'est pas une cadence d'affichage (mineur 49).
@@ -103,7 +136,12 @@ fn lignes_spectateur(evenement: &Evenement, sortie: &str) -> Vec<String> {
             m.latence_decodage_ms,
             m.images_abandonnees
         )],
-        Evenement::Format(f) => vec![format!("format négocié : {}", f.libelle())],
+        // La ligne d'écriture suit le format, et non plus la connexion comme au
+        // C2 : sans `--out`, c'est le format qui nomme le fichier (m4).
+        Evenement::Format(f) => vec![
+            format!("format négocié : {}", f.libelle()),
+            format!("Écriture du flux reçu dans {sortie}, dès le premier paquet.\n"),
+        ],
         // Événements de l'hôte : `regarder` ne les émet jamais.
         Evenement::Pret
         | Evenement::Disponible { .. }
@@ -193,10 +231,13 @@ mod tests {
     }
 
     #[test]
-    fn le_format_negocie_s_affiche_comme_chez_l_hote() {
+    fn le_format_negocie_s_affiche_comme_chez_l_hote_puis_le_fichier() {
         assert_eq!(
             lignes_spectateur(&Evenement::Format(FormatVideo::Hevc420), "recu.h265"),
-            vec![format!("format négocié : {}", FormatVideo::Hevc420.libelle())]
+            vec![
+                format!("format négocié : {}", FormatVideo::Hevc420.libelle()),
+                "Écriture du flux reçu dans recu.h265, dès le premier paquet.\n".to_string(),
+            ]
         );
     }
 
@@ -207,14 +248,21 @@ mod tests {
                 en: Duration::from_millis(600),
                 depuis_le_lancement: Some(Duration::from_millis(7_100)),
             },
-            "recu.h265",
+            "",
         );
         assert_eq!(
             lignes,
-            vec![
-                "CONNECTÉ en 0.6 s (7.1 s depuis le lancement de view)".to_string(),
-                "Écriture du flux reçu dans recu.h265, dès le premier paquet.\n".to_string(),
-            ]
+            vec!["CONNECTÉ en 0.6 s (7.1 s depuis le lancement de view)".to_string()]
         );
+    }
+
+    /// m4 : l'extension du fichier par défaut dit le codec négocié. Avant, un
+    /// flux H.264 s'écrivait dans `recu.h265`. Neutralisation : rendre
+    /// `recu.h265` pour tous les formats — ce test rougit.
+    #[test]
+    fn le_fichier_par_defaut_porte_l_extension_du_codec_negocie() {
+        assert_eq!(nom_par_defaut(FormatVideo::H264), "recu.h264");
+        assert_eq!(nom_par_defaut(FormatVideo::Hevc420), "recu.h265");
+        assert_eq!(nom_par_defaut(FormatVideo::Hevc444), "recu.h265");
     }
 }

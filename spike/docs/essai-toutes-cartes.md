@@ -31,7 +31,10 @@ Les commandes `cargo` et `sky-probe` se tapent dans Git Bash, **une par bloc, da
 
 ## 0. Préparer la version portable (machine NVIDIA)
 
-```
+**Dans PowerShell, pas dans Git Bash** : Git Bash mangerait les antislashs du chemin. (Depuis Git
+Bash, il faudrait écrire `powershell -File D:/skyshare/spike/scripts/version-portable.ps1`.)
+
+```powershell
 powershell -File D:\skyshare\spike\scripts\version-portable.ps1
 ```
 
@@ -45,9 +48,9 @@ Après la construction, `git status` montre `spike/crates/sky-app/Cargo.toml` mo
 normal (fins de ligne), `git diff --ignore-cr-at-eol` doit être vide. Ne pas le commiter.
 
 **Copie l'archive sur le portable** (clé USB, partage réseau — au choix), décompresse-la, et
-vérifie l'empreinte (PowerShell) :
+vérifie l'empreinte, **dans PowerShell** ouvert dans ce dossier :
 
-```
+```powershell
 Get-FileHash -Algorithm SHA256 .\SkyShare.exe
 ```
 
@@ -108,7 +111,8 @@ cd /d/skyshare/spike && ./target/release/sky-probe.exe view "NomDuSecondCompte" 
 
 **Attendu** : `format négocié : HEVC 4:2:0` des deux côtés, l'image affichée.
 
-Supprime ensuite `spike/recu.h265` (flux reçu, exclu par git).
+Supprime ensuite les flux reçus, tous deux exclus par git : `spike/recu.h264` (A1) et
+`spike/recu.h265` (A2). Sans `--out`, `view` nomme le fichier d'après le format négocié.
 
 ---
 
